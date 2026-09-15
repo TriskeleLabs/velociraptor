@@ -9,11 +9,8 @@ import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Button from 'react-bootstrap/Button';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import Dropdown from 'react-bootstrap/Dropdown';
-import "react-datepicker/dist/react-datepicker.css";
-
 import { EventTableWizard, ServerEventTableWizard } from './event-table.jsx';
 import Container from  'react-bootstrap/Container';
-import VeloReportViewer from "../artifacts/reporting.jsx";
 import Modal from 'react-bootstrap/Modal';
 import VeloAce, { SettingsButton } from '../core/ace.jsx';
 import VeloTimestamp from "../utils/time.jsx";
@@ -22,7 +19,10 @@ import EventNotebook, { get_notebook_id } from "./event-notebook.jsx";
 import DeleteNotebookDialog from '../notebooks/notebook-delete.jsx';
 import T from '../i8n/i8n.jsx';
 import ToolTip from '../widgets/tooltip.jsx';
-
+import VeloLog from "../widgets/logs.jsx";
+import { EditNotebook } from '../notebooks/new-notebook.jsx';
+import {setItem, schema} from '../core/storage.jsx';
+import Select from 'react-select';
 import { withRouter }  from "react-router-dom";
 
 import api from '../core/api-service.jsx';
@@ -30,7 +30,6 @@ import api from '../core/api-service.jsx';
 
 const mode_raw_data = "Raw Data";
 const mode_logs = "Logs";
-const mode_report = "Report";
 const mode_notebook = "Notebook";
 
 
@@ -234,8 +233,11 @@ class EventMonitoring extends React.Component {
         }, this.source.token).then(resp => {
             if (resp.cancel) return;
 
-            let router_artifact = this.props.match && this.props.match.params &&
-                this.props.match.params.artifact;
+            let router_artifact = this.props.match &&
+                this.props.match.params &&
+                // The artifact name is URL-encoded in the route (see
+                // setArtifact) and react-router v5 does not decode params.
+                decodeURIComponent(this.props.match.params.artifact);
             if (router_artifact) {
                 let logs = resp.data.logs || [];
                 let available = getLogArtifact(logs, router_artifact);
@@ -250,7 +252,16 @@ class EventMonitoring extends React.Component {
         this.setState({artifact: artifact});
         let client_id = (this.props.client &&
                          this.props.client.client_id) || "server";
-        this.props.history.push('/events/' + client_id + '/' + artifact.artifact);
+        if(client_id === "server") {
+            setItem(schema.CurrentServerEventArtifactKey, artifact.artifact);
+        } else {
+            setItem(schema.CurrentClientEventArtifactKey, artifact.artifact);
+        }
+
+        // Encode the artifact name so slash-named artifacts
+        // (e.g. Server.Monitor.Health/Prometheus) survive the route.
+        this.props.history.push(
+            '/events/' + client_id + '/' + encodeURIComponent(artifact.artifact));
     }
 
     setEventTable = (request) => {
@@ -273,11 +284,16 @@ class EventMonitoring extends React.Component {
                 <VeloTimestamp usec={cell}/>
             );
         };
+        let message_renderer = (cell, row, rowIndex) => {
+            return <VeloLog value={cell}/>;
+        };
 
         let renderers = {
             "_ts": timestamp_renderer,
             "Timestamp": timestamp_renderer,
             "client_time": timestamp_renderer,
+            "message": message_renderer,
+            "Message": message_renderer,
         };
 
         let column_types = this.state.artifact && this.state.artifact.definition &&
@@ -285,6 +301,21 @@ class EventMonitoring extends React.Component {
 
         let client_id = (this.props.client &&
                          this.props.client.client_id) || "server";
+
+        let options = _.map(this.state.available_artifacts, artifact=>{
+            let name = artifact.artifact;
+            return {value: name,
+                    artifact: artifact,
+                    label: name,
+                    isFixed: true,
+                    color: "#00B8D9"};
+        });
+
+        let selected_artifact = this.state.artifact &&
+            this.state.artifact.artifact;
+
+        let defaultValue = _.filter(options, x=>x.value === selected_artifact);
+
         return (
             <>
               {this.state.showEventMonitoringPopup &&
@@ -339,43 +370,59 @@ class EventMonitoring extends React.Component {
                     </>
                   }
                   { this.state.buttonsRenderer() }
-                  <ToolTip tooltip={this.state.artifact.artifact ||
-                                    T("Select artifact")}>
-                    <Dropdown variant="default">
-                      <Dropdown.Toggle variant="default">
-                        <FontAwesomeIcon icon="book"/>
-                        <span className="button-label">
-                          {this.state.artifact.artifact || T("Select artifact")}
-                        </span>
-                      </Dropdown.Toggle>
-                      <Dropdown.Menu>
-                        { _.map(this.state.available_artifacts, (x, idx) => {
-                            let active_artifact = this.state.artifact &&
-                                this.state.artifact.artifact;
-                            return <Dropdown.Item
-                            key={idx}
-                            title={x.artifact}
-                            active={x.artifact === active_artifact}
-                            onClick={() => {
-                                this.setArtifact(x);
-                            }}>
-     {x.artifact}
-   </Dropdown.Item>;
-                        })}
-                      </Dropdown.Menu>
-                    </Dropdown>
-                  </ToolTip>
+                  {options.length > 0 &&
+                   <ToolTip tooltip={this.state.artifact.artifact ||
+                                     T("Select artifact")}>
+                     <Select
+                       defaultValue={defaultValue}
+                       className="event-artifacts"
+                       classNamePrefix="velo"
+                       spellCheck="false"
+                       options={options}
+                       placeholder={T("Select artifact")}
+                       onChange={e=>{
+                           this.setArtifact(e.artifact);
+                       }}
+                     />
+                   </ToolTip>}
                 </ButtonGroup>
 
                 <ButtonGroup className="float-right">
                   { this.state.mode === mode_notebook &&
-                     <ToolTip tooltip={T("Delete Notebook")}>
-                    <Button onClick={() => this.setState({showDeleteNotebook: true})}
-                            variant="default">
-                      <FontAwesomeIcon icon="trash"/>
-              <span className="sr-only">{T("Delete Notebook")}</span>
-                    </Button>
-                    </ToolTip>
+                    <>
+                      <ToolTip tooltip={T("Edit Notebook")}>
+                        <Button onClick={()=>{
+                            this.setState({loading: true});
+                            api.get("v1/GetNotebooks", {
+                                include_uploads: true,
+                                notebook_id: get_notebook_id(
+                                    this.state.artifact.artifact, client_id),
+
+                            }, this.source.token).then(resp=>{
+                                let items = resp.data.items;
+                                if (_.isEmpty(items)) {
+                                    return;
+                                }
+
+                                this.setState({notebook: items[0],
+                                               loading: false,
+                                               showEditNotebookDialog: true});
+                            });
+                        }}
+                                variant="default">
+                          <FontAwesomeIcon icon="wrench"/>
+                          <span className="sr-only">{T("Edit Notebook")}</span>
+                        </Button>
+                      </ToolTip>
+
+                      <ToolTip tooltip={T("Delete Notebook")}>
+                        <Button onClick={() => this.setState({showDeleteNotebook: true})}
+                                variant="default">
+                          <FontAwesomeIcon icon="trash"/>
+                          <span className="sr-only">{T("Delete Notebook")}</span>
+                        </Button>
+                      </ToolTip>
+                    </>
                   }
                   <Dropdown title="mode" variant="default">
                     <Dropdown.Toggle variant="default">
@@ -394,12 +441,6 @@ class EventMonitoring extends React.Component {
                         active={this.state.mode === mode_logs}
                         onClick={() => this.setState({mode: mode_logs})}>
                         {T(mode_logs)}
-                      </Dropdown.Item>
-                      <Dropdown.Item
-                        title={T(mode_report)}
-                        active={this.state.mode === mode_report}
-                        onClick={() => this.setState({mode: mode_report})}>
-                        {T(mode_report)}
                       </Dropdown.Item>
                       <Dropdown.Item
                         title={T(mode_notebook)}
@@ -429,19 +470,6 @@ class EventMonitoring extends React.Component {
                   />
                 </Container> }
 
-            { this.state.mode === mode_report &&
-              <Container className="event-report-viewer">
-                { this.state.artifact.artifact ?
-                  <VeloReportViewer
-                    artifact={this.state.artifact.artifact}
-                    type="CLIENT_EVENT"
-                    client={this.props.client}
-                  /> :
-                  <div className="no-content">Please select an artifact to view above.</div>
-                }
-              </Container>
-            }
-
             { this.state.mode === mode_notebook &&
               <Container className="event-report-viewer">
                 { this.state.artifact.artifact ?
@@ -449,8 +477,11 @@ class EventMonitoring extends React.Component {
                     artifact={this.state.artifact.artifact}
                     client_id={client_id}
                     start_time={this.state.start_time}
+                    end_time={this.state.end_time}
                   /> :
-                  <div className="no-content">Please select an artifact to view above.</div>
+                  <div className="no-content">
+                    {T("Please select an artifact to view above.")}
+                  </div>
                 }
               </Container>
             }
@@ -461,6 +492,16 @@ class EventMonitoring extends React.Component {
                   onClose={e=>{
                       this.setState({showDeleteNotebook: false});
                   }}/>
+              }
+
+              { this.state.showEditNotebookDialog &&
+                <EditNotebook
+                  notebook={this.state.notebook}
+                  updateNotebooks={()=>{
+                      this.setState({showEditNotebookDialog: false});
+                  }}
+                  closeDialog={() => this.setState({showEditNotebookDialog: false})}
+                />
               }
             </>
         );

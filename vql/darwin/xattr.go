@@ -4,6 +4,7 @@ package darwin
 
 import (
 	"context"
+	"sort"
 
 	"golang.org/x/sys/unix"
 
@@ -28,19 +29,13 @@ func (self XAttrFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("xattr", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "xattr", args)()
 	defer vql_subsystem.CheckForPanic(scope, "xattr")
 
 	arg := &XAttrArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("xattr: Arg parser: %s", err)
-		return nil
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("xattr: %s", err)
 		return nil
 	}
 
@@ -132,7 +127,10 @@ func List(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return stripPrefix(nullTermToStrings(buf[:size])), nil
+	res := stripPrefix(nullTermToStrings(buf[:size]))
+	sort.Strings(res)
+
+	return res, nil
 }
 
 // Associates data as an extended attribute of path.

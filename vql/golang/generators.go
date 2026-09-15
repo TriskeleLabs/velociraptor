@@ -15,6 +15,7 @@ import (
 
 type Generator struct {
 	name                   string
+	description            string
 	disable_file_buffering bool
 }
 
@@ -40,6 +41,7 @@ func (self Generator) Eval(ctx context.Context, scope types.Scope) <-chan types.
 
 		output_chan, cancel, err := b.Watch(ctx, self.name, api.QueueOptions{
 			DisableFileBuffering: self.disable_file_buffering,
+			OwnerName:            self.description,
 		})
 		if err != nil {
 			scope.Log("generate: %v", err)
@@ -68,6 +70,7 @@ type GeneratorArgs struct {
 	Delay             int64             `vfilter:"optional,field=delay,doc=Wait before starting the query"`
 	WithFileBuffering bool              `vfilter:"optional,field=with_file_buffer,doc=Enable file buffering"`
 	FanOut            int64             `vfilter:"optional,field=fan_out,doc=Wait for this many listeners to connect before starting the query"`
+	Description       string            `vfilter:"optional,field=description,doc=A description to add to debug server"`
 }
 
 type GeneratorFunction struct{}
@@ -76,7 +79,7 @@ func (self *GeneratorFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("generate", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "generate", args)()
 
 	arg := &GeneratorArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -110,6 +113,7 @@ func (self *GeneratorFunction) Call(ctx context.Context,
 	if err == services.AlreadyRegisteredError {
 		return Generator{
 			name:                   arg.Name,
+			description:            arg.Description,
 			disable_file_buffering: !arg.WithFileBuffering,
 		}
 	}
@@ -119,10 +123,14 @@ func (self *GeneratorFunction) Call(ctx context.Context,
 	sub_ctx, cancel := context.WithCancel(ctx)
 
 	// Remove the generator when the scope destroys.
-	vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+	err = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 		scope.Log("generate: Removing generator %v", arg.Name)
 		cancel()
 	})
+	if err != nil {
+		scope.Log("generate: %v", err)
+		cancel()
+	}
 
 	go func() {
 		defer close(generator_chan)
@@ -161,7 +169,7 @@ func (self GeneratorFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:    "generate",
 		Doc:     "Create a named generator that receives rows from the query.",
 		ArgType: type_map.AddType(scope, &GeneratorArgs{}),
-		Version: 2,
+		Version: 3,
 	}
 }
 

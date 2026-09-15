@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -22,7 +22,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/psutils"
 	"www.velocidex.com/golang/vfilter"
@@ -39,7 +38,7 @@ func (self *PsKillFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("pskill", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "pskill", args)()
 
 	// Need high level of access to run this - basically the same as
 	// shelling out to e.g. powershell.
@@ -66,10 +65,11 @@ func (self *PsKillFunction) Call(ctx context.Context,
 
 func (self PsKillFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:     "pskill",
-		Doc:      "Kill the specified process.",
-		ArgType:  type_map.AddType(scope, &PsKillFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.EXECVE).Build(),
+		Name:    "pskill",
+		Doc:     "Kill the specified process.",
+		ArgType: type_map.AddType(scope, &PsKillFunctionArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.EXECVE).Build(),
 	}
 }
 

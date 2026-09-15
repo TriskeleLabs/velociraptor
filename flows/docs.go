@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -40,11 +40,11 @@
 //  - request id 1
 
 // Client Post 1:
-//  - request id 1, respone id 1
+//  - request id 1, response id 1
 
 // Client Post 2:
-//  - respone id 1, respone id 2
-//  - respone id 1, respone id 3, status OK.
+//  - response id 1, response id 2
+//  - response id 1, response id 3, status OK.
 
 // Velociraptor will a actually run the handler three times - for each
 // response and for the status.
@@ -53,7 +53,7 @@
 // will load the state from the database and prepare it for the worker
 // to process. In contrast, Velociraptor does not maintain state
 // between invocations. If the flow needs to keep state, they should
-// mainain that themselves.
+// maintain that themselves.
 
 // GRR was designed to allow flows to be long lived, process long
 // request/response sequences. In Velociraptor, the focus has shifted

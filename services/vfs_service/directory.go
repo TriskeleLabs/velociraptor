@@ -16,13 +16,9 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
-	"www.velocidex.com/golang/velociraptor/utils"
-)
-
-var (
-	notAvailableError = errors.New("Not available")
 )
 
 type FileInfoRow struct {
@@ -90,7 +86,7 @@ func renderDBVFS(
 	// Open the original flow result set
 	path_manager := artifacts.NewArtifactPathManagerWithMode(
 		config_obj, result.ClientId, result.FlowId,
-		artifact_name, paths.MODE_CLIENT)
+		artifact_name, artifact_modes.MODE_CLIENT)
 
 	file_store_factory := file_store.GetFileStore(config_obj)
 	reader, err := result_sets.NewResultSetReader(
@@ -150,8 +146,6 @@ func renderDBVFS(
 	}
 
 	result.Response = string(encoded_rows)
-
-	// Add a Download column as the first column.
 	result.Columns = columns
 	return result, nil
 }
@@ -166,6 +160,7 @@ func (self *VFSService) ListDirectories(
 		return renderRootVFS(client_id), nil
 	}
 
+	// Only used for the top level directory
 	return renderDBVFS(ctx, config_obj, client_id, components)
 }
 
@@ -271,9 +266,8 @@ func (self *VFSService) ListDirectoryFiles(
 	table_request.FlowId = stat.FlowId
 
 	// Get the table possibly applying any table transformations.
-	result, err := tables.GetTable(ctx, config_obj, table_request)
+	result, err := tables.GetTable(ctx, config_obj, table_request, "")
 	if err != nil {
-		utils.DlvBreak()
 		return nil, err
 	}
 
@@ -295,22 +289,35 @@ func (self *VFSService) ListDirectoryFiles(
 	lookup := getDirectoryDownloadInfo(
 		ctx, config_obj, in.ClientId, in.VfsComponents)
 	for _, row := range result.Rows {
-		if len(row.Cell) <= index_of_Name {
+		var row_data []interface{}
+		err := json.Unmarshal([]byte(row.Json), &row_data)
+		if err != nil {
+			continue
+		}
+
+		if len(row_data) <= index_of_Name {
 			continue
 		}
 
 		// Find the Name column entry in each cell.
-		name := row.Cell[index_of_Name]
-
-		// Insert a Download columns in the begining.
-		row.Cell = append([]string{""}, row.Cell...)
-
-		download_info, pres := lookup[name]
-		if !pres {
+		name, ok := row_data[index_of_Name].(string)
+		if !ok || name == "" {
 			continue
 		}
 
-		row.Cell[0] = json.MustMarshalString(download_info)
+		// Insert a Download info column in the beginning.
+		row_data = append([]interface{}{""}, row_data...)
+
+		download_info, pres := lookup[name]
+		if pres {
+			row_data[0] = download_info
+		}
+
+		serialized, err := json.Marshal(row_data)
+		if err != nil {
+			continue
+		}
+		row.Json = string(serialized)
 	}
 	result.Columns = append([]string{"Download"}, result.Columns...)
 	return result, nil

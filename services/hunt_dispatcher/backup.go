@@ -7,9 +7,7 @@ import (
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
@@ -30,17 +28,16 @@ func (self HuntBackupProvider) Name() []string {
 
 // The backup will just dump out the contents of the hunt dispatcher.
 func (self HuntBackupProvider) BackupResults(
-	ctx context.Context, wg *sync.WaitGroup) (
-	<-chan vfilter.Row, error) {
+	ctx context.Context, wg *sync.WaitGroup,
+	container services.BackupContainerWriter) (<-chan vfilter.Row, error) {
 
 	return self.store.BackupResults(ctx, wg)
 }
 
 func (self *HuntStorageManagerImpl) BackupResults(
-	ctx context.Context, wg *sync.WaitGroup) (
-	<-chan vfilter.Row, error) {
+	ctx context.Context, wg *sync.WaitGroup) (<-chan vfilter.Row, error) {
 
-	// We dont lock the data so we can take as long as needed.
+	// We don't lock the data so we can take as long as needed.
 	self.mu.Lock()
 	var hunt_ids []string
 	for hunt_id := range self.hunts {
@@ -93,6 +90,7 @@ func (self *HuntStorageManagerImpl) BackupResults(
 }
 
 func (self HuntBackupProvider) Restore(ctx context.Context,
+	container services.BackupContainerReader,
 	in <-chan vfilter.Row) (stat services.BackupStat, err error) {
 	return self.store.Restore(ctx, self.config_obj, in)
 }
@@ -104,17 +102,12 @@ func (self *HuntStorageManagerImpl) Restore(ctx context.Context,
 	count := 0
 	defer func() {
 		// Force the dispatcher to refresh from the filestore.
-		err = self.Refresh(ctx, config_obj)
+		err = self.Refresh(ctx, config_obj, FORCE_REFRESH)
 		if err != nil {
 			stat.Error = err
 		}
 		stat.Message = fmt.Sprintf("Restored %v hunts", count)
 	}()
-
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		return stat, err
-	}
 
 	for {
 		select {
@@ -139,12 +132,10 @@ func (self *HuntStorageManagerImpl) Restore(ctx context.Context,
 			}
 
 			count++
-			hunt_path_manager := paths.NewHuntPathManager(hunt_obj.HuntId)
-			_ = db.SetSubjectWithCompletion(config_obj,
-				hunt_path_manager.Path(), hunt_obj,
-				utils.BackgroundWriter)
+			err = self.SetHunt(ctx, hunt_obj)
+			if err != nil {
+				continue
+			}
 		}
 	}
-
-	return stat, nil
 }

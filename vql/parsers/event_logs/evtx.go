@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,8 +24,8 @@ import (
 	"www.velocidex.com/golang/evtx"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -48,6 +48,8 @@ func (self _ParseEvtxPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_evtx", args)()
+		defer utils.RecoverVQL(scope)
 
 		arg := &_ParseEvtxPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -62,7 +64,10 @@ func (self _ParseEvtxPlugin) Call(
 		} else {
 			// If the plugin did not specify a database, use the local
 			// resolver - On windows this will search DLLs for the messages.
-			resolver, err = evtx.GetNativeResolver()
+			resolver, err = evtx.GetNativeResolver(evtx.MessageResolverOpts{
+				LangPreferenceRegeExp: vql_subsystem.GetStringFromRow(
+					scope, scope, constants.EVTX_PREFERRED_LANG),
+			})
 		}
 
 		if err != nil {
@@ -71,17 +76,16 @@ func (self _ParseEvtxPlugin) Call(
 		}
 
 		// Close the db when we are done.
-		vql_subsystem.GetRootScope(scope).AddDestructor(resolver.Close)
+		err = vql_subsystem.GetRootScope(scope).AddDestructor(resolver.Close)
+		if err != nil {
+			resolver.Close()
+			scope.Log("parse_evtx: %s", err.Error())
+			return
+		}
 
 		for _, filename := range arg.Filenames {
 			func() {
 				defer utils.RecoverVQL(scope)
-
-				err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-				if err != nil {
-					scope.Log("parse_evtx: %s", err)
-					return
-				}
 
 				accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 				if err != nil {
@@ -127,7 +131,8 @@ func (self _ParseEvtxPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "parse_evtx",
 		Doc:      "Parses events from an EVTX file.",
 		ArgType:  type_map.AddType(scope, &_ParseEvtxPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 
@@ -141,6 +146,7 @@ func (self _WatchEvtxPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_evtx", args)()
 
 		// Do not close output_chan - The event log service
 		// owns it and it will be closed by it.
@@ -148,12 +154,6 @@ func (self _WatchEvtxPlugin) Call(
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("watch_evtx: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("watch_evtx: %s", err)
 			return
 		}
 
@@ -175,12 +175,22 @@ func (self _WatchEvtxPlugin) Call(
 		}
 
 		// Wait until the query is complete.
-		for event := range event_channel {
+		for {
 			select {
 			case <-ctx.Done():
 				return
 
-			case output_chan <- event:
+			case event, ok := <-event_channel:
+				if !ok {
+					return
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- event:
+				}
 			}
 		}
 	}()
@@ -193,7 +203,8 @@ func (self _WatchEvtxPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "watch_evtx",
 		Doc:      "Watch an EVTX file and stream events from it. ",
 		ArgType:  type_map.AddType(scope, &_ParseEvtxPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 

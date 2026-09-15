@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -30,7 +30,6 @@ import "C"
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"runtime"
 	"unsafe"
@@ -38,7 +37,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
-	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -56,7 +55,7 @@ func (self ProcDumpPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("proc_dump", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "proc_dump", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
 		if err != nil {
@@ -73,13 +72,13 @@ func (self ProcDumpPlugin) Call(
 			return
 		}
 
-		tmpfile, err := ioutil.TempFile(os.TempDir(), "dmp")
+		tmpfile, err := tempfile.TempFile("dmp")
 		if err != nil {
 			scope.Log("proc_dump: %s", err.Error())
 			return
 		}
 
-		utils_tempfile.AddTmpFile(tmpfile.Name())
+		tempfile.AddTmpFile(tmpfile.Name())
 
 		// Close the file and remove it because the dump file
 		// will be written in its place.
@@ -87,7 +86,7 @@ func (self ProcDumpPlugin) Call(
 		tmpfile.Close()
 
 		err = os.Remove(filename)
-		utils_tempfile.RemoveTmpFile(filename, err)
+		tempfile.RemoveTmpFile(filename, err)
 
 		// Use a dmp extension to make it easier to open.
 		filename += ".dmp"

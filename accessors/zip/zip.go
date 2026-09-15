@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"sync"
@@ -42,7 +41,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
-	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
 )
@@ -87,7 +86,7 @@ func (self *Tracker) Inc(filename string) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	prev, _ := self.refs[filename]
+	prev := self.refs[filename]
 	self.refs[filename] = prev + 1
 }
 
@@ -117,10 +116,10 @@ func (self *Tracker) Dec(filename string) {
 		} else {
 			self.refs[filename] = prev
 		}
-
-	} else {
-		panic(filename)
+		return
 	}
+
+	fmt.Printf("ZipTracker: Close of untracked Open: %v\n", filename)
 }
 
 func (self *Tracker) ProfileWriter(ctx context.Context,
@@ -341,6 +340,15 @@ func (self *ZipFileCache) Open(full_path *accessors.OSPath, nocase bool) (
 		return nil, err
 	}
 
+	// If there is no member file then this is a directory. We return
+	// it successfully but attempting to read from it is not going to
+	// work.
+	if info.member_file == nil {
+		return &DirectoryZipFile{
+			path: info._full_path,
+		}, nil
+	}
+
 	// Disable stream authentication because the library unpacks the
 	// entire stream into memory to verify it. In practice, the
 	// embedded data.zip file provides sufficient authentication
@@ -367,9 +375,11 @@ func (self *ZipFileCache) Open(full_path *accessors.OSPath, nocase bool) (
 	self.refs++
 	zipAccessorCurrentReferences.Inc()
 	return &SeekableZip{
-		delegate:  fd,
-		info:      info,
-		full_path: full_path,
+		delegate: fd,
+		info:     info,
+
+		// Use the correct path
+		full_path: info.OSPath(),
 
 		// We will be closed when done - Leak a reference.
 		zip_file: self,
@@ -394,17 +404,38 @@ func (self *ZipFileCache) _GetZipInfo(full_path *accessors.OSPath, nocase bool) 
 		eq = self.isComponentEqualNoCase
 	}
 
+	full_path_components := full_path.Components
+
+	var subdir *accessors.OSPath
+
 	// This is O(n) but due to the components length check it is very
 	// fast.
 	for _, cd_cache := range self.lookup {
-		if !eq(full_path.Components, cd_cache.full_path.Components) {
+		cd_components := cd_cache.full_path.Components
+		if !eq(full_path_components, cd_components) {
+			if subdir == nil &&
+				len(cd_components) > len(full_path_components) &&
+				eq(full_path_components,
+					cd_components[:len(full_path_components)]) {
+
+				subdir = full_path.Copy()
+			}
 			continue
 		}
 
+		// This is an exact match - return it.
 		return &ZipFileInfo{
 			member_file: cd_cache.member_file,
 			// Return the actual correct casing
 			_full_path: cd_cache.full_path.Copy(),
+		}, nil
+	}
+
+	// This is the best we can do - we have a subdir match
+	if subdir != nil {
+		return &ZipFileInfo{
+			// Return the actual correct casing
+			_full_path: subdir,
 		}, nil
 	}
 
@@ -420,8 +451,17 @@ func (self *ZipFileCache) GetChildren(
 	// Determine if we already emitted this file.
 	seen := make(map[string]*ZipFileInfo)
 
+	normalizer := func(x string) string { return x }
+	if nocase {
+		normalizer = strings.ToLower
+	}
+
 loop:
 	for _, cd_cache := range self.lookup {
+		cd_components := cd_cache.full_path.Components
+		if len(cd_components) <= len(full_path.Components) {
+			continue loop
+		}
 		// This breaks if the cd component does not have the same
 		// prefix as required.
 		for j, component := range full_path.Components {
@@ -435,12 +475,12 @@ loop:
 
 		// The required directory depth we need.
 		depth := len(full_path.Components)
-		if len(cd_cache.full_path.Components) <= depth {
+		if len(cd_components) <= depth {
 			continue
 		}
 
 		// Get the part of the path that is at the required depth.
-		member_name := cd_cache.full_path.Components[depth]
+		member_name := normalizer(cd_components[depth])
 
 		// Have we seen this before?
 		old_result, pres := seen[member_name]
@@ -465,8 +505,9 @@ loop:
 
 			// A directory has no member file
 		} else {
+			basename := cd_cache.full_path.Components[depth]
 			seen[member_name] = &ZipFileInfo{
-				_full_path: full_path.Append(member_name),
+				_full_path: full_path.Append(basename),
 			}
 		}
 	}
@@ -554,7 +595,7 @@ func (self *SeekableZip) Close() error {
 
 		zipAccessorCurrentTmpConversions.Dec()
 		err := os.Remove(self.tmp_file_backing.Name())
-		utils_tempfile.RemoveTmpFile(self.tmp_file_backing.Name(), err)
+		tempfile.RemoveTmpFile(self.tmp_file_backing.Name(), err)
 	}
 
 	err := self.delegate.Close()
@@ -610,16 +651,16 @@ func (self *SeekableZip) createTmpBackup() (err error) {
 	// start of it.
 	reader, err := self.zip_file.Open(self.full_path, false)
 	if err != nil {
-		return err
+		return utils.Wrap(io.EOF, err.Error())
 	}
 	defer reader.Close()
 
 	// Create a tmp file to unpack the zip member into
-	self.tmp_file_backing, err = ioutil.TempFile("", "zip*.tmp")
+	self.tmp_file_backing, err = tempfile.TempFile("zip*.tmp")
 	if err != nil {
 		return err
 	}
-	utils_tempfile.AddTmpFile(self.tmp_file_backing.Name())
+	tempfile.AddTmpFile(self.tmp_file_backing.Name())
 
 	zipAccessorCurrentTmpConversions.Inc()
 	zipAccessorTotalTmpConversions.Inc()
@@ -680,28 +721,31 @@ func (self *SeekableZip) seek(offset int64, whence int) (int64, error) {
 	return current_offset, err
 }
 
+type DirectoryZipFile struct {
+	path *accessors.OSPath
+}
+
+func (self DirectoryZipFile) Read(buff []byte) (int, error) {
+	return 0, utils.Wrap(utils.IOError, "read %v: is a directory", self.path.String())
+}
+
+func (self DirectoryZipFile) Seek(offset int64, whence int) (int64, error) {
+	return 0, nil
+}
+
+func (self DirectoryZipFile) Close() error {
+	return nil
+}
+
 func init() {
-	accessors.Register("zip", &ZipFileSystemAccessor{
-		nocase: false,
-	},
-		`Open a zip file as if it was a directory.
-
-Filename is a pathspec with a delegate accessor opening the Zip file,
-and the Path representing the file within the zip file.
-
-Example:
-
-       select FullPath, Mtime, Size from glob(
-         globs='/**/*.txt',
-         root=pathspec(DelegateAccessor='file',
-              DelegatePath="File.zip",
-              Path='/'),
-         accessor='zip')
-
-`)
-	accessors.Register("zip_nocase", &ZipFileSystemAccessor{
-		nocase: true,
-	}, `Open a zip file as if it was a directory. Although zip files are case sensitive, this accessor behaves case insensitive`)
+	accessors.Register(&ZipFileSystemAccessor{})
+	accessors.Register(accessors.DescribeAccessor(
+		&ZipFileSystemAccessor{
+			nocase: true,
+		}, accessors.AccessorDescriptor{
+			Name:        "zip_nocase",
+			Description: `Open a zip file as if it was a directory. Although zip files are case-sensitive, this accessor behaves case-insensitive`,
+		}))
 
 	json.RegisterCustomEncoder(&ZipFileInfo{}, accessors.MarshalGlobFileInfo)
 
@@ -709,5 +753,6 @@ Example:
 		Name:          "ZipTracker",
 		Description:   "Reference counting for open Zip files",
 		ProfileWriter: tracker.ProfileWriter,
+		Categories:    []string{"Global", "VQL", "Plugins"},
 	})
 }

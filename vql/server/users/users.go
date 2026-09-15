@@ -28,6 +28,7 @@ func (self UsersPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "users", args)()
 
 		// Access checks are done by the users module.
 
@@ -102,10 +103,8 @@ func ConvertPolicyToOrderedDict(
 	policy *acl_proto.ApiClientACL) *ordereddict.Dict {
 	policy_dict := json.ConvertProtoToOrderedDict(policy)
 	result := ordereddict.NewDict()
-	for _, k := range policy_dict.Keys() {
-		v, _ := policy_dict.Get(k)
-
-		switch t := v.(type) {
+	for _, i := range policy_dict.Items() {
+		switch t := i.Value.(type) {
 		case bool:
 			if !t {
 				continue
@@ -127,7 +126,7 @@ func ConvertPolicyToOrderedDict(
 			}
 		}
 
-		result.Set(k, v)
+		result.Set(i.Key, i.Value)
 	}
 
 	return result
@@ -153,7 +152,8 @@ func getUserRecord(
 		Set("org_id", org_id).
 		Set("org_name", org_name).
 		Set("picture", user_details.Picture).
-		Set("email", user_details.VerifiedEmail)
+		Set("email", user_details.VerifiedEmail).
+		Set("stats", user_details.Stats)
 	policy, err := services.GetPolicy(org_config_obj, user_details.Name)
 	if err == nil {
 		details.Set("roles", policy.Roles)
@@ -176,12 +176,9 @@ func getUserRecord(
 
 func cleanupDict(scope types.Scope, in *ordereddict.Dict) *ordereddict.Dict {
 	result := ordereddict.NewDict()
-	for _, k := range in.Keys() {
-		v, ok := in.Get(k)
-		if ok {
-			if scope.Bool(v) {
-				result.Set(k, v)
-			}
+	for _, i := range in.Items() {
+		if scope.Bool(i.Value) {
+			result.Set(i.Key, i.Value)
 		}
 	}
 	return result

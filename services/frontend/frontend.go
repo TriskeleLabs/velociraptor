@@ -22,8 +22,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
-	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -69,9 +69,10 @@ func PushMetrics(ctx context.Context, wg *sync.WaitGroup,
 				rows[0] = ordereddict.NewDict().
 					Set("Node", node_name).
 					Set("Metrics", metrics.ToDict())
-				err = journal.PushRowsToArtifact(ctx, config_obj,
-					rows, "Server.Internal.FrontendMetrics",
-					"server", "")
+
+				_ = journal.PushRowsToArtifact(
+					ctx, config_obj, rows,
+					artifacts.FRONTEND_METRICS)
 			}
 		}
 
@@ -186,13 +187,8 @@ func (self *MasterFrontendManager) processMetrics(ctx context.Context,
 		return nil
 	}
 
-	serialized, err := json.Marshal(row_metric)
-	if err != nil {
-		return err
-	}
-
 	metric := &FrontendMetrics{}
-	err = json.Unmarshal(serialized, metric)
+	err := utils.ParseIntoStruct(row_metric, metric)
 	if err != nil {
 		return err
 	}
@@ -212,7 +208,7 @@ func (self *MasterFrontendManager) GetMinionCount() int {
 
 	for node_name, metric := range self.stats {
 		if node_name != "master" {
-			if time.Now().Sub(metric.Timestamp) < 60*time.Second {
+			if time.Since(metric.Timestamp) < 60*time.Second {
 				res++
 			}
 		}
@@ -251,7 +247,7 @@ func (self *MasterFrontendManager) prepareOrgStats() (
 
 		for _, v := range self.stats {
 			if now.Sub(v.Timestamp) < 60*time.Second {
-				count, _ := v.ClientCommsCurrentConnections[org.Id]
+				count := v.ClientCommsCurrentConnections[org.Id]
 				total += count
 			}
 		}
@@ -266,7 +262,7 @@ func (self *MasterFrontendManager) prepareOrgStats() (
 	return result, nil
 }
 
-// Every 10 seconds read the cummulative stats and update the
+// Every 10 seconds read the cumulative stats and update the
 // Server.Monitor.Health artifact.
 func (self *MasterFrontendManager) UpdateStats(ctx context.Context) {
 	for {
@@ -303,7 +299,7 @@ func (self *MasterFrontendManager) UpdateStats(ctx context.Context) {
 
 			_ = journal.PushRowsToArtifact(ctx, org_config_obj,
 				[]*ordereddict.Dict{v},
-				"Server.Monitor.Health/Prometheus", "server", "")
+				artifacts.HEALTH_STATS)
 		}
 	}
 }
@@ -346,13 +342,13 @@ func (self *MasterFrontendManager) Start(ctx context.Context, wg *sync.WaitGroup
 	}
 
 	go self.UpdateStats(ctx)
-	go utils.Retry(ctx, func() error {
-		return journal.WatchQueueWithCB(ctx, config_obj, wg,
-			"Server.Internal.FrontendMetrics",
-			"FrontendService",
-			self.processMetrics)
-	}, 10, time.Second)
-
+	go func() {
+		_ = utils.Retry(ctx, func() error {
+			return journal.WatchQueueWithCB(ctx, config_obj, wg,
+				artifacts.FRONTEND_METRICS,
+				"FrontendService", self.processMetrics)
+		}, 1000, time.Second)
+	}()
 	return err
 }
 
@@ -373,6 +369,13 @@ func (self MinionFrontendManager) GetMinionCount() int {
 
 func (self MinionFrontendManager) IsMaster() bool {
 	return false
+}
+
+func (self MinionFrontendManager) GUIBasePath(config_obj *config_proto.Config) string {
+	if config_obj.GUI != nil {
+		return config_obj.GUI.BasePath
+	}
+	return ""
 }
 
 // The minion frontend replicates to the master node.

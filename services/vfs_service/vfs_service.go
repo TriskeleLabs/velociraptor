@@ -20,16 +20,23 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
-type VFSService struct{}
+type VFSService struct {
+	mu sync.Mutex
+
+	stats        []*VFSServiceStats
+	current_stat *VFSServiceStats
+}
 
 func (self *VFSService) Start(
 	ctx context.Context,
@@ -67,6 +74,13 @@ func (self *VFSService) Start(
 	if err != nil {
 		return err
 	}
+
+	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
+		Name:          "VFS Service " + utils.GetOrgId(config_obj),
+		Description:   "The VFS service post processes results from VFS operations.",
+		ProfileWriter: self.WriteProfile,
+		Categories:    []string{"Org", services.GetOrgName(config_obj), "Services"},
+	})
 
 	return nil
 }
@@ -124,13 +138,17 @@ func (self *VFSService) ProcessDownloadFile(
 				Error = err.Error()
 			}
 			// Record an error in the download info.
-			self.WriteDownloadInfo(ctx, config_obj, client_id, Accessor,
+			err = self.WriteDownloadInfo(ctx, config_obj, client_id, Accessor,
 				Components, &flows_proto.VFSDownloadInfo{
 					Mtime:    uint64(ts) * 1000000,
 					FlowId:   flow_id,
 					InFlight: false,
 					Error:    Error,
 				})
+			if err != nil {
+				logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+				logger.Error("VFSService WriteDownloadInfo: %v", err)
+			}
 			continue
 		}
 
@@ -140,7 +158,7 @@ func (self *VFSService) ProcessDownloadFile(
 		has_index_file := err == nil
 
 		// Now record the file has completed upload.
-		self.WriteDownloadInfo(ctx, config_obj, client_id, Accessor,
+		err = self.WriteDownloadInfo(ctx, config_obj, client_id, Accessor,
 			Components, &flows_proto.VFSDownloadInfo{
 				Components: uploaded_file_manager.
 					Path().Components(),
@@ -152,6 +170,11 @@ func (self *VFSService) ProcessDownloadFile(
 				FlowId:   flow_id,
 				InFlight: false,
 			})
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("VFSService WriteDownloadInfo: %v", err)
+		}
+
 	}
 }
 
@@ -215,7 +238,7 @@ func (self *VFSService) ProcessListDirectoryLegacy(
 
 	path_manager := artifacts.NewArtifactPathManagerWithMode(
 		config_obj, client_id, flow_id, "System.VFS.ListDirectory",
-		paths.MODE_CLIENT)
+		artifact_modes.MODE_CLIENT)
 
 	// Read the results from the flow and build a VFSListResponse
 	// for storing in the VFS.
@@ -283,8 +306,6 @@ func (self *VFSService) ProcessListDirectoryLegacy(
 		logger.Error("Unable to save directory: %v", err)
 		return
 	}
-
-	start_row = count
 }
 
 func findParam(name string, flow *flows_proto.ArtifactCollectorContext) string {
@@ -341,13 +362,16 @@ func (self *VFSService) ProcessListDirectory(
 	flow_id, _ := row.GetString("FlowId")
 	ts, _ := row.GetInt64("_ts")
 
+	// Record stats of this operation
+	defer self.startNewOperation(client_id, flow_id)()
+
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 	logger.Info("VFSService: Processing System.VFS.ListDirectory/Stats from %v %v",
 		client_id, flow_id)
 
 	path_manager := artifacts.NewArtifactPathManagerWithMode(
 		config_obj, client_id, flow_id, "System.VFS.ListDirectory/Stats",
-		paths.MODE_CLIENT)
+		artifact_modes.MODE_CLIENT)
 
 	// Read the results from the flow and build a VFSListResponse
 	// for storing in the VFS.
@@ -387,6 +411,8 @@ func (self *VFSService) ProcessListDirectory(
 			StartIdx:  row_obj.Stats.StartIdx,
 			EndIdx:    row_obj.Stats.EndIdx,
 		}
+
+		self.current_stat.ChargeDir(int(stats.TotalRows))
 
 		db, err := datastore.GetDB(config_obj)
 		if err != nil {

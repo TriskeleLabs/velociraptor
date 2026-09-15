@@ -19,6 +19,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vql/server"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
@@ -34,14 +35,14 @@ var (
 	repacked_dst     = ""
 
 /*
-	// Set these to capture the repacked file for manual inspection.
-	repacked_msi_dst = "/tmp/m_repacked.msi"
-	repacked_dst     = "/tmp/m_repacked.exe"
+// Set these to capture the repacked file for manual inspection.
+repacked_msi_dst = "/tmp/m_repacked.msi"
+repacked_dst     = "/tmp/m_repacked.exe"
 
-	// Provide the real binary and msi so they can be packed then
-	// inspect the produced data
-	binary_src = "../../output/velociraptor.exe"
-	msi_src    = "/tmp/velociraptor-v0.6.8-rc1-windows-amd64.msi"
+// Provide the real binary and msi so they can be packed then
+// inspect the produced data
+binary_src = "../../output/velociraptor.exe"
+msi_src    = "/tmp/velociraptor-v0.6.8-rc1-windows-amd64.msi"
 */
 )
 
@@ -52,7 +53,7 @@ type RepackTestSuite struct {
 func (self *RepackTestSuite) TestRepackBinary() {
 	ctx := self.Ctx
 
-	dir, err := ioutil.TempDir("", "tmp")
+	dir, err := tempfile.TempDir("tmp")
 	assert.NoError(self.T(), err)
 
 	defer os.RemoveAll(dir)
@@ -113,17 +114,19 @@ autoexec:
 			Set("binaries", []string{"VelociraptorWindows"}).
 			Set("upload_name", "test.zip"))
 
-	upload_response, ok := result.(*uploads.UploadResponse)
+	upload_response, ok := result.(*ordereddict.Dict)
 	assert.True(self.T(), ok, "Result type is %T", result)
+
+	upload_response_path, _ := upload_response.GetString("Path")
 
 	// Save a copy of the repacked data for inspection.
 	if repacked_dst != "" {
-		utils.CopyFile(ctx, upload_response.Path, repacked_dst, 0644)
+		utils.CopyFile(ctx, upload_response_path, repacked_dst, 0644)
 		scope.Log("Stored repacked binary in %v for manual inspection", repacked_dst)
 	}
 
 	// Check the content of the packed binaries.
-	fd, err := os.Open(upload_response.Path)
+	fd, err := os.Open(upload_response_path)
 	assert.NoError(self.T(), err)
 	s, err := fd.Stat()
 	assert.NoError(self.T(), err)
@@ -150,7 +153,7 @@ autoexec:
 func (self *RepackTestSuite) TestRepackGenericContainer() {
 	ctx := self.Ctx
 
-	dir, err := ioutil.TempDir("", "tmp")
+	dir, err := tempfile.TempDir("tmp")
 	assert.NoError(self.T(), err)
 
 	defer os.RemoveAll(dir)
@@ -226,11 +229,13 @@ autoexec:
 			Set("binaries", []string{"GenericCollector"}).
 			Set("upload_name", "test.zip"))
 
-	upload_response, ok := result.(*uploads.UploadResponse)
+	upload_response, ok := result.(*ordereddict.Dict)
 	assert.True(self.T(), ok, "Result type is %T", result)
 
+	upload_response_path, _ := upload_response.GetString("Path")
+
 	// Now extract the config from the result.
-	config_obj, err := config.ExtractEmbeddedConfig(upload_response.Path)
+	config_obj, err := config.ExtractEmbeddedConfig(upload_response_path)
 	assert.NoError(self.T(), err)
 
 	// Make sure all the encoded config is preserved
@@ -242,12 +247,12 @@ autoexec:
 
 	// Save a copy of the repacked data for inspection.
 	if repacked_dst != "" {
-		utils.CopyFile(ctx, upload_response.Path, repacked_dst, 0644)
+		utils.CopyFile(ctx, upload_response_path, repacked_dst, 0644)
 		scope.Log("Stored repacked binary in %v for manual inspection", repacked_dst)
 	}
 
 	// Check the content of the packed binaries.
-	fd, err = os.Open(upload_response.Path)
+	fd, err = os.Open(upload_response_path)
 	assert.NoError(self.T(), err)
 	s, err := fd.Stat()
 	assert.NoError(self.T(), err)
@@ -268,7 +273,7 @@ autoexec:
 func (self *RepackTestSuite) TestRepackMSI() {
 	ctx := self.Ctx
 
-	dir, err := ioutil.TempDir("", "tmp")
+	dir, err := tempfile.TempDir("tmp")
 	assert.NoError(self.T(), err)
 
 	defer os.RemoveAll(dir)
@@ -336,12 +341,14 @@ autoexec:
 `).
 			Set("upload_name", "test.zip"))
 
-	upload_response, ok := result.(*uploads.UploadResponse)
+	upload_response, ok := result.(*ordereddict.Dict)
 	assert.True(self.T(), ok, "Result type is %T", result)
+
+	upload_response_path, _ := upload_response.GetString("Path")
 
 	// Save a copy of the repacked data for inspection.
 	if repacked_dst != "" {
-		utils.CopyFile(ctx, upload_response.Path, repacked_msi_dst, 0644)
+		utils.CopyFile(ctx, upload_response_path, repacked_msi_dst, 0644)
 		scope.Log("Stored repacked msi in %v for manual inspection", repacked_msi_dst)
 	}
 }

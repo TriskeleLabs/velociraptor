@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -47,7 +47,7 @@ func (self _Base64Decode) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("base64decode", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "base64decode", args)()
 
 	arg := &_Base64DecodeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -77,7 +77,7 @@ func (self _Base85Decode) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("base85decode", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "base85decode", args)()
 
 	arg := &_Base64DecodeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -112,7 +112,7 @@ func (self _Base64Encode) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("base64encode", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "base64encode", args)()
 
 	arg := &_Base64EncodeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -143,7 +143,7 @@ func (self _ToLower) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("lowcase", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "lowcase", args)()
 	arg := &_ToLowerArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -168,7 +168,7 @@ func (self _ToUpper) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("upcase", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "upcase", args)()
 	arg := &_ToLowerArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -197,7 +197,7 @@ func (self _ToInt) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("atoi", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "atoi", args)()
 
 	arg := &_ToIntArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -232,7 +232,7 @@ func (self _ParseFloat) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("parse_float", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_float", args)()
 
 	arg := &_ToIntArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -272,12 +272,27 @@ func (self _ParseFloat) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 	}
 }
 
+type _NowArgs struct {
+	NS bool `vfilter:"optional,field=ns,doc=Return the time in ns"`
+}
+
 type _Now struct{}
 
 func (self _Now) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
+
+	arg := &_NowArgs{}
+	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
+	if err != nil {
+		scope.Log("now: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	if arg.NS {
+		return time.Now().UnixNano()
+	}
 	return time.Now().Unix()
 }
 
@@ -285,7 +300,8 @@ func (self _Now) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.F
 	return &vfilter.FunctionInfo{
 		Name:    "now",
 		Doc:     "Returns current time in seconds since epoch.",
-		ArgType: type_map.AddType(scope, &_ToIntArgs{}),
+		ArgType: type_map.AddType(scope, &_NowArgs{}),
+		Version: 2,
 	}
 }
 
@@ -295,7 +311,7 @@ func (self _UTF16) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("utf16", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "utf16", args)()
 
 	arg := &_Base64DecodeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -327,7 +343,7 @@ func (self _UTF16Encode) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("utf16_encode", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "utf16_encode", args)()
 
 	arg := &_Base64EncodeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -376,7 +392,7 @@ func (self _GetFunction) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("get", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "get", args)()
 
 	arg := &_GetFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -444,7 +460,7 @@ func (self _SetFunction) Call(
 	ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("set", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "set", args)()
 
 	arg := &_SetFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -466,7 +482,9 @@ func (self _SetFunction) Call(
 
 	case ordereddict.Dict:
 		t.Set(arg.Field, arg.Value)
-		return t
+		res := ordereddict.NewDict()
+		res.MergeFrom(&t)
+		return res
 
 	case map[string]interface{}:
 		t[arg.Field] = arg.Value

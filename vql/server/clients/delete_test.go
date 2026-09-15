@@ -3,17 +3,15 @@ package clients
 import (
 	"context"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/protobuf/types/known/emptypb"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
@@ -24,8 +22,11 @@ import (
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/simple"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
@@ -56,6 +57,8 @@ artifacts/Generic.Client.Info/F.C49TC44OSO62E/BasicInformation.json
 artifacts/Generic.Client.Info/F.C49TC44OSO62E/BasicInformation.json.index
 tasks/task1123.db
 ping.db`
+
+	normalizeRegEx = regexp.MustCompile(`\d\d\d\d-\d\d-\d\d\.json`)
 )
 
 type DeleteTestSuite struct {
@@ -68,7 +71,7 @@ func (self *DeleteTestSuite) SetupTest() {
 	self.ConfigObj = self.LoadConfig()
 
 	var err error
-	self.dir, err = ioutil.TempDir("", "delete_test")
+	self.dir, err = tempfile.TempDir("delete_test")
 	assert.NoError(self.T(), err)
 
 	self.ConfigObj.Datastore.Implementation = "FileBaseDataStore"
@@ -77,6 +80,15 @@ func (self *DeleteTestSuite) SetupTest() {
 
 	self.client_id = "C.12312"
 	self.TestSuite.SetupTest()
+
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	err = client_info_manager.Set(self.Ctx, &services.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
+			ClientId: self.client_id,
+		}})
+	assert.NoError(self.T(), err)
 }
 
 func (self *DeleteTestSuite) TearDownTest() {
@@ -156,6 +168,7 @@ func (self *DeleteTestSuite) TestDeleteClient() {
 		func(path string, d fs.DirEntry, err error) error {
 			path = strings.TrimPrefix(path, self.dir)
 			path = strings.ReplaceAll(path, "\\", "/")
+			path = normalizeRegEx.ReplaceAllString(path, "XXXX-XX-XX.json")
 
 			after = append(after, path)
 			return nil

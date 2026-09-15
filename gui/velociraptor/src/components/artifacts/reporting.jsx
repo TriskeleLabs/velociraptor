@@ -4,10 +4,9 @@ import _ from 'lodash';
 import React from 'react';
 import PropTypes from 'prop-types';
 import {CancelToken} from 'axios';
-import parseHTML from '../core/sanitize.jsx';
+import parseHTML, { cleanupHTML } from '../core/sanitize.jsx';
 
 import api from '../core/api-service.jsx';
-import VeloTable from '../core/table.jsx';
 import { VeloLineChart, VeloTimeChart } from './line-charts.jsx';
 import Spinner from '../utils/spinner.jsx';
 import ToolViewer from "../tools/tool-viewer.jsx";
@@ -19,6 +18,8 @@ import { NotebookLineChart, NotebookTimeChart,
 
 import VeloValueRenderer from '../utils/value.jsx';
 import { JSONparse } from '../utils/json_parse.jsx';
+import VeloSigmaEditor from './sigma-editor.jsx';
+import VeloButton from '../widgets/button.jsx';
 
 // Renders a report in the DOM.
 const parse_param = domNode=>JSONparse(decodeURIComponent(
@@ -131,56 +132,22 @@ export default class VeloReportViewer extends React.Component {
         });
     }
 
-    cleanupHTML = (html) => {
-        // React expect no whitespace between table elements
-        html = html.replace(/>\s*<thead/g, "><thead");
-        html = html.replace(/>\s*<tbody/g, "><tbody");
-        html = html.replace(/>\s*<tr/g, "><tr");
-        html = html.replace(/>\s*<th/g, "><th");
-        html = html.replace(/>\s*<td/g, "><td");
-
-        html = html.replace(/>\s*<\/thead/g, "></thead");
-        html = html.replace(/>\s*<\/tbody/g, "></tbody");
-        html = html.replace(/>\s*<\/tr/g, "></tr");
-        html = html.replace(/>\s*<\/th/g, "></th");
-        html = html.replace(/>\s*<\/td/g, "></td");
-
-        return html;
-    }
-
     render() {
-        let template = parseHTML(this.cleanupHTML(this.state.template), {
+        let template = parseHTML(cleanupHTML(this.state.template), {
             replace: (domNode) => {
-                if (domNode.name === "inline-table-viewer") {
-                    try {
-                        let data = this.state.data;
-                        let value = decodeURIComponent(domNode.attribs.value || "");
-                        let response = data[value] || {};
-                        let rows = JSONparse(response.Response, []);
-                        return (
-                            <VeloTable
-                              rows={rows}
-                              columns={response.Columns}
-                            />
-                        );
-                    } catch(e) {};
+                if (domNode.name === "velo-button") {
+                    let href = domNode.attribs.href;
+                    if(href) {
+                        return <VeloButton
+                                 href={href}
+                                 text={domNode.attribs.text}
+                                 icon={domNode.attribs.icon}
+                               />;
+                    }
+                    return domNode;
                 }
 
-                if (domNode.name === "velo-csv-viewer" ||
-                    domNode.name === "grr-csv-viewer") {
-                    // Figure out where the data is: attribs.value is something like data['table2']
-                    let re = /'([^']+)'/;
-                    let value = decodeURIComponent(domNode.attribs.value || "");
-                    if (value) {
-                        let match = re.exec(value);
-                        let data = this.state.data[match[1]];
-                        let rows = JSONparse(data.Response, []);
-
-                        return (
-                            <VeloTable rows={rows} columns={data.Columns} />
-                        );
-                    }
-
+                if (domNode.name === "velo-csv-viewer") {
                     try {
                         return (
                             <NotebookTableRenderer
@@ -193,8 +160,7 @@ export default class VeloReportViewer extends React.Component {
                     }
                 };
 
-                if (domNode.name === "velo-tool-viewer" ||
-                    domNode.name === "grr-tool-viewer") {
+                if (domNode.name === "velo-tool-viewer") {
                     let name = decodeURIComponent(domNode.attribs.name ||"");
                     let tool_version = decodeURIComponent(
                         domNode.attribs.version ||"");
@@ -205,23 +171,25 @@ export default class VeloReportViewer extends React.Component {
                     );
                 };
 
-                if (domNode.name === "velo-timeline" ||
-                    domNode.name === "grr-timeline") {
+                if (domNode.name === "velo-timeline") {
                     let name = decodeURIComponent(domNode.attribs.name ||"");
                     return (
                         <Timeline name={name}/>
                     );
                 };
 
-                if (domNode.name === "velo-value" ||
-                    domNode.name === "grr-value") {
+                if (domNode.name === "velo-value") {
                     let value = decodeURIComponent(domNode.attribs.value || "");
                     return <VeloValueRenderer value={value}/>;
 
                 };
 
-                if (domNode.name === "velo-line-chart" ||
-                    domNode.name === "grr-line-chart") {
+                if (domNode.name === "velo-sigma-editor") {
+                    let params = JSONparse(decodeURIComponent(domNode.attribs.params), {});
+                    return <VeloSigmaEditor params={params}/>;
+                }
+
+                if (domNode.name === "velo-line-chart") {
                     // Figure out where the data is: attribs.value is
                     // something like data['table2']
                     let re = /'([^']+)'/;

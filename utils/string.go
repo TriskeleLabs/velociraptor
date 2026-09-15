@@ -1,5 +1,11 @@
 package utils
 
+import (
+	"fmt"
+	"time"
+	"unicode"
+)
+
 func Elide(in string, length int) string {
 	if len(in) < length {
 		return in
@@ -20,4 +26,44 @@ func Uniquify(in []string) []string {
 		result = append(result, i)
 	}
 	return result
+}
+
+func ToString(x interface{}) string {
+	switch t := x.(type) {
+	case string:
+		return t
+
+	case []byte:
+		return string(t)
+
+	case error:
+		return t.Error()
+
+	case time.Time:
+		return t.UTC().Format(time.RFC3339)
+
+	case fmt.Stringer:
+		return t.String()
+
+	default:
+		return fmt.Sprintf("%v", x)
+	}
+}
+
+// Lower the string in a unicode aware way. This normalizes the
+// strings for comparisons.
+func ToLower(in string) string {
+	var result []rune
+	for _, c := range in {
+		result = append(result, unicode.ToLower(c))
+	}
+
+	return string(result)
+}
+
+func StringOrDefault(in string, default_val string) string {
+	if in == "" {
+		return default_val
+	}
+	return in
 }

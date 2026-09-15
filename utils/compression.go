@@ -2,11 +2,13 @@ package utils
 
 import (
 	"bytes"
+	"compress/gzip"
 	"compress/zlib"
 	"context"
 	"io"
 
 	errors "github.com/go-errors/errors"
+	"www.velocidex.com/golang/velociraptor/constants"
 )
 
 func Compress(plain_text []byte) ([]byte, error) {
@@ -26,8 +28,38 @@ func Compress(plain_text []byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+func GzipUncompress(raw []byte) ([]byte, error) {
+	rb := bytes.NewReader(raw)
+	r, err := gzip.NewReader(rb)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0, bytes.MinRead))
+	_, err = buf.ReadFrom(r)
+	return buf.Bytes(), err
+}
+
+func GzipCompress(raw []byte) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	writer, err := gzip.NewWriterLevel(buf, 9)
+	if err != nil {
+		return nil, err
+	}
+	writer.Write(raw)
+	writer.Close()
+
+	return buf.Bytes(), err
+}
+
 func Uncompress(
 	ctx context.Context, compressed []byte) ([]byte, error) {
+
+	return UncompressWithLimit(ctx, compressed, constants.MAX_MEMORY_LARGE)
+}
+
+func UncompressWithLimit(
+	ctx context.Context, compressed []byte, max_size int64) ([]byte, error) {
 
 	// Allocate a reasonable initial buffer. The decompression step
 	// below may increase it as required.
@@ -39,9 +71,16 @@ func Uncompress(
 	}
 	defer z.Close()
 
-	_, err = Copy(ctx, result, z)
+	// Copy a bit more than we are supposed to so we can detect if we
+	// hit the limit.
+	n, err := CopyN(ctx, result, z, max_size+1)
 	if err != nil {
 		return nil, errors.Wrap(err, 0)
+	}
+
+	// There is more data than can fit in the max_size.
+	if int64(n) > max_size {
+		return nil, MemoryError
 	}
 
 	return result.Bytes(), nil

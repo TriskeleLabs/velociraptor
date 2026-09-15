@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -23,6 +23,7 @@ import (
 	"os"
 	"sync"
 
+	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
 	"www.velocidex.com/golang/velociraptor/executor"
@@ -30,6 +31,7 @@ import (
 	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/startup"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/tools"
 )
 
@@ -49,7 +51,7 @@ func doClient() error {
 		}
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	// Include the writeback in the client's configuration.
@@ -62,6 +64,15 @@ func doClient() error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
+	err = InstallAuditlogger()
+	if err != nil {
+		return err
+	}
+
+	// Make sure that we have a valid client config. This strips out
+	// any potential non-client elements. Prevents weird services from
+	// starting if we actually got the server config.
+	config_obj = config.GetClientConfig(config_obj)
 	return RunClient(ctx, config_obj)
 }
 
@@ -81,7 +92,11 @@ func RunClient(
 
 		lwg.Add(1)
 		go func() {
-			runClientOnce(subctx, lwg, config_obj)
+			err := runClientOnce(subctx, lwg, config_obj)
+			if err != nil {
+				logger := logging.GetLogger(config_obj, &logging.ClientComponent)
+				logger.Error("<red>runClientOnce Error:</> %v", err)
+			}
 			cancel()
 		}()
 
@@ -121,7 +136,7 @@ func runClientOnce(
 		return fmt.Errorf("Invalid config: %w", err)
 	}
 
-	executor.SetTempfile(config_obj)
+	tempfile.SetTempfile(config_obj)
 
 	writeback_service := writeback.GetWritebackService()
 	writeback, err := writeback_service.GetWriteback(config_obj)
@@ -130,10 +145,10 @@ func runClientOnce(
 	}
 
 	sm, err := startup.StartClientServices(ctx, config_obj, on_error)
-	defer sm.Close()
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	exe, err := executor.NewClientExecutor(ctx, writeback.ClientId, config_obj)
 	if err != nil {

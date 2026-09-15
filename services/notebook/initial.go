@@ -1,207 +1,91 @@
 package notebook
 
+/*
+# Creating an initial notebook
+
+There are several types of notebooks:
+- Global Notebooks:
+
+  These are initialized from a NOTEBOOK type artifact. The user gets a
+  selector to choose which notebook artifact to launch.
+
+  The initial cells are initialized from this artifact - each source
+  contains a notebook section with several templates. Cells are
+  collected from all sources and added to the final notebook.
+
+- Client Notebooks
+
+  Automatically created in client collections when the user clicks the
+  notebook tab. These are normally public.
+
+- Hunt Notebooks
+
+  Automatically created in hunts when the user clicks the notebook tab
+  in the hunt viewer. These are normally public.
+
+- Event Notebooks
+
+  Automatically created in event monitoring collections when the user
+  clicks the notebook pull down. These are normally public.
+
+To make it simpler to understand the different contexts where
+notebooks are created, we always create the initial notebook from a
+NOTEBOOK type artifact. When the notebook is created from other
+artifacts, the code below creates a pseudo NOTEBOOK artifact based on
+the other artifacts and adds it to a private repository.
+
+Notebooks are created by the GUI, when the GUI sends a
+NotebookMetadata requests. The following are the important fields:
+
+1. Notebook ID - This can be empty for global notebooks, which will
+   generate a new ID. Other notebooks have a well formed standard for
+   the ID. For example a Client Notebook contains the flow id and
+   client id with the supplied notebook id.
+
+2. artifacts: This is a list of artifact names to start the
+   notebook. Each artifact may have a spec but if not, we use the
+   default artifact parameters.
+
+3. specs: A list of artifact specs to launch the artifact with.
+
+4. env: An additional list of environment variables to merge with the
+   artifact specs.
+
+Once the notebook is created, the code below adds the following fields
+to the notebook metadata fields. These fields can be forwarded back by
+the GUI in future.
+
+1. parameters: These are the parameters gathered from the custom
+   artifact. These may contain additional fields depending on the
+   notebook type (For example event notebooks also contain StartTime
+   and EndTime, client notebooks contain ClientId etc).
+
+   The GUI may return the parameters to the server, in which case the
+   server creates the pseudo notebook artifact from this field.
+
+*/
+
 import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/Velocidex/ordereddict"
+	"google.golang.org/protobuf/proto"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/datastore"
+	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 )
-
-func (self *NotebookManager) NewNotebookCell(
-	ctx context.Context,
-	in *api_proto.NotebookCellRequest, username string) (
-	*api_proto.NotebookMetadata, error) {
-
-	// Calculate the cell first then insert it into the notebook.
-	new_version := GetNextVersion("")
-	new_cell_request := &api_proto.NotebookCellRequest{
-		Input:             in.Input,
-		Output:            in.Output,
-		CellId:            NewNotebookCellId(),
-		NotebookId:        in.NotebookId,
-		Version:           new_version,
-		AvailableVersions: []string{new_version},
-		Type:              in.Type,
-		Env:               in.Env,
-		Sync:              in.Sync,
-
-		// New cells are opened for editing.
-		CurrentlyEditing: true,
-	}
-
-	// TODO: This is not thread safe!
-	notebook, err := self.Store.GetNotebook(in.NotebookId)
-	if err != nil {
-		return nil, err
-	}
-
-	// Start off with some empty lines.
-	if in.Input == "" {
-		in.Input = "\n\n\n\n\n\n"
-	}
-
-	new_cell, err := self.UpdateNotebookCell(
-		ctx, notebook, username, new_cell_request)
-	if err != nil {
-		return nil, err
-	}
-
-	// The notebook only keep summary metadata and not the full
-	// results.
-	new_cell_summary := &api_proto.NotebookCell{
-		CellId:            new_cell.CellId,
-		CurrentVersion:    new_cell.CurrentVersion,
-		AvailableVersions: new_cell.AvailableVersions,
-		Timestamp:         new_cell.Timestamp,
-	}
-
-	added := false
-	now := utils.GetTime().Now().Unix()
-
-	new_cell_md := []*api_proto.NotebookCell{}
-
-	for _, cell_md := range notebook.CellMetadata {
-		if cell_md.CellId == in.CellId {
-
-			// New cell goes above existing cell.
-			new_cell_md = append(new_cell_md, new_cell_summary)
-
-			cell_md.Timestamp = now
-			new_cell_md = append(new_cell_md, cell_md)
-			added = true
-			continue
-		}
-		new_cell_md = append(new_cell_md, cell_md)
-	}
-
-	// Add it to the end of the document.
-	if !added {
-		new_cell_md = append(new_cell_md, new_cell_summary)
-	}
-
-	notebook.LatestCellId = new_cell.CellId
-	notebook.CellMetadata = new_cell_md
-	notebook.ModifiedTime = new_cell.Timestamp
-
-	err = self.Store.SetNotebook(notebook)
-	if err != nil {
-		return nil, err
-	}
-
-	return notebook, err
-}
-
-func getInitialCellsFromArtifacts(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	in *api_proto.NotebookMetadata) (
-	result []*api_proto.NotebookCellRequest, err error) {
-
-	manager, err := services.GetRepositoryManager(config_obj)
-	if err != nil {
-		return nil, err
-	}
-	repository, err := manager.GetGlobalRepository(config_obj)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, artifact_name := range in.Artifacts {
-		artifact, pres := repository.Get(ctx, config_obj, artifact_name)
-		if !pres {
-			continue
-		}
-
-		for _, s := range artifact.Sources {
-			for _, n := range s.Notebook {
-				env := []*api_proto.Env{}
-				for _, i := range n.Env {
-					env = append(env, &api_proto.Env{
-						Key:   i.Key,
-						Value: i.Value,
-					})
-				}
-
-				switch strings.ToLower(n.Type) {
-				case "none":
-					// Means no cell to be produced.
-					result = append(result, &api_proto.NotebookCellRequest{
-						Type: n.Type,
-					})
-
-				case "vql", "md", "markdown":
-					result = append(result, &api_proto.NotebookCellRequest{
-						Type:   n.Type,
-						Input:  n.Template,
-						Output: n.Output,
-
-						// Need to wait for all cells to calculate or
-						// we will overload the netowork workers if
-						// there are too many.
-						Sync: true,
-					})
-				case "vql_suggestion":
-					in.Suggestions = append(in.Suggestions,
-						&api_proto.NotebookCellRequest{
-							Type:  "vql",
-							Name:  n.Name,
-							Input: n.Template,
-							Env:   env,
-						})
-				}
-			}
-		}
-	}
-	return result, nil
-}
-
-func getInitialCells(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	notebook_metadata *api_proto.NotebookMetadata) (
-	[]*api_proto.NotebookCellRequest, error) {
-
-	// Initialize the notebook from these artifacts
-	if len(notebook_metadata.Artifacts) > 0 {
-		return getInitialCellsFromArtifacts(ctx, config_obj, notebook_metadata)
-	}
-
-	// All cells receive a header from the name and description of
-	// the notebook.
-	new_cells := []*api_proto.NotebookCellRequest{{
-		Input: fmt.Sprintf("# %s\n\n%s\n", notebook_metadata.Name,
-			notebook_metadata.Description),
-		Type:             "Markdown",
-		CurrentlyEditing: true,
-	}}
-
-	// Figure out what type of content to create depending on the type
-	// of the notebook
-	if notebook_metadata.Context != nil {
-		if notebook_metadata.Context.HuntId != "" {
-			new_cells = getCellsForHunt(ctx, config_obj,
-				notebook_metadata.Context.HuntId, notebook_metadata)
-		} else if notebook_metadata.Context.FlowId != "" &&
-			notebook_metadata.Context.ClientId != "" {
-			new_cells = getCellsForFlow(ctx, config_obj,
-				notebook_metadata.Context.ClientId,
-				notebook_metadata.Context.FlowId, notebook_metadata)
-		} else if notebook_metadata.Context.EventArtifact != "" &&
-			notebook_metadata.Context.ClientId != "" {
-			new_cells = getCellsForEvents(ctx, config_obj,
-				notebook_metadata.Context.ClientId,
-				notebook_metadata.Context.EventArtifact, notebook_metadata)
-		}
-	}
-
-	return new_cells, nil
-}
 
 // Create the initial cells of the notebook.
 func (self *NotebookManager) CreateInitialNotebook(ctx context.Context,
@@ -209,7 +93,8 @@ func (self *NotebookManager) CreateInitialNotebook(ctx context.Context,
 	notebook_metadata *api_proto.NotebookMetadata,
 	principal string) error {
 
-	new_cell_requests, err := getInitialCells(ctx, config_obj, notebook_metadata)
+	new_cell_requests, notebook_metadata, err := getInitialCells(
+		ctx, config_obj, notebook_metadata)
 	if err != nil {
 		return err
 	}
@@ -242,7 +127,7 @@ func (self *NotebookManager) CreateInitialNotebook(ctx context.Context,
 			Output:            cell_req.Output,
 			Calculating:       true,
 			Type:              cell_req.Type,
-			Timestamp:         utils.GetTime().Now().Unix(),
+			Timestamp:         utils.GetTime().Now().UnixNano(),
 			CurrentVersion:    cell_req.Version,
 			AvailableVersions: cell_req.AvailableVersions,
 		}
@@ -278,148 +163,284 @@ func (self *NotebookManager) CreateInitialNotebook(ctx context.Context,
 	return final_err
 }
 
-func getCellsForEvents(ctx context.Context,
+// Builds the pseudo notebook artifact based on the notebook request.
+func CalculateNotebookArtifact(
+	ctx context.Context,
 	config_obj *config_proto.Config,
-	client_id string, artifact_name string,
-	notebook_metadata *api_proto.NotebookMetadata) []*api_proto.NotebookCellRequest {
+	in *api_proto.NotebookMetadata) (
+	res *artifacts_proto.Artifact,
+	md *api_proto.NotebookMetadata, ret_err error) {
+
+	out := proto.Clone(in).(*api_proto.NotebookMetadata)
+
+	// No notebook Id will allocate a global ID.
+	if out.NotebookId == "" {
+		out.NotebookId = NewNotebookId()
+	}
 
 	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
-		return nil
+		return nil, nil, err
 	}
 
-	repository, err := manager.GetGlobalRepository(config_obj)
+	global_repository, err := manager.GetGlobalRepository(config_obj)
 	if err != nil {
-		return nil
+		return nil, nil, err
 	}
 
-	result := getCustomCells(ctx, config_obj, repository,
-		artifact_name, notebook_metadata)
+	// If no artifacts are specified, we use the default template.
+	if len(out.Artifacts) == 0 {
+		err := populateDefaultSpecs(ctx, config_obj, out)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
-	// If there are no custom cells, add the default cell.
-	if len(result) == 0 {
-		// Start the event display 1 day ago.
-		start_time := utils.GetTime().Now().AddDate(0, 0, -1).UTC().Format(time.RFC3339)
-		if notebook_metadata.Context.StartTime > 0 {
-			start_time = utils.ParseTimeFromInt64(
-				notebook_metadata.Context.StartTime).UTC().Format(time.RFC3339)
+	if len(out.Artifacts) == 0 {
+		out.Artifacts = append(out.Artifacts, "Notebooks.Default")
+	}
+
+	// This is a pseudo artifact used to build the notebook.
+	res = &artifacts_proto.Artifact{
+		Name: "PrivateNotebook",
+	}
+
+	// Check if the pseudo artifact is already cached.
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	notebook_path_manager := paths.NewNotebookPathManager(out.NotebookId)
+	err = db.GetSubject(config_obj,
+		notebook_path_manager.Artifact(),
+		res)
+	if err == nil {
+		// Artifact is cached, lets return that
+		out.Parameters = res.Parameters
+		return res, out, nil
+	}
+
+	// Cache it for next time.
+	defer func() {
+		err1 := db.SetSubject(
+			config_obj, notebook_path_manager.Artifact(), res)
+		if err1 != nil && ret_err == nil {
+			ret_err = err1
+		}
+	}()
+
+	// Now build the pseudo artifact.
+	seen := make(map[string]bool)
+	seen_tools := make(map[string]bool)
+
+	for idx, artifact_name := range out.Artifacts {
+		artifact, pres := global_repository.Get(ctx, config_obj, artifact_name)
+		if !pres {
+			return nil, nil, fmt.Errorf("Artifact not found: %v: %w",
+				artifact_name, utils.NotFoundError)
 		}
 
-		end_time := utils.GetTime().Now().UTC().Format(time.RFC3339)
-		if notebook_metadata.Context.EndTime > 0 {
-			end_time = utils.ParseTimeFromInt64(
-				notebook_metadata.Context.EndTime).UTC().Format(time.RFC3339)
+		// Copy out all the exports from the artifact
+		res.Export += artifact.Export
+
+		// Resolve any imports - expand their export directly into the
+		// pseudo artifact's export section because it will be
+		// compiled in a private repository, so wont be able to see
+		// the imported artifact definitions.
+		for _, imp := range artifact.Imports {
+			dep, pres := global_repository.Get(ctx, config_obj, imp)
+			if !pres {
+				return nil, nil, fmt.Errorf(
+					"Artifact %v imports artifact %v which is not known",
+					artifact_name, imp)
+			}
+
+			res.Export += dep.Export
 		}
 
-		result = append(result, &api_proto.NotebookCellRequest{
-			Type: "VQL",
+		// Copy out all the tools
+		for _, t := range artifact.Tools {
+			_, pres := seen_tools[t.Name]
+			if pres {
+				continue
+			}
+			seen_tools[t.Name] = true
+			res.Tools = append(res.Tools, t)
+		}
 
-			// This env dict overlays on top of the global
-			// notebook env where we can find hunt_id, flow_id
-			// etc.
-			Env: []*api_proto.Env{{
-				Key: "ArtifactName", Value: artifact_name,
-			}},
-			Input: fmt.Sprintf(`/*
+		// Copy out column types
+		res.ColumnTypes = append(res.ColumnTypes, artifact.ColumnTypes...)
+
+		// Copy out all the parameters
+		for _, p := range artifact.Parameters {
+			_, pres := seen[p.Name]
+			if pres {
+				continue
+			}
+			seen[p.Name] = true
+			res.Parameters = append(res.Parameters, p)
+		}
+
+		// If there are no sources in this artifact add a single fake
+		// source so we can do something.
+		sources := artifact.Sources
+		if len(sources) == 0 {
+			sources = append(sources, &artifacts_proto.ArtifactSource{})
+		}
+
+		for _, s := range sources {
+			new_source := &artifacts_proto.ArtifactSource{
+				Name: s.Name,
+			}
+			res.Sources = append(res.Sources, new_source)
+
+			source_name := artifact_name
+			if new_source.Name != "" {
+				source_name += "/" + new_source.Name
+			}
+
+			// If there are too many cells we add a placeholder to
+			// allow the user to calculate them on demand. Otherwise
+			// we may overwhelm the notebook workers.
+			output := ""
+			if idx > 4 {
+				output = fmt.Sprintf("<h3>%s</h3><br>Recalculate to View", source_name)
+			}
+
+			custom_cells := false
+			// Tag custom cells with the artifact name and the source
+			for _, n_orig := range s.Notebook {
+				n := proto.Clone(n_orig).(*artifacts_proto.NotebookSourceCell)
+				new_source.Notebook = append(new_source.Notebook, n)
+				switch strings.ToLower(n.Type) {
+
+				// Artifacts may set a notebook cell to type "none" to
+				// declare a custom notebook which will not actually
+				// be used. This allows suppressing notebook cells for
+				// this source.
+				case "vql", "md", "markdown", "none":
+					n.Env = append(n.Env, &artifacts_proto.ArtifactEnv{
+						Key:   "ArtifactName",
+						Value: source_name,
+					})
+					custom_cells = true
+				}
+			}
+
+			if !custom_cells {
+				// No notebook specified for this source, add a
+				// default.
+
+				default_limit := int64(50)
+				if config_obj.Defaults != nil &&
+					config_obj.Defaults.NotebookDefaultNewCellRows > 0 {
+					default_limit = config_obj.Defaults.NotebookDefaultNewCellRows
+				}
+
+				switch artifact_modes.ModeNameToMode(artifact.Type) {
+				case artifact_modes.MODE_CLIENT_EVENT,
+					artifact_modes.MODE_SERVER_EVENT:
+					new_source.Notebook = append(new_source.Notebook,
+						&artifacts_proto.NotebookSourceCell{
+							Type:   "vql",
+							Output: output,
+							Template: fmt.Sprintf(`
+/*
 # Events from %v
+
+From {{ Scope "StartTime" }} to {{ Scope "EndTime" }}
 */
-LET StartTime <= "%s"
-LET EndTime <= "%s"
 
 SELECT timestamp(epoch=_ts) AS ServerTime, *
- FROM source(start_time=StartTime, end_time=EndTime)
+ FROM source(start_time=StartTime, end_time=EndTime, artifact=%q)
+LIMIT %v
+`, source_name, source_name, default_limit),
+						})
+
+				default:
+					new_source.Notebook = append(new_source.Notebook,
+						&artifacts_proto.NotebookSourceCell{
+							Type:   "vql",
+							Output: output,
+							Template: fmt.Sprintf(`
+/*
+# %v
+*/
+SELECT * FROM source(artifact=%q)
 LIMIT 50
-`, artifact_name, start_time, end_time),
-		})
+`, source_name, source_name),
+						})
+				}
+			}
+		}
 	}
 
-	return result
-}
+	// Add any custom variables.
+	flow_id, client_id, ok := utils.ClientNotebookId(out.NotebookId)
+	if ok {
+		res.Parameters = append(res.Parameters,
+			[]*artifacts_proto.ArtifactParameter{{
+				Name:        "ClientId",
+				Description: "Implied client id from notebook",
+				Default:     client_id,
+			}, {
+				Name:        "FlowId",
+				Description: "Implied flow id from notebook",
+				Default:     flow_id,
+			}}...)
 
-func getCustomCells(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	repository services.Repository,
-	source string,
-	notebook_metadata *api_proto.NotebookMetadata) []*api_proto.NotebookCellRequest {
-	var result []*api_proto.NotebookCellRequest
+		res.Sources = append(res.Sources, &artifacts_proto.ArtifactSource{
+			Notebook: []*artifacts_proto.NotebookSourceCell{{
+				Name: "Collection logs",
+				Type: "vql_suggestion",
+				Template: `
+/*
+# Flow logs
+*/
 
-	// Check if the artifact has custom notebook cells defined.
-	artifact_source, pres := repository.GetSource(ctx, config_obj, source)
-	if !pres {
-		return nil
+SELECT * FROM flow_logs(client_id=ClientId, flow_id=FlowId)
+`,
+			}}})
 	}
-	env := []*api_proto.Env{{
-		Key: "ArtifactName", Value: source,
-	}}
 
-	// If the artifact_source defines a notebook, let it do its own thing.
-	for _, cell := range artifact_source.Notebook {
-		for _, i := range cell.Env {
-			env = append(env, &api_proto.Env{
-				Key:   i.Key,
-				Value: i.Value,
+	_, client_id, ok = utils.EventNotebookId(out.NotebookId)
+	if ok {
+		res.Parameters = append(res.Parameters,
+			[]*artifacts_proto.ArtifactParameter{
+				{
+					Name:        "ClientId",
+					Description: "Implied client id from notebook",
+					Default:     client_id,
+				},
+				{
+					Name:        "StartTime",
+					Description: "Start of time range to consider",
+					Type:        "timestamp",
+				},
+				{
+					Name:        "EndTime",
+					Description: "End of time range to consider",
+					Type:        "timestamp",
+				},
+			}...)
+	}
+
+	hunt_id, ok := utils.HuntNotebookId(out.NotebookId)
+	if ok {
+		res.Parameters = append(res.Parameters,
+			&artifacts_proto.ArtifactParameter{
+				Name:        "HuntId",
+				Description: "Implied hunt id from notebook",
+				Default:     hunt_id,
 			})
-		}
 
-		request := &api_proto.NotebookCellRequest{
-			Type:   cell.Type,
-			Env:    env,
-			Output: cell.Output,
-			Sync:   true,
-			Input:  cell.Template}
-
-		switch strings.ToLower(cell.Type) {
-		case "none":
-			result = append(result, request)
-
-		case "vql", "md", "markdown":
-			result = append(result, request)
-
-		case "vql_suggestion":
-			request.Type = "vql"
-			request.Name = cell.Name
-			notebook_metadata.Suggestions = append(
-				notebook_metadata.Suggestions, request)
-
-		default:
-			logger := logging.GetLogger(config_obj, &logging.GUIComponent)
-			logger.Error("getDefaultCellsForSources: Cell type %v invalid",
-				cell.Type)
-		}
-	}
-	return result
-}
-
-func getCellsForHunt(ctx context.Context,
-	config_obj *config_proto.Config,
-	hunt_id string,
-	notebook_metadata *api_proto.NotebookMetadata) []*api_proto.NotebookCellRequest {
-
-	dispatcher, err := services.GetHuntDispatcher(config_obj)
-	if err != nil {
-		return nil
-	}
-
-	hunt_obj, pres := dispatcher.GetHunt(ctx, hunt_id)
-	if !pres {
-		return nil
-	}
-	sources := hunt_obj.ArtifactSources
-	if len(sources) == 0 {
-		if hunt_obj.StartRequest != nil {
-			sources = hunt_obj.StartRequest.Artifacts
-		} else {
-			return nil
-		}
-	}
-
-	// Add a default hunt suggestion
-	notebook_metadata.Suggestions = append(notebook_metadata.Suggestions,
-		&api_proto.NotebookCellRequest{
-			Name: "Hunt Progress",
-			Type: "vql",
-			Input: `
+		// Add some hunt specific suggestions
+		res.Sources = append(res.Sources, &artifacts_proto.ArtifactSource{
+			Notebook: []*artifacts_proto.NotebookSourceCell{{
+				Name: "Hunt Progress",
+				Type: "vql_suggestion",
+				Template: `
 
 LET ColumnTypes <= dict(
    ClientId="client_id",
@@ -445,10 +466,13 @@ WHERE FlowState =~ 'ERROR'
 --    hunt_add(client_id=ClientId, hunt_id=HuntId, relaunch=TRUE) AS NewCollection
 -- FROM ERRORS
 
--- Uncomment the below to reissue a new collection and add to the same hunt
+-- Uncomment the below to reissue a new collection and add to the same hunt.
+-- You will have to also change "UpdateArtifactName" and add a spec for
+-- the parameters. (See docs for collect_client())
 -- SELECT *,
 --   hunt_add(client_id=ClientId, hunt_id=HuntId,
---     flow_id=collect_client(artifacts="UpdateArtifactName").flow_id) AS NewCollection
+--     flow_id=collect_client(artifacts="UpdateArtifactName",
+--                            client_id=ClientId).flow_id) AS NewCollection
 -- FROM ERRORS
 SELECT * FROM ERRORS
 
@@ -478,155 +502,332 @@ SELECT ClientId,
 FROM hunt_flows(hunt_id=HuntId)
 WHERE FlowState =~ 'Finished'
 LIMIT 1000
-`})
+`,
+			}}})
+	}
 
-	return getDefaultCellsForSources(ctx, config_obj, sources, notebook_metadata)
+	// Keep the pseudo artifact's parameters list in the notebook metadata.
+	out.Parameters = res.Parameters
+
+	return res, out, nil
 }
 
-func getCellsForFlow(ctx context.Context,
+// Populates the specs from defaults:
+//  1. If this is a client artifact, specs are populated from the flow
+//     request.
+//  2. For hunt artifacts the specs are populated from hunt object.
+//  3. For event artifacts the specs are populated from the client or
+//     server monitoring tables.
+func populateDefaultSpecs(
+	ctx context.Context,
 	config_obj *config_proto.Config,
-	client_id, flow_id string,
-	notebook_metadata *api_proto.NotebookMetadata) []*api_proto.NotebookCellRequest {
+	in *api_proto.NotebookMetadata) error {
+	// Is it a client notebook?
+	flow_id, client_id, ok := utils.ClientNotebookId(in.NotebookId)
+	if ok {
+		launcher, err := services.GetLauncher(config_obj)
+		if err != nil {
+			return err
+		}
+
+		flow_obj, err := launcher.GetFlowDetails(ctx, config_obj,
+			services.GetFlowOptions{
+				// Get all the info
+				Request: true,
+			}, client_id, flow_id)
+		if err != nil {
+			return err
+		}
+
+		if flow_obj.Context != nil &&
+			flow_obj.Context.Request != nil {
+			req := flow_obj.Context.Request
+			in.Artifacts = req.Artifacts
+			in.Specs = req.Specs
+		}
+		return nil
+	}
+
+	hunt_id, ok := utils.HuntNotebookId(in.NotebookId)
+	if ok {
+		hunt_dispatcher, err := services.GetHuntDispatcher(config_obj)
+		if err != nil {
+			return err
+		}
+
+		hunt_obj, ok := hunt_dispatcher.GetHunt(ctx,
+			// Get the full request so we know the hunt parameters.
+			services.GetHuntOptions{Request: true},
+			hunt_id)
+		if !ok {
+			return fmt.Errorf("Hunt not found: %v: %w",
+				hunt_id, utils.NotFoundError)
+		}
+
+		if hunt_obj.StartRequest != nil {
+			req := hunt_obj.StartRequest
+			in.Artifacts = req.Artifacts
+			in.Specs = req.Specs
+		}
+		return nil
+	}
+
+	artifact_name, client_id, ok := utils.EventNotebookId(in.NotebookId)
+	if ok {
+		specs, err := getSpecFromEventArtifact(ctx, config_obj,
+			artifact_name, client_id)
+		if err != nil {
+			return err
+		}
+
+		in.Artifacts = []string{artifact_name}
+		in.Specs = specs
+	}
+
+	return nil
+}
+
+// Given the pseudo notebook artifact and the pre-populated request,
+// calculate the specs required to launch the notebook artifact.
+func CalculateSpecs(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact *artifacts_proto.Artifact,
+	in *api_proto.NotebookMetadata) (*flows_proto.ArtifactSpec, error) {
+
+	// Populate specs if they are not specified.
+	if in.Specs == nil {
+		err := populateDefaultSpecs(ctx, config_obj, in)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// The caller can set a Specs set OR set separate env
+	seen := make(map[string]string)
+	for _, s := range in.Specs {
+		if s.Parameters != nil {
+			for _, e := range s.Parameters.Env {
+				seen[e.Key] = e.Value
+			}
+		}
+	}
+
+	for _, e := range in.Env {
+		seen[e.Key] = e.Value
+	}
+
+	res := &flows_proto.ArtifactSpec{
+		Artifact:   artifact.Name,
+		Parameters: &flows_proto.ArtifactParameters{},
+	}
+
+	for _, p := range artifact.Parameters {
+		v, pres := seen[p.Name]
+		if pres {
+			res.Parameters.Env = append(res.Parameters.Env,
+				&actions_proto.VQLEnv{
+					Key:   p.Name,
+					Value: v,
+				})
+		}
+	}
+
+	return res, nil
+}
+
+// Compile the pseudo artifact into a set of requests that can be used
+// to recreate VQL state. These requests are added to the notebook
+// metadata.
+func updateNotebookRequests(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact *artifacts_proto.Artifact,
+	spec *flows_proto.ArtifactSpec,
+	in *api_proto.NotebookMetadata) error {
+
+	// Create a child repository as we will need to update the
+	// artifact definitions.
+	manager, err := services.GetRepositoryManager(config_obj)
+	if err != nil {
+		return err
+	}
+
+	global_repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return err
+	}
+
+	// The new repository is isolated but will search the global
+	// repository for any artifacts it does not know about.
+	repository := manager.NewRepository()
+	repository.SetParent(global_repository, config_obj)
+
+	_, err = repository.LoadProto(artifact, services.ArtifactOptions{})
+	if err != nil {
+		return err
+	}
 
 	launcher, err := services.GetLauncher(config_obj)
 	if err != nil {
-		return nil
+		return err
 	}
 
-	flow_details, err := launcher.GetFlowDetails(
-		ctx, config_obj, client_id, flow_id)
+	acl_manager := acl_managers.NullACLManager{}
+
+	in.Requests, err = launcher.CompileCollectorArgs(
+		ctx, config_obj, acl_manager, repository,
+		services.CompilerOptions{
+			DisablePrecondition: true,
+		},
+		&flows_proto.ArtifactCollectorArgs{
+			Artifacts: []string{artifact.Name},
+			Specs:     []*flows_proto.ArtifactSpec{spec},
+		})
 	if err != nil {
-		return nil
-	}
-	flow_context := flow_details.Context
-
-	// Create a cell for each possible source
-	var sources []string
-
-	if flow_context.Request != nil {
-		manager, err := services.GetRepositoryManager(config_obj)
-		if err != nil {
-			return nil
-		}
-
-		repository, err := manager.GetGlobalRepository(config_obj)
-		if err != nil {
-			return nil
-		}
-
-		for _, artifact_name := range flow_context.Request.Artifacts {
-			artifact, pres := repository.Get(ctx, config_obj, artifact_name)
-			if !pres {
-				continue
-			}
-
-			for _, source := range artifact.Sources {
-				if source.Name == "" {
-					sources = append(sources, artifact.Name)
-					break
-				}
-				sources = append(sources, fmt.Sprintf("%v/%v", artifact.Name, source.Name))
-			}
-		}
+		return err
 	}
 
-	notebook_metadata.Suggestions = append(notebook_metadata.Suggestions,
-		&api_proto.NotebookCellRequest{
-			Name: "Collection logs",
-			Type: "vql",
-			Input: `
-/*
-# Flow logs
-*/
+	ct_var := ordereddict.NewDict()
+	for _, ct := range artifact.ColumnTypes {
+		ct_var.Set(ct.Name, ct.Type)
+	}
 
-SELECT * FROM flow_logs(client_id=ClientId, flow_id=FlowId)
-`,
+	for _, r := range in.Requests {
+		r.Env = append(r.Env, &actions_proto.VQLEnv{
+			Key:   "ColumnTypes",
+			Value: json.MustMarshalString(ct_var),
 		})
 
-	return getDefaultCellsForSources(
-		ctx, config_obj, sources, notebook_metadata)
+		r.Query = append([]*actions_proto.VQLRequest{
+			{VQL: "LET ColumnTypes <= parse_json(data=ColumnTypes)"},
+		}, r.Query...)
+	}
+
+	return nil
 }
 
-func getDefaultCellsForSources(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	sources []string,
-	notebook_metadata *api_proto.NotebookMetadata) []*api_proto.NotebookCellRequest {
-	manager, err := services.GetRepositoryManager(config_obj)
-	if err != nil {
-		return nil
-	}
+// Get the initial cells from a notebook artifact. Each source should
+// contain a notebook clause.
+func getInitialCellsFromArtifacts(
+	artifact *artifacts_proto.Artifact,
+	in *api_proto.NotebookMetadata) (
+	result []*api_proto.NotebookCellRequest, err error) {
 
-	repository, err := manager.GetGlobalRepository(config_obj)
-	if err != nil {
-		return nil
-	}
+	for _, s := range artifact.Sources {
+		for _, n := range s.Notebook {
+			var env []*api_proto.Env
 
-	// Create one table per artifact by default.
-	var result []*api_proto.NotebookCellRequest
-
-	for _, source := range sources {
-		artifact, pres := repository.Get(ctx, config_obj, source)
-		if pres {
-			notebook_metadata.ColumnTypes = append(notebook_metadata.ColumnTypes,
-				artifact.ColumnTypes...)
-		}
-
-		new_cells := getCustomCells(ctx, config_obj, repository,
-			source, notebook_metadata)
-		result = append(result, new_cells...)
-
-		// Build a default empty notebook that shows off all the
-		// results if there are no custom cells.
-		if len(new_cells) == 0 {
-			var query string
-			orgs, pres := getKeyFromEnv(notebook_metadata.Env, "Orgs")
-			if pres && orgs != "" {
-				org_ids := []string{}
-
-				for _, o := range strings.Split(orgs, ",") {
-					org_ids = append(org_ids, "'''"+o+"'''")
-				}
-				query = fmt.Sprintf(`
-LET Orgs <= (%v)
-
-/*
-# %v
-*/
-SELECT * FROM source(artifact=%q /*, orgs=Orgs */)
-LIMIT 50`, strings.Join(org_ids, ", "), source, source)
-			} else {
-				query = fmt.Sprintf(`
-/*
-# %v
-*/
-SELECT * FROM source(artifact=%q)
-LIMIT 50
-`, source, source)
+			// Allow the notebook to specify env variables per
+			// source.
+			for _, i := range n.Env {
+				env = append(env, &api_proto.Env{
+					Key:   i.Key,
+					Value: i.Value,
+				})
 			}
 
-			result = append(result, &api_proto.NotebookCellRequest{
-				Type: "VQL",
+			switch strings.ToLower(n.Type) {
+			case "none":
+				// Means no cell to be produced.
+				result = append(result, &api_proto.NotebookCellRequest{
+					Type: n.Type,
+				})
 
-				// This env dict overlays on top of the global
-				// notebook env where we can find hunt_id, flow_id
-				// etc.
-				Env: []*api_proto.Env{{
-					Key: "ArtifactName", Value: source,
-				}},
-				Input: query,
-			})
+			case "vql", "md", "markdown":
+				result = append(result, &api_proto.NotebookCellRequest{
+					Type:   n.Type,
+					Input:  n.Template,
+					Output: n.Output,
+					Env:    env,
+
+					// Need to wait for all cells to calculate or
+					// we will overload the network workers if
+					// there are too many.
+					Sync: true,
+				})
+			case "vql_suggestion":
+				in.Suggestions = append(in.Suggestions,
+					&api_proto.NotebookCellRequest{
+						Type:  "vql",
+						Name:  n.Name,
+						Input: n.Template,
+						Env:   env,
+					})
+			}
 		}
 	}
-
-	return result
+	return result, nil
 }
 
-func getKeyFromEnv(env []*api_proto.Env, key string) (string, bool) {
-	for _, e := range env {
-		if e.Key == key {
-			return e.Value, true
+func getInitialCells(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	in *api_proto.NotebookMetadata) (
+	[]*api_proto.NotebookCellRequest, *api_proto.NotebookMetadata, error) {
+
+	psuedo_artifact, out, err := CalculateNotebookArtifact(
+		ctx, config_obj, in)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	spec, err := CalculateSpecs(ctx, config_obj, psuedo_artifact, out)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Add the VQL requests to the notebook
+	err = updateNotebookRequests(ctx, config_obj, psuedo_artifact, spec, out)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cells, err := getInitialCellsFromArtifacts(psuedo_artifact, out)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return cells, out, err
+}
+
+// Analyze the event table to extract the parameters that the event
+// artifact was launched with.
+func getSpecFromEventArtifact(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact, client_id string) (res []*flows_proto.ArtifactSpec, err error) {
+
+	if client_id == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
+		server_monitoring_service, err := services.GetServerEventManager(
+			config_obj)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, spec := range server_monitoring_service.Get().Specs {
+			if spec.Artifact == artifact {
+				res = append(res, spec)
+				return res, nil
+			}
+		}
+	} else {
+		client_event_manager, err := services.ClientEventManager(config_obj)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, spec := range client_event_manager.GetClientSpec(
+			ctx, config_obj, client_id) {
+			if spec.Artifact == artifact {
+				res = append(res, spec)
+				return res, nil
+			}
 		}
 	}
-	return "", false
+
+	res = append(res, &flows_proto.ArtifactSpec{
+		Artifact: artifact,
+	})
+	return res, nil
 }

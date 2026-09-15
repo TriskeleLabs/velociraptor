@@ -7,6 +7,7 @@ import (
 	"github.com/pkg/sftp"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -22,12 +23,6 @@ type SSHFileSystemAccessor struct {
 }
 
 func (self SSHFileSystemAccessor) New(scope vfilter.Scope) (accessors.FileSystemAccessor, error) {
-
-	err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_READ)
-	if err != nil {
-		return nil, err
-	}
-
 	ssh_client, closer, err := GetSSHClient(scope)
 	if err != nil {
 		return nil, err
@@ -40,15 +35,30 @@ func (self SSHFileSystemAccessor) New(scope vfilter.Scope) (accessors.FileSystem
 	}
 
 	// Close the ssh client when the scope destroys.
-	vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+	err = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 		sftp_client.Close()
 		_ = closer()
 	})
+	if err != nil {
+		sftp_client.Close()
+		_ = closer()
+		return nil, err
+	}
 
 	return &SSHFileSystemAccessor{
 		scope:       scope,
 		sftp_client: sftp_client,
 	}, nil
+}
+
+func (self SSHFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "ssh",
+		Description: `Access a remote system's filesystem via SSH/SFTP.`,
+		Permissions: []acls.ACL_PERMISSION{acls.NETWORK},
+		ScopeVar:    constants.SSH_CONFIG,
+		ArgType:     &SSHAccessorArgs{},
+	}
 }
 
 func (self SSHFileSystemAccessor) Lstat(filename string) (
@@ -129,28 +139,5 @@ func (self SSHFileSystemAccessor) OpenWithOSPath(filename *accessors.OSPath) (
 }
 
 func init() {
-	accessors.Register("ssh", &SSHFileSystemAccessor{}, `
-Access a remote system's filesystem via SSH/SFTP.
-
-This accessor allows accessing remote systems via SFTP/SSH.
-This is useful for being able to search remote systems where it is not possible
-to run a Velociraptor client directly on the endpoint. For example, on embedded
-edge devices such as routers/firewalls/VPNs etc.
-
-To use this accessor you will need to provide credentials via the SSH_CONFIG
-scope variable:
-
-`+"```"+`vql
-LET SSH_CONFIG <= dict(hostname='localhost:22',
-    username='mic',
-    private_key=read_file(filename='/home/mic/.ssh/id_rsa'))
-`+"```"+`
-
-NOTES:
-
-1. hostname must have a port after the column.
-2. You can provide a password via the password parameter
-3. The private_key parameter must contain an unencrypted PEM encoded SSH private key pair.
-
-`)
+	accessors.Register(&SSHFileSystemAccessor{})
 }

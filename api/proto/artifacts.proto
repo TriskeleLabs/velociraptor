@@ -13,6 +13,7 @@ message FieldSelector {
     bool description = 2;
     bool type = 3;
     bool sources = 4;
+    bool tags = 5;
 }
 
 message GetArtifactsRequest {
@@ -35,10 +36,6 @@ message GetArtifactsRequest {
 }
 
 message GetArtifactRequest {
-    // Deprecated.
-    // string vfs_path = 1 [(sem_type) = {
-    //        description: "The vfs path relative to the artifacts definition store."
-    //    }];
     string name = 2 [(sem_type) = {
             description: "The artifact name."
         }];
@@ -52,24 +49,33 @@ message GetArtifactResponse {
 
 
 message SetArtifactRequest {
-    // Deprecated
-    //    string vfs_path = 1 [(sem_type) = {
-    //        description: "The vfs path relative to the artifacts definition store."
-    //    }];
-
     string artifact = 2 [(sem_type) = {
             description: "The artifact data, or a default.",
         }];
+
+    // Also set these tags.
+    repeated string tags = 4;
 
     enum Operation {
         SET = 0;
         DELETE = 1;
         CHECK = 2;
+
+        // Only set the artifact if there are no errors or warnings.
+        CHECK_AND_SET = 3;
     }
 
     Operation op = 3 [(sem_type) = {
             description: "What to do with the artifact?",
         }];
+}
+
+message SetArtifactResponse {
+    bool error = 1;
+    string error_message = 2;
+
+    repeated string errors = 3;
+    repeated string warnings = 4;
 }
 
 message LoadArtifactError {
@@ -79,6 +85,7 @@ message LoadArtifactError {
 
 message LoadArtifactPackRequest {
     string prefix = 1;
+    repeated string tags = 6;
     string filter = 2;
 
     // The API can specify the archive two ways:

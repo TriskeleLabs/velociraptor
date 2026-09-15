@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,7 +18,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -28,10 +30,12 @@ import (
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
+	kingpin "github.com/alecthomas/kingpin/v2"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/file_store/uploader"
 	logging "www.velocidex.com/golang/velociraptor/logging"
@@ -39,6 +43,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/startup"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -71,6 +76,13 @@ var (
 	fs_command_cat      = fs_command.Command("cat", "Dump a file to the terminal")
 	fs_command_cat_path = fs_command_cat.Arg(
 		"path", "The path to cat").Required().String()
+
+	fs_command_zcat = fs_command.Command(
+		"zcat", "Dump a compressed filestore file")
+	fs_command_zcat_chunk_path = fs_command_zcat.Arg(
+		"chunk_path", "The path to the .chunk index file").Required().File()
+	fs_command_zcat_file_path = fs_command_zcat.Arg(
+		"file_path", "The path to the compressed file to dump").Required().File()
 
 	fs_command_rm      = fs_command.Command("rm", "Remove file (only filestore supported)")
 	fs_command_rm_path = fs_command_rm.Arg(
@@ -129,13 +141,17 @@ func doLS(path, accessor string) error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	config_obj.Services = services.GenericToolServices()
 	sm, err := startup.StartToolServices(ctx, config_obj)
+	if err != nil {
+		return err
+	}
 	defer sm.Close()
 
+	config_obj, err = maybeGetOrgConfig(*org_id, config_obj)
 	if err != nil {
 		return err
 	}
@@ -173,7 +189,8 @@ func doLS(path, accessor string) error {
 	query := "SELECT Name, Size, Mode.String AS Mode, Mtime, Data " +
 		"FROM glob(globs=path, accessor=accessor) "
 	if *fs_command_verbose {
-		query = strings.Replace(query, "Name", "FullPath", 1)
+		query = "SELECT OSPath, Size, Mode.String AS Mode, Mtime, Data " +
+			"FROM glob(globs=path, accessor=accessor) "
 	}
 
 	// Special handling for ntfs.
@@ -198,12 +215,16 @@ func doRM(path, accessor string) error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
+	if err != nil {
+		return err
+	}
 	defer sm.Close()
 
+	config_obj, err = maybeGetOrgConfig(*org_id, config_obj)
 	if err != nil {
 		return err
 	}
@@ -239,8 +260,8 @@ func doRM(path, accessor string) error {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	query := "SELECT FullPath, Size, Mode.String AS Mode, Mtime, " +
-		"file_store_delete(path=FullPath) AS Deletion " +
+	query := "SELECT OSPath, Size, Mode.String AS Mode, Mtime, " +
+		"file_store_delete(path=OSPath) AS Deletion " +
 		"FROM glob(globs=path, accessor=accessor) "
 
 	err = eval_query(sm.Ctx,
@@ -261,12 +282,16 @@ func doCp(path, accessor string, dump_dir string) error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
+	if err != nil {
+		return err
+	}
 	defer sm.Close()
 
+	config_obj, err = maybeGetOrgConfig(*org_id, config_obj)
 	if err != nil {
 		return err
 	}
@@ -336,11 +361,11 @@ func doCp(path, accessor string, dump_dir string) error {
 SELECT * from foreach(
   row={
     SELECT Name, Size, Mode.String AS Mode,
-       Mtime, Data, FullPath
+       Mtime, Data, OSPath
     FROM glob(globs=path, accessor=accessor)
   }, query={
      SELECT Name, Size, Mode, Mtime, Data,
-     upload(file=FullPath, accessor=accessor, name=Name) AS Upload
+     upload(file=OSPath, accessor=accessor, name=Name) AS Upload
      FROM scope()
   })`, scope, builder.Env)
 	if err != nil {
@@ -353,7 +378,7 @@ SELECT * from foreach(
 func doCat(path, accessor_name string) error {
 	logging.DisableLogging()
 
-	_, err := APIConfigLoader.
+	config_obj, err := APIConfigLoader.
 		WithNullLoader().LoadAndValidate()
 	if err != nil {
 		return fmt.Errorf("Unable to load config file: %w", err)
@@ -365,7 +390,35 @@ func doCat(path, accessor_name string) error {
 		path = matches[2]
 	}
 
-	scope := vql_subsystem.MakeScope()
+	ctx, cancel := Install_sig_handler()
+	defer cancel()
+
+	config_obj.Services = services.GenericToolServices()
+	sm, err := startup.StartToolServices(ctx, config_obj)
+	if err != nil {
+		return err
+	}
+	defer sm.Close()
+
+	config_obj, err = maybeGetOrgConfig(*org_id, config_obj)
+	if err != nil {
+		return err
+	}
+
+	logger := &LogWriter{config_obj: config_obj}
+	builder := services.ScopeBuilder{
+		Config:     config_obj,
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     log.New(logger, "", 0),
+	}
+
+	manager, err := services.GetRepositoryManager(config_obj)
+	if err != nil {
+		return err
+	}
+	scope := manager.BuildScope(builder)
+	defer scope.Close()
+
 	accessor, err := accessors.GetAccessor(accessor_name, scope)
 	if err != nil {
 		return err
@@ -380,22 +433,61 @@ func doCat(path, accessor_name string) error {
 	return err
 }
 
+func doZCat(chunk_fd, file_fd *os.File) error {
+	defer chunk_fd.Close()
+	defer file_fd.Close()
+
+	if !strings.HasSuffix(chunk_fd.Name(), ".chunk") {
+		return fmt.Errorf("Chunk file %v does not have the .chunk extension", chunk_fd.Name())
+	}
+
+	chunk_buf := make([]byte, api.SizeofCompressedChunk)
+	for {
+		_, err := chunk_fd.Read(chunk_buf)
+		if err != nil {
+			break
+		}
+
+		chunk := &api.CompressedChunk{}
+		err = binary.Read(bytes.NewReader(chunk_buf), binary.LittleEndian, chunk)
+		if err != nil {
+			return err
+		}
+
+		compressed := make([]byte, chunk.CompressedLength)
+		_, err = file_fd.Seek(chunk.ChunkOffset, os.SEEK_SET)
+		if err != nil {
+			return err
+		}
+
+		n, err := file_fd.Read(compressed)
+		if err != nil || int64(n) != chunk.CompressedLength {
+			break
+		}
+
+		uncompressed, err := utils.UncompressWithLimit(
+			context.Background(), compressed, chunk.UncompressedLength)
+		if err != nil {
+			break
+		}
+
+		_, err = io.Copy(os.Stdout, bytes.NewReader(uncompressed))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Only register the filesystem accessor if we have a proper valid server config.
 func initFilestoreAccessor(config_obj *config_proto.Config) error {
 	if config_obj.Datastore != nil {
 		fs_factory := file_store_accessor.NewFileStoreFileSystemAccessor(config_obj)
-		accessors.Register("fs", fs_factory,
-			`Provide access to the server's filestore and datastore.
-
-Many VQL plugins produce references to files stored on the server. This accessor can be used to open those files and read them. Typically references to filestore or datastore files have the "fs:" or "ds:" prefix.
-`)
+		accessors.Register(fs_factory)
 
 		sparse_fs_factory := file_store_accessor.NewSparseFileStoreFileSystemAccessor(config_obj)
-		accessors.Register("fs_sparse", sparse_fs_factory,
-			`Provide access to the server's filestore and datastore.
-
-This accessor expands sparse files. Reading from a sparse region will result in zeros being returned.
-`)
+		accessors.Register(sparse_fs_factory)
 	}
 	return nil
 }
@@ -404,16 +496,25 @@ func init() {
 	command_handlers = append(command_handlers, func(command string) bool {
 		switch command {
 		case fs_command_ls.FullCommand():
-			doLS(*fs_command_ls_path, *fs_command_accessor)
+			err := doLS(*fs_command_ls_path, *fs_command_accessor)
+			kingpin.FatalIfError(err, "%s", fs_command_ls.FullCommand())
 
 		case fs_command_rm.FullCommand():
-			doRM(*fs_command_rm_path, *fs_command_accessor)
+			err := doRM(*fs_command_rm_path, *fs_command_accessor)
+			kingpin.FatalIfError(err, "%s", fs_command_rm.FullCommand())
 
 		case fs_command_cp.FullCommand():
-			doCp(*fs_command_cp_path, *fs_command_accessor, *fs_command_cp_outdir)
+			err := doCp(*fs_command_cp_path,
+				*fs_command_accessor, *fs_command_cp_outdir)
+			kingpin.FatalIfError(err, "%s", fs_command_cp.FullCommand())
 
 		case fs_command_cat.FullCommand():
-			doCat(*fs_command_cat_path, *fs_command_accessor)
+			err := doCat(*fs_command_cat_path, *fs_command_accessor)
+			kingpin.FatalIfError(err, "%s", fs_command_cat.FullCommand())
+
+		case fs_command_zcat.FullCommand():
+			err := doZCat(*fs_command_zcat_chunk_path, *fs_command_zcat_file_path)
+			kingpin.FatalIfError(err, "%s", fs_command_zcat.FullCommand())
 
 		default:
 			return false

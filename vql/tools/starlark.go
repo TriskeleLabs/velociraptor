@@ -12,7 +12,9 @@ import (
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 	"www.velocidex.com/golang/vfilter/types"
@@ -270,13 +272,16 @@ func interfaceAsStarlarkValue(ctx context.Context,
 		}
 
 		result := starlark.NewDict(new_dict.Len())
-		for key, value := range *new_dict.ToDict() {
+		for key, value := range new_dict.ToMap() {
 			mapValueStarlarked, err := interfaceAsStarlarkValue(ctx, scope, value)
 			if err != nil {
 				return nil, err
 			}
 
-			result.SetKey(starlark.String(key), mapValueStarlarked)
+			err = result.SetKey(starlark.String(key), mapValueStarlarked)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		//dict := starlarkstruct.FromStringDict(starlarkstruct.Default, result)
@@ -300,7 +305,7 @@ func reduceRecurse(obj vfilter.Any, ctx context.Context, scope vfilter.Scope) (v
 	case *ordereddict.Dict:
 		{
 			sub_dict := ordereddict.NewDict()
-			for key, value := range *t.ToDict() {
+			for key, value := range t.ToMap() {
 				results, err := reduceRecurse(value, ctx, scope)
 				if err != nil {
 					return nil, err
@@ -400,7 +405,7 @@ func makeKwargsTuple(ctx context.Context, scope vfilter.Scope,
 		return t.Items(), nil
 
 	default:
-		return nil, errors.New(fmt.Sprintf("Unsupported Type %T", starlark_args))
+		return nil, fmt.Errorf("Unsupported Type %T", starlark_args)
 	}
 
 	starlark_args.(*starlarkstruct.Struct).ToStringDict(new_string_dict)
@@ -423,7 +428,8 @@ func (self StarlarkCompileFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("starl", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "starl", args)()
+	defer utils.RecoverVQL(scope)
 
 	arg := StarlarkCompileArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, &arg)
@@ -463,6 +469,10 @@ func (self starlarkFuncWrapper) Copy() types.FunctionInterface {
 
 func (self starlarkFuncWrapper) Call(ctx context.Context,
 	scope types.Scope, args *ordereddict.Dict) types.Any {
+
+	functions.DeduplicatedLog(
+		ctx, scope,
+		"starl: Warning: This module is experiemental and may be removed in the future. Please provide feedback about its usefulness to the Velociraptor team!")
 
 	// create new thread per call
 	sthread := &starlark.Thread{Name: "VQL Thread", Load: starlib.Loader}

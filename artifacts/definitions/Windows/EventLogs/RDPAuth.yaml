@@ -1,17 +1,18 @@
 name: Windows.EventLogs.RDPAuth
 author: "Matt Green - @mgreen27"
 description: |
-    This artifact will extract Event Logs related to Remote Desktop sessions,
-    logon and logoff.
+  Extracts RDP authentication and session events from Security,
+  System, and Terminal Services event logs.
+  
+  Security channel - EventID in 4624,4634 AND LogonType 3, 7, or 10.
+  Security channel - EventID in 4778,4625,4779, or 4647.
+  System channel -  EventID 9009.
+  Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational - EventID 1149.
+  Microsoft-Windows-TerminalServices-LocalSessionManager/Operational - EventID 23,22,21,24,25,39, or 40.
 
-    Security channel - EventID in 4624,4634 AND LogonType 3, 7, or 10.
-    Security channel - EventID in 4778,4625,4779, or 4647.
-    System channel -  EventID 9009.
-    Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational - EventID 1149.
-    Microsoft-Windows-TerminalServices-LocalSessionManager/Operational - EventID 23,22,21,24,25,39, or 40.
-
-    Best use of this artifact is to collect RDP and Authentication events around
-    a timeframe of interest and order by EventTime to scope RDP activity.
+  Best use of this artifact is to collect RDP and Authentication
+  events around a timeframe of interest and order by EventTime to
+  scope RDP activity.
 
 reference:
   - https://ponderthebits.com/2018/02/windows-rdp-related-event-logs-identification-tracking-and-investigation/
@@ -59,6 +60,7 @@ sources:
   - query: |
       LET VSS_MAX_AGE_DAYS <= VSSAnalysisAge
       LET Accessor = if(condition=VSSAnalysisAge > 0, then="ntfs_vss", else="auto")
+      LET S = scope()
 
       -- firstly set timebounds for performance
       LET DateAfterTime <= if(condition=DateAfter,
@@ -84,33 +86,33 @@ sources:
                     System.Channel as Channel,
                     System.EventID.Value as EventID,
                     if(condition= System.Channel='Security',
-                        then= EventData.TargetDomainName,
-                        else= if(condition= UserData.EventXML.User,
-                            then= split(string=UserData.EventXML.User,sep='\\\\')[0],
-                            else= if(condition= UserData.EventXML.Param2,
-                                then= UserData.EventXML.Param2,
+                        then= S.EventData.TargetDomainName,
+                        else= if(condition= S.UserData.EventXML.User,
+                            then= split(string=S.UserData.EventXML.User,sep='\\\\')[0],
+                            else= if(condition= S.UserData.EventXML.Param2,
+                                then= S.UserData.EventXML.Param2,
                                 else= 'null' ))) as DomainName,
                     if(condition= System.Channel='Security',
-                        then= EventData.TargetUserName,
-                        else= if(condition= UserData.EventXML.User,
-                            then= split(string=UserData.EventXML.User,sep='\\\\')[1],
-                            else= if(condition= UserData.EventXML.Param1,
-                                then= UserData.EventXML.Param1,
+                        then= S.EventData.TargetUserName,
+                        else= if(condition= S.UserData.EventXML.User,
+                            then= split(string=S.UserData.EventXML.User,sep='\\\\')[1],
+                            else= if(condition= S.UserData.EventXML.Param1,
+                                then= S.UserData.EventXML.Param1,
                                 else= 'null' ))) as UserName,
                     if(condition= System.Channel='Security',
-                        then= if(condition= EventData.LogonType,
-                            then= EventData.LogonType,
+                        then= if(condition= S.EventData.LogonType,
+                            then= S.EventData.LogonType,
                             else= 'null' ),
                         else= 'null' ) as LogonType,
                     if(condition= System.Channel='Security',
-                        then= if(condition= EventData.IpAddress,
-                            then= EventData.IpAddress,
+                        then= if(condition= S.EventData.IpAddress,
+                            then= S.EventData.IpAddress,
                             else= 'null' ),
                         else= if(condition= System.Channel=~'TerminalServices',
-                            then= if(condition= UserData.EventXML.Address,
-                                then= UserData.EventXML.Address,
-                                else= if(condition= UserData.EventXML.Param3,
-                                    then= UserData.EventXML.Param3,
+                            then= if(condition= S.UserData.EventXML.Address,
+                                then= S.UserData.EventXML.Address,
+                                else= if(condition= S.UserData.EventXML.Param3,
+                                    then= S.UserData.EventXML.Param3,
                                     else= 'null')),
                             else= 'null' )) as SourceIP,
                     if(condition= System.Channel=~'TerminalServices|System',
@@ -126,15 +128,20 @@ sources:
                                 `1149`='RDP_INITIATION_SUCCESSFUL',
                                 `9009`='DESKTOPWINDOWMANAGER_CLOSED'),
                                     member=str(str=System.EventID.Value)),
-                        else=if(condition= System.EventID.Value = 4624 AND EventData.LogonType = 10,
+                        else=if(condition= System.EventID.Value = 4624
+                                           AND S.EventData.LogonType = 10,
                             then='RDP_LOGON_SUCCESSFUL_NEW',
-                        else=if(condition= System.EventID.Value = 4624 AND EventData.LogonType = 3,
+                        else=if(condition= System.EventID.Value = 4624
+                                           AND S.EventData.LogonType = 3,
                             then='LOGON_SUCCESSFUL',
-                        else=if(condition= System.EventID.Value = 4624 AND EventData.LogonType = 7,
+                        else=if(condition= System.EventID.Value = 4624
+                                           AND S.EventData.LogonType = 7,
                             then='LOGON_SUCCESSFUL_OLD',
-                        else=if(condition= System.EventID.Value = 4625 AND EventData.LogonType = 3,
+                        else=if(condition= System.EventID.Value = 4625
+                                           AND S.EventData.LogonType = 3,
                             then='LOGON_FAILED',
-                        else=if(condition= System.EventID.Value = 4625 AND EventData.LogonType = 10,
+                        else=if(condition= System.EventID.Value = 4625
+                                           AND S.EventData.LogonType = 10,
                             then='RDP_LOGON_FAILED',
                         else=
                             get(item=dict(

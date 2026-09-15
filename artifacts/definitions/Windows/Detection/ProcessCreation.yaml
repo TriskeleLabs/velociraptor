@@ -1,8 +1,7 @@
 name: Windows.Detection.ProcessCreation
 description: |
-  This artifact logs specific process creation events to
-  Velociraptor. It auto-installs Sysmon and it watches the Sysmon ETW
-  provider for new events.
+  Deploys Sysmon and watches the Sysmon ETW provider for specific
+  process creation events, which are then forwarded to the server.
 
 author: Jos Clephas - @DfirJos
 
@@ -53,7 +52,7 @@ sources:
       SELECT OS From info() where OS = 'windows'
 
     query: |
-      // Make sure sysmon is installed.
+      // Ensure that sysmon is installed.
       LET _ <= SELECT * FROM Artifact.Windows.Sysinternals.SysmonInstall(
          SysmonFileLocation=SysmonFileLocation)
 

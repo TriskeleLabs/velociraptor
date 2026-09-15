@@ -1,40 +1,44 @@
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package repository_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/actions"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
-	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/launcher"
 	"www.velocidex.com/golang/velociraptor/services/repository"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
@@ -53,20 +57,28 @@ func (self *PluginTestSuite) TestArtifactsSyntax() {
 	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
+	logging.ClearMemoryLogs()
+
 	err = repository.LoadBuiltInArtifacts(
 		self.Ctx, self.ConfigObj, manager.(*repository.RepositoryManager))
 	assert.NoError(self.T(), err)
+
+	assert.NotContains(self.T(),
+		strings.Join(logging.GetMemoryLogs(), "\n"),
+		"Cant parse asset")
 
 	ConfigObj := self.ConfigObj
 	repository, err := manager.GetGlobalRepository(ConfigObj)
 	assert.NoError(self.T(), err)
 
 	new_repository := manager.NewRepository()
+	new_repository.SetParent(repository, ConfigObj)
 
 	names, err := repository.List(self.Ctx, ConfigObj)
 	assert.NoError(self.T(), err)
 
 	for _, artifact_name := range names {
+		state := launcher.NewAnalysisState(artifact_name)
 		artifact, pres := repository.Get(self.Ctx, ConfigObj, artifact_name)
 		assert.True(self.T(), pres)
 
@@ -74,29 +86,29 @@ func (self *PluginTestSuite) TestArtifactsSyntax() {
 			_, err = new_repository.LoadProto(artifact,
 				services.ArtifactOptions{ValidateArtifact: true})
 			assert.NoError(self.T(), err, "Error compiling "+artifact_name)
+
+			launcher.VerifyArtifact(
+				self.Ctx, self.ConfigObj, new_repository, artifact, state)
+
+			for _, err := range state.Errors {
+				fmt.Printf("Error with %v: %v\n", artifact_name, err)
+			}
+			assert.True(self.T(), len(state.Errors) == 0)
 		}
 	}
-}
 
-var (
-	artifact_definitions = []string{`
-name: Test1
-sources:
-- query: SELECT * FROM Artifact.Test1.Foobar()
-`, `
-name: Test1.Foobar
-sources:
-- query: SELECT * FROM info()
-`, `
-name: Category.Test1
-sources:
-- query: SELECT * FROM Artifact.Test1.Foobar()
-`, `
-name: Category.Test2
-sources:
-- query: SELECT * FROM info()
-`}
-)
+	// Test that the artifacts match the well known queues
+	for _, wk := range artifacts.WELL_KNOWN_QUEUES {
+		artifact, pres := repository.Get(self.Ctx, ConfigObj, wk.ArtifactName)
+		assert.True(self.T(), pres, "Well Known Artifact %v not found",
+			wk.ArtifactName)
+
+		mode := artifact_modes.ModeNameToMode(artifact.Type)
+		assert.Equal(self.T(), mode, wk.ArtifactType,
+			"Well Known artifact %v has the wrong mode: %v vs %v",
+			wk.ArtifactName, mode.String(), wk.ArtifactType.String())
+	}
+}
 
 var (
 	artifact_definitions_precondition = []string{`
@@ -152,8 +164,7 @@ func (self *PluginTestSuite) TestArtifactPluginWithPrecondition() {
 		results.Set(query, rows)
 	}
 
-	g := goldie.New(self.T())
-	g.Assert(self.T(), "TestArtifactPluginWithPrecondition", json.MustMarshalIndent(results))
+	goldie.AssertJson(self.T(), "TestArtifactPluginWithPrecondition", results)
 }
 
 var (
@@ -212,8 +223,7 @@ func (self *PluginTestSuite) TestClientPluginMultipleSources() {
 		}
 	}
 
-	g := goldie.New(self.T())
-	g.Assert(self.T(), "TestClientPluginMultipleSources", []byte(results))
+	goldie.Assert(self.T(), "TestClientPluginMultipleSources", []byte(results))
 }
 
 var (
@@ -270,8 +280,8 @@ func (self *PluginTestSuite) TestClientPluginMultipleSourcesAndPrecondtions() {
 		results.Set(query, rows)
 	}
 
-	g := goldie.New(self.T())
-	g.Assert(self.T(), "TestClientPluginMultipleSourcesAndPrecondtions", json.MustMarshalIndent(results))
+	goldie.AssertJson(
+		self.T(), "TestClientPluginMultipleSourcesAndPrecondtions", results)
 
 }
 
@@ -324,8 +334,8 @@ func (self *PluginTestSuite) TestClientPluginMultipleSourcesAndPrecondtionsEvent
 		results.Set(query, rows)
 	}
 
-	g := goldie.New(self.T())
-	g.Assert(self.T(), "TestClientPluginMultipleSourcesAndPrecondtionsEvents", json.MustMarshalIndent(results))
+	goldie.AssertJson(self.T(),
+		"TestClientPluginMultipleSourcesAndPrecondtionsEvents", results)
 
 }
 

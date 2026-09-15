@@ -2,17 +2,15 @@ package journald
 
 import (
 	"context"
+	"time"
 
 	"github.com/Velocidex/go-journalctl/parser"
 	"github.com/Velocidex/ordereddict"
-	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/artifacts"
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/readers"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
@@ -20,7 +18,9 @@ import (
 type JournalPluginArgs struct {
 	Filenames []*accessors.OSPath `vfilter:"required,field=filename,doc=A list of journal log files to parse."`
 	Accessor  string              `vfilter:"optional,field=accessor,doc=The accessor to use."`
-	Raw       bool                `vfilter:"optional,field=raw,doc=Emit raw events (no parsed)."`
+	Raw       bool                `vfilter:"optional,field=raw,doc=Emit raw events (not parsed)."`
+	StartTime time.Time           `vfilter:"optional,field=start_time,doc=Only parse events newer than this time (default all times)."`
+	EndTime   time.Time           `vfilter:"optional,field=end_time,doc=Only parse events older than this time (default all times)."`
 }
 
 type JournalPlugin struct{}
@@ -30,7 +30,8 @@ func (self JournalPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *
 		Name:     "parse_journald",
 		Doc:      "Parse a journald file.",
 		ArgType:  type_map.AddType(scope, &JournalPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 
@@ -41,7 +42,8 @@ func (self JournalPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("parse_journald", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_journald", args)()
+		defer utils.RecoverVQL(scope)
 
 		arg := &JournalPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -50,43 +52,30 @@ func (self JournalPlugin) Call(
 			return
 		}
 
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("parse_journald: %s", err)
-			return
-		}
-
-		accessor, err := accessors.GetAccessor(arg.Accessor, scope)
-		if err != nil {
-			scope.Log("parse_journald: %s", err)
-			return
-		}
-
 		for _, filename := range arg.Filenames {
 			func() {
-				fd, err := accessor.OpenWithOSPath(filename)
+				// Choose a managed reader because we will return raw
+				// objects.
+				reader, err := readers.NewAccessorReader(
+					scope, arg.Accessor, filename, 1000)
 				if err != nil {
 					scope.Log("parse_journald: %v", err)
 					return
 				}
-				defer fd.Close()
-
-				reader, err := ntfs.NewPagedReader(
-					utils.MakeReaderAtter(fd), 1024, 10000)
-				if err != nil {
-					scope.Log("parse_journald: %v", err)
-					return
-				}
+				defer reader.Close()
 
 				journal, err := parser.OpenFile(reader)
 				if err != nil {
 					scope.Log("parse_journald: %v", err)
 					return
 				}
+				defer journal.Close()
 
 				journal.RawLogs = arg.Raw
+				journal.MinTime = arg.StartTime
+				journal.MaxTime = arg.EndTime
 
-				for log := range journal.GetLogs() {
+				for log := range journal.GetLogs(ctx) {
 					select {
 					case <-ctx.Done():
 						return
@@ -100,6 +89,12 @@ func (self JournalPlugin) Call(
 	return output_chan
 }
 
+type WatchJournalPluginArgs struct {
+	Filenames []*accessors.OSPath `vfilter:"required,field=filename,doc=A list of journal log files to parse."`
+	Accessor  string              `vfilter:"optional,field=accessor,doc=The accessor to use."`
+	Raw       bool                `vfilter:"optional,field=raw,doc=Emit raw events (not parsed)."`
+}
+
 type WatchJournaldPlugin struct{}
 
 func (self WatchJournaldPlugin) Call(
@@ -110,37 +105,21 @@ func (self WatchJournaldPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("watch_journald", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_journald", args)()
 
-		arg := &JournalPluginArgs{}
+		arg := &WatchJournalPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("watch_journald: %v", err)
 			return
 		}
 
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("watch_journald: %v", err)
-			return
-		}
-
-		// This plugin needs to be running on clients which have no
-		// server config object.
-		client_config_obj, ok := artifacts.GetConfig(scope)
-		if !ok {
-			scope.Log("watch_journald: unable to get config")
-			return
-		}
-
-		config_obj := &config_proto.Config{Client: client_config_obj}
-
 		event_channel := make(chan vfilter.Row)
 
 		// Register the output channel as a listener to the
 		// global event.
 		for _, filename := range arg.Filenames {
-			cancel := GlobalJournaldService(config_obj).Register(
+			cancel := gJournaldService.Register(
 				filename, arg.Accessor, ctx, scope,
 				arg.Raw, event_channel)
 
@@ -171,8 +150,8 @@ func (self WatchJournaldPlugin) Info(scope vfilter.Scope, type_map *vfilter.Type
 	return &vfilter.PluginInfo{
 		Name:     "watch_journald",
 		Doc:      "Watch a journald file and stream events from it. ",
-		ArgType:  type_map.AddType(scope, &JournalPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		ArgType:  type_map.AddType(scope, &WatchJournalPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

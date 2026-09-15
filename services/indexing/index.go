@@ -21,7 +21,6 @@ package indexing
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +32,7 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type SearchOptions int
@@ -46,8 +46,6 @@ const (
 )
 
 var (
-	stopIteration = errors.New("stopIteration")
-
 	metricLRUTotalTerms = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "search_index_lru_total_terms",
@@ -86,9 +84,9 @@ type Indexer struct {
 
 	ready bool
 
-	last_snapshot_read time.Time
-
 	config_obj *config_proto.Config
+
+	_verbs []string
 }
 
 func NewIndexer(config_obj *config_proto.Config) *Indexer {
@@ -144,7 +142,51 @@ func (self *Indexer) Ascend(iterator btree.ItemIterator) {
 func (self *Indexer) Start(
 	ctx context.Context, wg *sync.WaitGroup,
 	config_obj *config_proto.Config) error {
-	return self.RebuildIndex(ctx, config_obj)
+
+	delay := 5 * time.Minute
+	if config_obj.Defaults != nil && config_obj.Defaults.ReindexPeriodSeconds > 0 {
+		delay = time.Duration(config_obj.Defaults.ReindexPeriodSeconds) * time.Second
+	}
+
+	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+	logger.Info("<green>Starting</> Indexing Service for %v. Refreshing every %v",
+		services.GetOrgName(config_obj), delay)
+
+	err := self.RebuildIndex(ctx, config_obj)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		last_run := utils.GetTime().Now()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-utils.GetTime().After(utils.Jitter(delay)):
+				// Avoid doing snapshots too quickly. This is mainly for
+				// tests where the time is mocked for the After(delay)
+				// above does not work.
+				if utils.GetTime().Now().Sub(last_run) < time.Minute {
+					if !utils.SleepWithCtx(ctx, time.Minute) {
+						return
+					}
+					continue
+				}
+
+				err := self.RebuildIndex(ctx, config_obj)
+				if err != nil {
+					logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+					logger.Error("<red>Indexer RebuildIndex</>: %v", err)
+				}
+				last_run = utils.GetTime().Now()
+			}
+		}
+	}()
+
+	return err
 }
 
 // Set in memory indexer - it will be flushed later.
@@ -166,6 +208,17 @@ func (self *Indexer) setIndex(client_id, term string) error {
 		self.items++
 	}
 	metricLRUTotalTerms.Inc()
+	return nil
+}
+
+func (self *Indexer) setIndexTree(
+	client_id, term string, btree *btree.BTree) error {
+	record := NewRecord(&api_proto.IndexRecord{
+		Term:   term,
+		Entity: client_id,
+	})
+
+	btree.ReplaceOrInsert(record)
 	return nil
 }
 
@@ -233,10 +286,6 @@ func (self *Indexer) SearchIndexWithPrefix(
 
 func NewIndexingService(ctx context.Context, wg *sync.WaitGroup,
 	config_obj *config_proto.Config) (services.Indexer, error) {
-
-	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-	logger.Info("<green>Starting</> Indexing Service for %v.",
-		services.GetOrgName(config_obj))
 
 	indexer := NewIndexer(config_obj)
 

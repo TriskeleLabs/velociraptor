@@ -1,18 +1,20 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"sort"
 
 	"github.com/Velocidex/ordereddict"
-	context "golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"www.velocidex.com/golang/velociraptor/acls"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 // This is only used to set the user's own password which is always
@@ -20,6 +22,8 @@ import (
 func (self *ApiServer) SetPassword(
 	ctx context.Context,
 	in *api_proto.SetPasswordRequest) (*emptypb.Empty, error) {
+
+	defer Instrument("SetPassword")()
 
 	// Enforce a minimum length password
 	if len(in.Password) < 4 {
@@ -62,6 +66,8 @@ func (self *ApiServer) GetUsers(
 	ctx context.Context,
 	in *emptypb.Empty) (*api_proto.Users, error) {
 
+	defer Instrument("GetUsers")()
+
 	user_manager := services.GetUserManager()
 	user_record, org_config_obj, err := user_manager.GetUserFromContext(ctx)
 	if err != nil {
@@ -83,6 +89,8 @@ func (self *ApiServer) GetUsers(
 func (self *ApiServer) GetGlobalUsers(
 	ctx context.Context,
 	in *emptypb.Empty) (*api_proto.Users, error) {
+
+	defer Instrument("GetGlobalUsers")()
 
 	user_manager := services.GetUserManager()
 	user_record, _, err := user_manager.GetUserFromContext(ctx)
@@ -106,6 +114,8 @@ func (self *ApiServer) GetGlobalUsers(
 func (self *ApiServer) CreateUser(ctx context.Context,
 	in *api_proto.UpdateUserRequest) (*emptypb.Empty, error) {
 
+	defer Instrument("CreateUser")()
+
 	users_manager := services.GetUserManager()
 	user_record, org_config_obj, err := users_manager.GetUserFromContext(ctx)
 	if err != nil {
@@ -127,12 +137,17 @@ func (self *ApiServer) CreateUser(ctx context.Context,
 	err = users_manager.AddUserToOrg(ctx, mode, principal, in.Name, in.Orgs, acl)
 
 	if err == nil {
-		services.LogAudit(ctx,
+		err := services.LogAudit(ctx,
 			org_config_obj, principal, "user_create",
 			ordereddict.NewDict().
 				Set("username", in.Name).
 				Set("acl", acl).
 				Set("org_ids", in.Orgs))
+		if err != nil {
+			logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+			logger.Error("<red>user_create</> %v %v", principal, in.Name)
+		}
+
 	}
 
 	return &emptypb.Empty{}, err
@@ -140,6 +155,8 @@ func (self *ApiServer) CreateUser(ctx context.Context,
 
 func (self *ApiServer) GetUser(
 	ctx context.Context, in *api_proto.UserRequest) (*api_proto.VelociraptorUser, error) {
+
+	defer Instrument("GetUser")()
 
 	users_manager := services.GetUserManager()
 	user_record, _, err := users_manager.GetUserFromContext(ctx)
@@ -163,6 +180,8 @@ func (self *ApiServer) GetUserFavorites(
 	ctx context.Context,
 	in *api_proto.Favorite) (*api_proto.Favorites, error) {
 
+	defer Instrument("GetUserFavorites")()
+
 	// No special permission requires to view a user's own favorites.
 	users_manager := services.GetUserManager()
 	user_record, org_config_obj, err := users_manager.GetUserFromContext(ctx)
@@ -177,21 +196,47 @@ func (self *ApiServer) GetUserRoles(
 	ctx context.Context,
 	in *api_proto.UserRequest) (*api_proto.UserRoles, error) {
 
+	defer Instrument("GetUserRoles")()
+
 	users_manager := services.GetUserManager()
-	_, _, err := users_manager.GetUserFromContext(ctx)
+	user_record, org_config_obj, err := users_manager.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
+	principal := user_record.Name
 
 	// Allow the user to ask about other orgs.
-	org_manager, err := services.GetOrgManager()
-	if err != nil {
-		return nil, Status(self.verbose, err)
+	if !utils.CompareOrgIds(in.Org, org_config_obj.OrgId) {
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+
+		org_config_obj, err = org_manager.GetOrgConfig(in.Org)
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
 	}
 
-	org_config_obj, err := org_manager.GetOrgConfig(in.Org)
-	if err != nil {
-		return nil, Status(self.verbose, err)
+	// Users need at least read access to see other users in the org.
+	permissions := acls.READ_RESULTS
+	perm, err := services.CheckAccess(org_config_obj, principal, permissions)
+	if !perm || err != nil {
+		// If the user is org admin they can do anything in any org.
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+		root_config_obj, err := org_manager.GetOrgConfig(services.ROOT_ORG_ID)
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+		permissions := acls.ORG_ADMIN
+		perm, err := services.CheckAccess(
+			root_config_obj, principal, permissions)
+		if !perm || err != nil {
+			return nil, PermissionDenied(err, "User is not allowed to access org.")
+		}
 	}
 
 	acl_manager, err := services.GetACLManager(org_config_obj)
@@ -229,6 +274,8 @@ func (self *ApiServer) SetUserRoles(
 	ctx context.Context,
 	in *api_proto.UserRoles) (*emptypb.Empty, error) {
 
+	defer Instrument("SetUserRoles")()
+
 	users_manager := services.GetUserManager()
 	user_record, org_config_obj, err := users_manager.GetUserFromContext(ctx)
 	if err != nil {
@@ -258,12 +305,17 @@ func (self *ApiServer) SetUserRoles(
 		principal, in.Name, []string{in.Org}, acl)
 
 	if err == nil {
-		services.LogAudit(ctx,
+		err := services.LogAudit(ctx,
 			org_config_obj, principal, "user_grant",
 			ordereddict.NewDict().
 				Set("username", in.Name).
 				Set("acl", acl).
 				Set("org_ids", []string{in.Org}))
+		if err != nil {
+			logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+			logger.Error("<red>user_grant</> %v %v", principal, in.Name)
+		}
+
 	}
 
 	return &emptypb.Empty{}, err

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/api"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -20,17 +19,29 @@ import (
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
+
+	_ "www.velocidex.com/golang/velociraptor/vql/parsers"
 )
 
 var (
 	mock_definitions = []string{`
 name: Server.Internal.ArtifactDescription
 type: SERVER
+`, `
+name: Notebooks.Default
+type: NOTEBOOK
+sources:
+- notebook:
+  - type: markdown
+    template: |
+      # Welcome to Velociraptor notebooks!
 `}
 )
 
 type MinionSchedulerTestSuite struct {
 	test_utils.TestSuite
+	closer func()
 }
 
 func (self *MinionSchedulerTestSuite) SetupTest() {
@@ -46,10 +57,15 @@ func (self *MinionSchedulerTestSuite) SetupTest() {
 
 	// Mock out cell ID generation for tests
 	gen := utils.ConstantIdGenerator("XXX")
-	utils.SetIdGenerator(gen)
+	self.closer = utils.SetIdGenerator(gen)
 
 	self.LoadArtifactsIntoConfig(mock_definitions)
 	self.TestSuite.SetupTest()
+}
+
+func (self *MinionSchedulerTestSuite) TearDownTest() {
+	self.closer()
+	self.TestSuite.TearDownTest()
 }
 
 func (self *MinionSchedulerTestSuite) startAPIServer() {
@@ -113,6 +129,7 @@ func (self *MinionSchedulerTestSuite) TestNotebookMinionScheduler() {
 	assert.NoError(self.T(), err)
 
 	cell.Timestamp = 0
+	cell.Version = 0
 	golden := ordereddict.NewDict().
 		Set("Updated Cell", cell)
 
@@ -135,7 +152,7 @@ func (self *MinionSchedulerTestSuite) TestNotebookMinionScheduler() {
 		assert.Contains(self.T(), json.MustMarshalString(cell), "Cancelled")
 	}()
 
-	// Issue the cancellaion. Cancellation should be dispatched across
+	// Issue the cancellation. Cancellation should be dispatched across
 	// to the minion through the notification service.
 	time.Sleep(200 * time.Millisecond)
 
@@ -159,7 +176,7 @@ func (self *MinionSchedulerTestSuite) TestNotebookMinionScheduler() {
 	wg.Wait()
 
 	// Check the cell contents
-	cell, err = notebook_manager.GetNotebookCell(
+	_, err = notebook_manager.GetNotebookCell(
 		self.Ctx, notebook.NotebookId, cell_id, cell.CurrentVersion)
 	assert.NoError(self.T(), err)
 

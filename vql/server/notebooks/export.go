@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"regexp"
@@ -23,7 +22,7 @@ import (
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/datastore"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
@@ -34,7 +33,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -119,7 +117,7 @@ func (self ExportNotebookFunction) Info(scope vfilter.Scope, type_map *vfilter.T
 		Name:     "notebook_export",
 		Doc:      "Exports a notebook to a zip file or HTML.",
 		ArgType:  type_map.AddType(scope, &ExportNotebookArg{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.PREPARE_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.PREPARE_RESULTS).Build(),
 	}
 }
 
@@ -357,6 +355,7 @@ func ExportNotebookToZip(
 	// Create a new ZipContainer to write on. The container will close
 	// the underlying writer.
 	zip_writer, err := reporting.NewContainerFromWriter(
+		output_filename.String(),
 		config_obj, fd, "", reporting.DEFAULT_COMPRESSION, reporting.NO_METADATA)
 	if err != nil {
 		return nil, err
@@ -370,7 +369,7 @@ func ExportNotebookToZip(
 		cell_path_manager := notebook_path_manager.Cell(cell_id, version)
 
 		// Copy cell contents
-		err = copyUploads(ctx, config_obj,
+		err := copyUploads(ctx, config_obj,
 			cell_path_manager.Directory(),
 			exported_path_manager.CellDirectory(cell_id),
 			zip_writer, file_store_factory)
@@ -382,7 +381,7 @@ func ExportNotebookToZip(
 
 	wg.Add(1)
 
-	// Write the bulk of the data asyncronously.
+	// Write the bulk of the data asynchronously.
 	go func() {
 		defer wg.Done()
 
@@ -396,10 +395,16 @@ func ExportNotebookToZip(
 			time.Second*time.Duration(timeout))
 		defer cancel()
 
+		opts := services.ContainerOptions{
+			Type:              services.NotebookExport,
+			NotebookId:        notebook_id,
+			StatsPath:         notebook_path_manager.PathStats(output_filename),
+			ContainerFilename: output_filename,
+		}
+
 		// Report the progress as we write the container.
 		progress_reporter := reporting.NewProgressReporter(ctx, config_obj,
-			notebook_path_manager.PathStats(output_filename),
-			output_filename, zip_writer)
+			output_filename, opts, zip_writer)
 		defer progress_reporter.Close()
 
 		// Will also close the underlying fd.
@@ -413,7 +418,7 @@ func ExportNotebookToZip(
 		// are none in the notebook - so this is not an error.
 		// Attachments are added to the notebook when the user pastes
 		// them into it (e.g. an image)
-		err = copyUploads(ctx, config_obj,
+		err := copyUploads(ctx, config_obj,
 			notebook_path_manager.AttachmentDirectory(),
 			exported_path_manager.AttachmentRoot(),
 			zip_writer, file_store_factory)
@@ -428,14 +433,19 @@ func ExportNotebookToZip(
 		}
 		defer f.Close()
 
-		_, err = f.Write(serialized)
+		_, _ = f.Write(serialized)
 	}()
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		config_obj, principal, "ExportNotebook",
 		ordereddict.NewDict().
 			Set("notebook_id", notebook_id).
 			Set("output_filename", output_filename))
+
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("<red>ExportNotebook</> %v %v", principal, notebook_id)
+	}
 
 	return output_filename, nil
 }
@@ -489,8 +499,7 @@ func ExportNotebookToHTML(
 	notebook_path_manager := paths.NewNotebookPathManager(notebook_id)
 	output_filename := notebook_path_manager.HtmlExport(preferred_name)
 
-	wg.Add(1)
-	go func() (api.FSPathSpec, error) {
+	exporter_func := func() (api.FSPathSpec, error) {
 		defer wg.Done()
 		defer cancel()
 
@@ -532,14 +541,20 @@ func ExportNotebookToHTML(
 			Type:       "html",
 			Components: path_specs.AsGenericComponentList(output_filename),
 		}
-		stats_path := notebook_path_manager.PathStats(
-			output_filename)
-		db, err := datastore.GetDB(config_obj)
+
+		export_manager, err := services.GetExportManager(config_obj)
 		if err != nil {
 			return nil, err
 		}
 
-		err = db.SetSubject(config_obj, stats_path, stats)
+		opts := services.ContainerOptions{
+			Type:              services.NotebookExport,
+			NotebookId:        notebook_id,
+			StatsPath:         notebook_path_manager.PathStats(output_filename),
+			ContainerFilename: output_filename,
+		}
+
+		err = export_manager.SetContainerStats(ctx, config_obj, stats, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -554,7 +569,7 @@ func ExportNotebookToHTML(
 			stats.Hash = hex.EncodeToString(sha_sum.Sum(nil))
 			stats.TotalDuration = uint64(time.Now().Unix()) - stats.Timestamp
 
-			db.SetSubject(config_obj, stats_path, stats)
+			_ = export_manager.SetContainerStats(ctx, config_obj, stats, opts)
 		}()
 
 		for _, cell_md := range notebook.CellMetadata {
@@ -578,7 +593,7 @@ func ExportNotebookToHTML(
 					return "", err
 				}
 
-				data, err := ioutil.ReadAll(fd)
+				data, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
 				if err != nil {
 					return "", err
 				}
@@ -652,7 +667,8 @@ func ExportNotebookToHTML(
 						continue
 					}
 
-					data, err := ioutil.ReadAll(fd)
+					data, err := utils.ReadAllWithLimit(fd,
+						constants.MAX_MEMORY)
 					if err != nil {
 						continue
 					}
@@ -677,13 +693,26 @@ func ExportNotebookToHTML(
 		}
 
 		return output_filename, nil
+	}
+
+	wg.Add(1)
+	go func() {
+		_, err := exporter_func()
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.GUIComponent)
+			logger.Error("<red>ExportNotebookToHTML</>: %v", err)
+		}
 	}()
 
-	services.LogAudit(ctx,
+	err := services.LogAudit(ctx,
 		config_obj, principal, "ExportNotebook",
 		ordereddict.NewDict().
 			Set("notebook_id", notebook_id).
 			Set("output_filename", output_filename))
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("<red>ExportNotebook</> %v %v", principal, notebook_id)
+	}
 
 	return output_filename, nil
 }
@@ -743,15 +772,10 @@ func convertCSVTags(
 		}
 
 		output.WriteString("  <tr>\n")
-		for _, header := range row.Keys() {
-			value, pres := row.Get(header)
-			if !pres {
-				value = ""
-			}
+		for _, v := range row.Values() {
 			output.WriteString(
 				fmt.Sprintf("    <td>%s</td>\n",
-					html.EscapeString(
-						fmt.Sprintf("%v", value))))
+					html.EscapeString(fmt.Sprintf("%v", v))))
 		}
 		output.WriteString("  </tr>\n")
 	}

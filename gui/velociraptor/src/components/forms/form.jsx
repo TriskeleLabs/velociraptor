@@ -3,63 +3,31 @@ import PropTypes from 'prop-types';
 import api from '../core/api-service.jsx';
 import _ from 'lodash';
 import {CancelToken} from 'axios';
-import DateTimePicker from 'react-datetime-picker';
+import DateTimePicker from '../widgets/datetime.jsx';
 import Form from 'react-bootstrap/Form';
 import Row from 'react-bootstrap/Row';
 import Col from 'react-bootstrap/Col';
-import Button from 'react-bootstrap/Button';
 import RegEx from './regex.jsx';
 import RegExArray from './regex_array.jsx';
 import UploadFileForm from './upload.jsx';
 import YaraEditor from './yara.jsx';
 import ToolTip from '../widgets/tooltip.jsx';
-import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Alert from 'react-bootstrap/Alert';
 import CSVForm from './csv.jsx';
+import JSONArrayForm from './json_array.jsx';
 import Select from 'react-select';
 import T from '../i8n/i8n.jsx';
 import { JSONparse } from '../utils/json_parse.jsx';
 import { parseCSV, serializeCSV } from '../utils/csv.jsx';
+import Button from 'react-bootstrap/Button';
+import ButtonGroup from 'react-bootstrap/ButtonGroup';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+
 import "./validated.css";
 import "./forms.css";
 
-const numberRegex = RegExp("^[0-9]+$");
-
 // Should match the code in services/launcher/compiler.go
 const boolRegex = RegExp('^(Y|TRUE|YES|OK)$', "i");
-
-// Returns a date object in local timestamp which represents the UTC
-// date. This is needed because the date selector widget expects to
-// work in local time.
-function localTimeFromUTCTime(date) {
-    let msSinceEpoch = date.getTime();
-    let tzoffset = (new Date()).getTimezoneOffset();
-    return new Date(msSinceEpoch + tzoffset * 60000);
-}
-
-function utcTimeFromLocalTime(date) {
-    let msSinceEpoch = date.getTime();
-    let tzoffset = (new Date()).getTimezoneOffset();
-    return new Date(msSinceEpoch - tzoffset * 60000);
-}
-
-function convertToDate(x) {
-    // Allow the value to be specified in a number of ways.
-    if (_.isNumber(x) || numberRegex.test(x)) {
-        try {
-            return new Date(parseInt(x) * 1000);
-        } catch(e) {};
-    }
-
-    try {
-        let res = Date.parse(x);
-        if (!_.isNaN(res)) {
-            return new Date(res);
-        }
-    } catch (e) {};
-
-    return null;
-}
 
 export default class VeloForm extends React.Component {
     static propTypes = {
@@ -69,7 +37,6 @@ export default class VeloForm extends React.Component {
     };
 
     state = {
-        isUTC: true,
 
         // A Date() object that is parsed from value in local time.
         timestamp: null,
@@ -114,7 +81,7 @@ export default class VeloForm extends React.Component {
         // specified type
         api.post("v1/GetArtifacts",
                 {
-                    search_term: "...",
+                    search_term: "empty:true",
                     type: artifact_type,
 
                     fields: fields,
@@ -240,7 +207,7 @@ export default class VeloForm extends React.Component {
 
                 this.setState({invalid: invalid});
             } catch(e){
-                console.log(e);
+                console.log("setValueWithValidator", e);
             }
         }
         this.props.setValue(value);
@@ -253,6 +220,13 @@ export default class VeloForm extends React.Component {
         switch(param.type) {
         case "hidden":
             return <></>;
+
+        case "json_array": {
+            return <JSONArrayForm
+                     param={this.props.param}
+                     value={this.props.value}
+                     setValue={this.props.setValue}/>;
+        }
 
         case "csv": {
             return <CSVForm
@@ -318,15 +292,7 @@ export default class VeloForm extends React.Component {
 
         case "timestamp": {
             // value prop is always a string in ISO format in UTC timezone.
-            let date = convertToDate(this.props.value);
-
-            // Internally the date selector always uses local browser
-            // time. If the form is configured to use utc mode, then
-            // we convert the UTC time to the equivalent time in local
-            // just for the form.
-            if(_.isDate(date) && this.state.isUTC) {
-                date = localTimeFromUTCTime(date);
-            }
+            let date = this.props.value;
 
             return (
                 <Form.Group as={Row} className="velo-form">
@@ -338,48 +304,20 @@ export default class VeloForm extends React.Component {
                     </ToolTip>
                   </Form.Label>
                   <Col sm="8">
-                    <ButtonGroup className="velo-datetime-picker">
-                      <DateTimePicker
-                        className="btn-group"
-                        showLeadingZeros={true}
-                        onChange={(value) => {
-                            // Clear the prop value
-                            if (!_.isDate(value)) {
-                                this.props.setValue(undefined);
-
-                                // If the form is in UTC we take the
-                                // date the form gives us (which is in
-                                // local timezone) and force the same
-                                // date into a serialized ISO in Z time.
-                            } else if(this.state.isUTC) {
-                                let local_time = convertToDate(value);
-                                let utc_time = utcTimeFromLocalTime(local_time);
-                                this.props.setValue(utc_time.toISOString());
-
-                            } else {
-                                // When in local time we just set the
-                                // time as it is.
-                                let local_time = convertToDate(value);
-                                this.props.setValue(local_time.toISOString());
-                            }
-                        }}
-                        value={date}
-                      />
-                      {this.state.isUTC ?
-                       <Button variant="default-outline"
-                               onClick={() => this.setState({isUTC: false})}
-                               size="sm">UTC</Button>:
-                       <Button variant="default-outline"
-                               onClick={() => this.setState({isUTC: true})}
-                               size="sm">{T("Local")}</Button>
-                      }
-                      <Button variant="default-outline"
-                              onClick={() => {
-                                  let now = new Date();
-                                  this.props.setValue(now.toISOString());
-                              }}
-                              size="sm">{T("Now")}</Button>
-                    </ButtonGroup>
+                    <DateTimePicker
+                      onChange={(value) => {
+                          // Clear the prop value if the value is not
+                          // a real date.
+                          if (_.isDate(value)) {
+                              this.props.setValue(value.toISOString());
+                          } else if (_.isString(value)) {
+                              this.props.setValue(value);
+                          } else {
+                              this.props.setValue(undefined);
+                          }
+                      }}
+                      value={date}
+                    />
                   </Col>
                 </Form.Group>
             );
@@ -428,19 +366,29 @@ export default class VeloForm extends React.Component {
                     </ToolTip>
                   </Form.Label>
                   <Col sm="8">
-                    <Select
-                      placeholder={T("Choose one or more items")}
-                      className="velo"
-                      classNamePrefix="velo"
-                      closeMenuOnSelect={false}
-                      isMulti
-                      defaultValue={defaults}
-                      onChange={e=>{
-                          let data = _.map(e, x=>x.value);
-                          this.props.setValue(JSON.stringify(data));
-                      }}
-                      options={options}
-                      />
+                    <ButtonGroup className="full-width multichoice-select">
+                      <Button variant="default"
+                              onClick={x=>{
+                                  this.props.setValue(JSON.stringify(
+                                      this.props.param.choices));
+                              }}>
+                        <FontAwesomeIcon icon="border-all"/>
+                      </Button>
+                        <Select
+                          placeholder={T("Choose one or more items")}
+                          className="velo"
+                          classNamePrefix="velo"
+                          closeMenuOnSelect={false}
+                          isMulti
+                          defaultValue={defaults}
+                          value={defaults}
+                          onChange={e=>{
+                              let data = _.map(e, x=>x.value);
+                              this.props.setValue(JSON.stringify(data));
+                          }}
+                          options={options}
+                        />
+                    </ButtonGroup>
                   </Col>
                 </Form.Group>
             );
@@ -492,8 +440,11 @@ export default class VeloForm extends React.Component {
                       isMulti
                       defaultValue={a_defaults}
                       onChange={e=>{
-                          let data = _.map(e, x=>x.value);
-                          this.props.setValue(JSON.stringify(data));
+                          let data = _.map(e, x=>{
+                              return {Artifact: x.value};
+                          });
+                          // artifact sets require csv style output.
+                          this.props.setValue(serializeCSV(data, ["Artifact"]));
                       }}
                       options={a_options}
                       />
@@ -528,6 +479,7 @@ export default class VeloForm extends React.Component {
                 </Form.Group>
             );
 
+        case "upload_file":
         case "upload":
             return <UploadFileForm
                      param={this.props.param}

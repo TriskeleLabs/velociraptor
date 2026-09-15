@@ -9,7 +9,6 @@ import PropTypes from 'prop-types';
 import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Button from 'react-bootstrap/Button';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-
 import { withRouter }  from "react-router-dom";
 
 import Accordion from 'react-bootstrap/Accordion';
@@ -126,12 +125,12 @@ class _PasswordChangeForm extends React.PureComponent {
 
 export const PasswordChangeForm = withRouter(_PasswordChangeForm);
 
-class UserSettings extends React.PureComponent {
+class UserSettingsDialog extends React.PureComponent {
     static contextType = UserConfig;
     static propTypes = {
         onClose: PropTypes.func.isRequired,
         setSetting: PropTypes.func.isRequired,
-
+        setClient: PropTypes.func.isRequired,
         history: PropTypes.object,
     }
 
@@ -188,6 +187,12 @@ class UserSettings extends React.PureComponent {
             params.default_password = state.default_password || "-";
         }
 
+        // Update the base path if needed.
+        if (this.context.traits.base_path != "" &&
+            this.context.traits.base_path !== window.base_path) {
+            window.base_path = this.context.traits.base_path;
+        }
+
         this.props.setSetting(params);
     }
 
@@ -212,11 +217,11 @@ class UserSettings extends React.PureComponent {
         this.saveSettings({org: org,
                            org_changed: true,
                            previous_org: previous_org});
+        this.props.setClient({client_id: null});
         this.props.onClose();
     }
 
     render() {
-
         return (
             <Modal show={true}
                    dialogClassName="modal-70w"
@@ -233,14 +238,20 @@ class UserSettings extends React.PureComponent {
                       </ToolTip>
                     </Form.Label>
                     <Col sm="8">
-                      <Form.Control as="select"
-                                    value={this.state.org}
-                                    placeholder={T("Select an org")}
-                                    onChange={e=>this.changeOrg(e.currentTarget.value)}>
-                        {_.map(this.context.traits.orgs || [], function(x) {
-                            return <option key={x.id} value={x.id}>{x.name}</option>;
-                        })}
-                      </Form.Control>
+                      <Select
+                        value={this.state.org}
+                        placeholder={T("Select an org")}
+                        classNamePrefix="velo"
+                        onChange={e=>this.changeOrg(e.value)}
+                        spellCheck="false"
+                        options={_.map(_.sortBy(
+                            this.context.traits.orgs, x=>x.name) || [],
+                                       k=>{
+                                           return {value: k.id,
+                                                   label: k.name,
+                                                   isFixed: true};
+                                       })}
+                      />
                     </Col>
                   </Form.Group>
                 }
@@ -267,6 +278,7 @@ class UserSettings extends React.PureComponent {
                                   }}>
                       <option value="veloci-light">{T("Velociraptor (light)")}</option>
                       <option value="veloci-dark">{T("Velociraptor (dark)")}</option>
+                      <option value="vscode-dark">{T("VS Code (dark)")}</option>
                       <option value="no-theme">{T("Velociraptor Classic (light)")}</option>
                       <option value="pink-light">{T("Strawberry Milkshake (light)")}</option>
                       <option value="ncurses-light">{T("Ncurses (light)")}</option>
@@ -275,6 +287,7 @@ class UserSettings extends React.PureComponent {
                       <option value="github-dimmed-dark">{T("Github dimmed (dark)")}</option>
                       <option value="coolgray-dark">{T("Cool Gray (dark)")}</option>
                       <option value="midnight">{T("Midnight Inferno (very dark)")}</option>
+                      <option value="veloci-docs">{T("Standard Docs")}</option>
                     </Form.Control>
                   </Col>
                 </Form.Group>
@@ -409,12 +422,12 @@ class UserSettings extends React.PureComponent {
     };
 }
 
-const UserSettingsWithRouter = withRouter(UserSettings);
+const UserSettingsDialogWithRouter = withRouter(UserSettingsDialog);
 
 export default class UserLabel extends React.Component {
     static contextType = UserConfig;
     static propTypes = {
-
+        setClient: PropTypes.func.isRequired,
     };
 
     state = {
@@ -439,7 +452,7 @@ export default class UserLabel extends React.Component {
             } else if (params.theme === "veloci-dark") {
                 ace_options.theme = "ace/theme/vibrant_ink";
                 ace_options.fontFamily = "Iosevka Term";
-            } else if(params.theme === "veloci-light") {
+            } else if(params.theme === "veloci-light" || params.theme === "veloci-docs") {
                 ace_options.theme = "ace/theme/xcode";
                 ace_options.fontFamily = "Iosevka Term";
             } else if(params.theme === "pink-light") {
@@ -463,6 +476,9 @@ export default class UserLabel extends React.Component {
             } else if(params.theme === "midnight") {
                 ace_options.theme = "ace/theme/terminal";
                 ace_options.fontFamily = "Iosevka Term";
+            } else if(params.theme === "vscode-dark") {
+                ace_options.theme = "ace/theme/tomorrow_night";
+                ace_options.fontFamily = "Iosevka Term";
             }
 
             params.options = JSON.stringify(ace_options);
@@ -475,8 +491,9 @@ export default class UserLabel extends React.Component {
         api.post("v1/SetGUIOptions", params,
                  this.source.token).then((response) => {
                      if (response.status === 200) {
-                         // Check for redirect from the server - this is normally
-                         // set by the authenticator to redirect to a better server.
+                         // Check for redirect from the server - this
+                         // is normally set by the authenticator to
+                         // redirect to a better server.
                          if (response.data && response.data.redirect_url &&
                              response.data.redirect_url !== "") {
                              window.location.assign(response.data.redirect_url);
@@ -485,8 +502,8 @@ export default class UserLabel extends React.Component {
 
                      this.context.updateTraits();
                  }).catch(response=>{
-                     // If we tried to set the org but we dont have
-                     // permission in it, we switch rightr back to the
+                     // If we tried to set the org but we don't have
+                     // permission in it, we switch right back to the
                      // previous org.
                      if (response.response &&
                          response.response.status === 403 &&
@@ -500,8 +517,13 @@ export default class UserLabel extends React.Component {
     }
 
     orgName() {
+        let org_name = this.context.traits && this.context.traits.org_name;
+        if(org_name) {
+            return <div className="org-label">{org_name}</div>;
+        }
+
         let id = window.globals.OrgId || (
-            this.context.traits && this.context.traits.org);
+            this.context.traits && this.context.traits.org_name);
         if (!id || id==="root") {
             return <></>;
         }
@@ -518,7 +540,8 @@ export default class UserLabel extends React.Component {
         return (
             <>
               { this.state.showUserSettings &&
-                <UserSettingsWithRouter
+                <UserSettingsDialogWithRouter
+                  setClient={this.props.setClient}
                   setSetting={this.setSettings}
                   onClose={()=>this.setState({showUserSettings: false})} />
               }

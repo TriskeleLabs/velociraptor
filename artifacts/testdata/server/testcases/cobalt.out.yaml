@@ -1,4 +1,7 @@
-SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob=srcDir + "/artifacts/testdata/files/CSDump.bin")[
+#prefix: srcDir + "/artifacts/testdata/files/CSSectionPE.bin"
+# tests for file parsing
+Query: SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob=srcDir + "/artifacts/testdata/files/CSDump.bin")
+Output: [
  {
   "Rule": "cobalt_strike_beacon",
   "OSPath": "artifacts/testdata/files/CSDump.bin",
@@ -64,7 +67,14 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
    "ProcessInjectUseRWX": "PAGE_EXECUTE_READWRITE"
   }
  }
-]LET Encoded = SELECT Data FROM read_file(filenames=srcDir + "/artifacts/testdata/files/CSDump.bin")[]SELECT Rule,Hash,Xor,DecodedConfig,DecodedData FROM Artifact.Windows.Carving.CobaltStrike(TargetBytes=Encoded.Data[0],BruteXor="T", IncludeDecodedData="Y")[
+]
+
+# Test for data stream parsing, DecodedData output and bruteforce xor
+Query: LET Encoded = SELECT Data FROM read_file(filenames=srcDir + "/artifacts/testdata/files/CSDump.bin")
+Output: []
+
+Query: SELECT Rule,Hash,Xor,DecodedConfig,DecodedData FROM Artifact.Windows.Carving.CobaltStrike(TargetBytes=Encoded.Data[0],BruteXor="T", IncludeDecodedData="Y")
+Output: [
  {
   "Rule": "cobalt_strike_beacon",
   "Hash": {
@@ -99,6 +109,7 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
   "DecodedData": {
    "Path": "data",
    "Size": 10000,
+   "UploadId": 0,
    "StoredSize": 10000,
    "sha256": "e4827601fe57d67ef030a3d3aa5b7d8d18e5bd51bbee5cd8ce58ce64986aeaba",
    "md5": "8f5f398cc5f2df9253a5c0d1e49d9d0f",
@@ -143,6 +154,7 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
   "DecodedData": {
    "Path": "data",
    "Size": 10000,
+   "UploadId": 0,
    "StoredSize": 10000,
    "sha256": "f80f9893cf9d92f655df9a87841067a17e8296ab758a7b8aee6f3866bcd7ecf4",
    "md5": "ce8f0108acdd1307d1879865c4e35f2f",
@@ -154,7 +166,11 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
    ]
   }
  }
-]SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob=srcDir + "/artifacts/testdata/files/CSx86sleep.bin")[
+]
+
+# tests sleepfunction parsing
+Query: SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob=srcDir + "/artifacts/testdata/files/CSx86sleep.bin")
+Output: [
  {
   "Rule": "cobalt_strike_sleepfunction",
   "OSPath": "artifacts/testdata/files/CSx86sleep.bin",
@@ -166,7 +182,23 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
   "Xor": "0x00",
   "DecodedConfig": "Sleep mask 32-bit 4.2 deobfuscation routine found."
  }
-]LET CSsectionStager <= xor(key="infected", string=read_file( filename=srcDir+"/artifacts/testdata/files/CSsectionStager.zip.xor"))[]LET CSShellcode <= xor(key="infected", string=read_file( filename=srcDir+"/artifacts/testdata/files/CSShellcode.zip.xor"))[]LET _ <= remap(config=RemappingTemplate, copy=["zip", "scope", "data", "process"], clear=TRUE)[]SELECT OSPath, Name FROM glob(globs="/**") ORDER BY Name[
+]
+
+# Generate this file with
+# SELECT copy(accessor="data", filename=xor(key="infected",
+# string=read_file(filename="F:/malware/infected.zip")),
+# dest="F:/malware/infected.zip.xor") FROM scope()
+Query: LET CSsectionStager <= xor(key="infected", string=read_file( filename=srcDir+"/artifacts/testdata/files/CSsectionStager.zip.xor"))
+Output: []
+
+Query: LET CSShellcode <= xor(key="infected", string=read_file( filename=srcDir+"/artifacts/testdata/files/CSShellcode.zip.xor"))
+Output: []
+
+Query: LET _ <= remap(config=RemappingTemplate, copy=["zip", "scope", "data", "process"], clear=TRUE)
+Output: []
+
+Query: SELECT OSPath, Name FROM glob(globs="/**") ORDER BY Name
+Output: [
  {
   "OSPath": "CSShellcode",
   "Name": "CSShellcode"
@@ -183,7 +215,11 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
   "OSPath": "CSsectionStager\\CSsectionStager.exe",
   "Name": "CSsectionStager.exe"
  }
-]SELECT Rule,OSPath.Basename,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob="/**/*.exe")[
+]
+
+# tests embedded shellcode in data section parsing
+Query: SELECT Rule,OSPath.Basename,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob="/**/*.exe")
+Output: [
  {
   "Rule": "Embedded data section: cobalt_strike_shellcode",
   "OSPath.Basename": "CSsectionStager.exe",
@@ -214,7 +250,11 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
    ]
   }
  }
-]SELECT Rule,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike( TargetBytes=read_file(filename="/CSsectionStager/CSsectionStager.exe"))[
+]
+
+# Use byte scanning of the raw file.
+Query: SELECT Rule,Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike( TargetBytes=read_file(filename="/CSsectionStager/CSsectionStager.exe"))
+Output: [
  {
   "Rule": "Embedded data section: cobalt_strike_shellcode",
   "Hash": {
@@ -244,7 +284,11 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
    ]
   }
  }
-]SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath, Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob="/**/*.bin")[
+]
+
+# tests shellcode parsing
+Query: SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath, Hash,Xor,DecodedConfig FROM Artifact.Windows.Carving.CobaltStrike(TargetFileGlob="/**/*.bin")
+Output: [
  {
   "Rule": "cobalt_strike_shellcode",
   "OSPath": "",
@@ -273,3 +317,4 @@ SELECT Rule, relpath(path=OSPath, base=srcDir, sep="/") as OSPath,Hash,Xor,Decod
   }
  }
 ]
+

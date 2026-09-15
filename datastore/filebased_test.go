@@ -3,7 +3,6 @@ package datastore_test
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 )
 
 type FilebasedTestSuite struct {
@@ -78,8 +78,8 @@ func (self FilebasedTestSuite) TestFullDiskErrors() {
 	assert.NoError(self.T(), err)
 
 	// Fill the disk now
-	fd, err := os.OpenFile(
-		pad_path.AsDatastoreFilename(self.config_obj),
+	fd, err := os.OpenFile(datastore.AsDatastoreFilename(
+		self.datastore, self.config_obj, pad_path),
 		os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
 	assert.NoError(self.T(), err)
 	fillUpDisk(fd)
@@ -109,8 +109,9 @@ func (self FilebasedTestSuite) TestGetSubjectOfEmptyFileIsError() {
 	path := path_specs.NewUnsafeDatastorePath("test")
 
 	// Create an empty file
-	fd, err := os.OpenFile(
-		path.AsDatastoreFilename(self.config_obj), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
+	fd, err := os.OpenFile(datastore.AsDatastoreFilename(
+		self.datastore, self.config_obj, path),
+		os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
 	assert.NoError(self.T(), err)
 	fd.Close()
 
@@ -131,9 +132,27 @@ func (self FilebasedTestSuite) TestSetGetJSON() {
 	// self.DumpDirectory()
 }
 
+// On linux maximum size of filename is 255 bytes. This means that
+// with the addition of unicode escapes we might exceed this with even
+// very short filenames.
+func (self FilebasedTestSuite) TestVeryLongFilenameHashEncoding() {
+	very_long_filename := strings.Repeat("Very Long Filename", 100)
+	assert.Equal(self.T(), len(very_long_filename), 1800)
+
+	path := path_specs.NewUnsafeDatastorePath("longfiles", very_long_filename)
+	filename := datastore.AsDatastoreFilename(
+		self.datastore, self.config_obj, path)
+
+	// Filename should be smaller than the read filename because it is
+	// compressed into a hash.
+	assert.True(self.T(), len(filename) < 250)
+	assert.Equal(self.T(), filepath.Base(filename),
+		"#8ad0b37a7718f0403aa86f9c6bcfff35ef6ad39f.json.db")
+}
+
 func (self *FilebasedTestSuite) SetupTest() {
 	var err error
-	self.dirname, err = ioutil.TempDir("", "datastore_test")
+	self.dirname, err = tempfile.TempDir("datastore_test")
 	assert.NoError(self.T(), err)
 
 	self.config_obj = config.GetDefaultConfig()

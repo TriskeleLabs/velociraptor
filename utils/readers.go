@@ -15,6 +15,16 @@ type ReaderAtter struct {
 	Reader io.ReadSeeker
 }
 
+func (self *ReaderAtter) Flush() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	switch t := self.Reader.(type) {
+	case Flusher:
+		t.Flush()
+	}
+}
+
 func (self *ReaderAtter) DebugString() string {
 	return fmt.Sprintf("ReaderAtter of %v", DebugString(self.Reader))
 }
@@ -186,5 +196,22 @@ func NewOffsetReader(reader io.ReaderAt, offset, size int64) io.ReaderAt {
 		reader: reader,
 		offset: offset,
 		length: offset + size,
+	}
+}
+
+type CountingReader struct {
+	Reader io.Reader
+	Count  int
+}
+
+func (self *CountingReader) Read(b []byte) (n int, err error) {
+	n, err = self.Reader.Read(b)
+	self.Count += n
+	return n, err
+}
+
+func NewCountingReader(r io.Reader) *CountingReader {
+	return &CountingReader{
+		Reader: r,
 	}
 }

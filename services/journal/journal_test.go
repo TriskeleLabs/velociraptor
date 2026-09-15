@@ -2,22 +2,24 @@ package journal_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/config"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
 )
@@ -28,13 +30,17 @@ type JournalTestSuite struct {
 
 func (self *JournalTestSuite) SetupTest() {
 	var err error
-	os.Setenv("VELOCIRAPTOR_CONFIG", test_utils.SERVER_CONFIG)
+
+	file_store.ClearGlobalFilestore()
+
+	os.Setenv(constants.VELOCIRAPTOR_LITERAL_CONFIG, test_utils.SERVER_CONFIG)
 	self.ConfigObj, err = new(config.Loader).
-		WithEnvLiteralLoader("VELOCIRAPTOR_CONFIG").WithRequiredFrontend().
+		WithEnvLiteralLoader(constants.VELOCIRAPTOR_LITERAL_CONFIG).
+		WithRequiredFrontend().
 		WithVerbose(true).LoadAndValidate()
 	require.NoError(self.T(), err)
 
-	dir, err := ioutil.TempDir("", "file_store_test")
+	dir, err := tempfile.TempDir("file_store_test")
 	assert.NoError(self.T(), err)
 
 	self.ConfigObj.Datastore.Implementation = "MemcacheFileDataStore"
@@ -47,7 +53,7 @@ name: System.Flow.Completion
 type: CLIENT_EVENT
 `, `
 name: System.Hunt.Participation
-type: SERVER_EVENT
+type: INTERNAL
 `})
 
 	self.TestSuite.SetupTest()
@@ -80,7 +86,7 @@ func (self *JournalTestSuite) TestJournalWriting() {
 				Set("Foo", "Bar").
 				Set("i", i),
 			},
-			"System.Flow.Completion", "C.1234", "")
+			artifacts.FLOW_COMPLETION.WithClientId("C.1234"))
 		assert.NoError(self.T(), err)
 	}
 
@@ -129,7 +135,7 @@ func (self *JournalTestSuite) TestJournalJsonlWriting() {
 	for i := 0; i < 10; i++ {
 		err = journal.PushJsonlToArtifact(self.Ctx, self.ConfigObj,
 			[]byte(fmt.Sprintf("{\"For\":%q,\"i\":%d}\n", "Bar", i)), 1,
-			"System.Flow.Completion", "C.1234", "")
+			artifacts.FLOW_COMPLETION.WithClientId("C.1234"))
 		assert.NoError(self.T(), err)
 	}
 

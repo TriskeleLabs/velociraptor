@@ -2,17 +2,17 @@ package collector_test
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
@@ -21,13 +21,24 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	hunt_dispatcher_service "www.velocidex.com/golang/velociraptor/services/hunt_dispatcher"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
+	"www.velocidex.com/golang/velociraptor/vql/filesystem"
+	"www.velocidex.com/golang/velociraptor/vql/server/clients"
 	"www.velocidex.com/golang/velociraptor/vql/server/downloads"
 	"www.velocidex.com/golang/velociraptor/vql/server/hunts"
 	"www.velocidex.com/golang/velociraptor/vql/tools/collector"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
+	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
+)
+
+const (
+	fixtureClientId = "C.a99faf363b5601fe"
+	fixtureHostname = "devlp"
 )
 
 var (
@@ -57,13 +68,13 @@ sources:
 )
 
 func (self *TestSuite) TestCreateAndImportHunt() {
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
+	defer utils.SetFlowIdForTests("F.1234")()
 
 	hunt_dispatcher_service.SetHuntIdForTests("H.1234")
 
 	fs_factory := file_store_accessor.NewFileStoreFileSystemAccessor(self.ConfigObj)
-	accessors.Register("fs", fs_factory, "")
+	accessors.Register(fs_factory)
 
 	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
@@ -78,54 +89,58 @@ func (self *TestSuite) TestCreateAndImportHunt() {
 		},
 	}
 
-	launcher, err := services.GetLauncher(self.ConfigObj)
-	assert.NoError(self.T(), err)
-
 	acl_manager := acl_managers.NullACLManager{}
 	hunt_dispatcher, err := services.GetHuntDispatcher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	// Now create a download of this collection.
-	builder := services.ScopeBuilder{
-		Config:     self.ConfigObj,
-		ACLManager: acl_managers.NullACLManager{},
-		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
-		Env:        ordereddict.NewDict(),
-	}
+	scope := self.makeScope()
+	defer scope.Close()
+
 	ctx := self.Ctx
-	scope := manager.BuildScope(builder)
 
 	hunt, err := hunt_dispatcher.CreateHunt(
 		self.Ctx, self.ConfigObj, acl_manager, request)
 
 	assert.NoError(self.T(), err)
 
+	launcher, err := services.GetLauncher(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
 	flow_id, err := launcher.ScheduleArtifactCollection(self.Ctx, self.ConfigObj,
 		acl_manager, repository, &flows_proto.ArtifactCollectorArgs{
 			Artifacts: []string{"TestArtifact", "AnotherTestArtifact"},
 			Creator:   utils.GetSuperuserName(self.ConfigObj),
-			ClientId:  "server",
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 		}, utils.SyncCompleter)
 	assert.NoError(self.T(), err)
 
 	// Wait here until the collection is completed.
 	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
-		flow, err := launcher.GetFlowDetails(self.Ctx, self.ConfigObj, "server", flow_id)
+		flow, err := launcher.GetFlowDetails(
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, flow_id)
 		assert.NoError(self.T(), err)
 
 		return flow.Context.State == flows_proto.ArtifactCollectorContext_FINISHED
 	})
 
+	// Set for tests
+	hunts.AllowHuntsOnServer = true
+	defer func() {
+		hunts.AllowHuntsOnServer = false
+	}()
+
 	flow_update := (&hunts.AddToHuntFunction{}).Call(
 		ctx, scope, ordereddict.NewDict().
 			Set("hunt_id", hunt.HuntId).
-			Set("client_id", "server").
+			Set("client_id", constants.VELOCIRAPTOR_SERVER_CLIENT_ID).
 			Set("flow_id", flow_id))
 	assert.NotEmpty(self.T(), flow_update)
 
 	// Wait here until the collection is completed.
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
-		hunt, pres := hunt_dispatcher.GetHunt(self.Ctx, hunt.HuntId)
+		hunt, pres := hunt_dispatcher.GetHunt(self.Ctx,
+			services.GetHuntOptions{}, hunt.HuntId)
 		assert.True(self.T(), pres)
 
 		return hunt.Stats.TotalClientsWithResults >= 1
@@ -138,9 +153,21 @@ func (self *TestSuite) TestCreateAndImportHunt() {
 			Set("hunt_id", hunt.HuntId).
 			Set("wait", true))
 
-	download_pathspec, ok := result.(path_specs.FSPathSpec)
+	download_pathspec, ok := result.(*path_specs.FSPathSpec)
 	assert.True(self.T(), ok)
 	assert.NotEmpty(self.T(), download_pathspec.String())
+
+	output_file, err := tempfile.TempFile("zip")
+	assert.NoError(self.T(), err)
+	output_file.Close()
+
+	defer os.Remove(output_file.Name())
+
+	// Copy the download to a temp file so we can delete the hunt.
+	filesystem.CopyFunction{}.Call(ctx, scope, ordereddict.NewDict().
+		Set("filename", download_pathspec).
+		Set("accessor", "fs").
+		Set("dest", output_file.Name()))
 
 	// test_utils.GetMemoryFileStore(self.T(), self.ConfigObj).Debug()
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
@@ -152,7 +179,7 @@ func (self *TestSuite) TestCreateAndImportHunt() {
 		Set("Original Flow", self.snapshotHuntFlow())
 
 	// Now delete the old hunt
-	for _ = range (&hunts.DeleteHuntPlugin{}).Call(ctx, scope,
+	for range (&hunts.DeleteHuntPlugin{}).Call(ctx, scope,
 		ordereddict.NewDict().Set("hunt_id", hunt.HuntId).
 			Set("really_do_it", true)) {
 	}
@@ -162,13 +189,13 @@ func (self *TestSuite) TestCreateAndImportHunt() {
 	// test_utils.GetMemoryFileStore(self.T(), self.ConfigObj).Debug()
 
 	imported_hunt := (&collector.ImportCollectionFunction{}).Call(ctx, scope, ordereddict.NewDict().
-		Set("filename", download_pathspec).
-		Set("accessor", "fs").
+		Set("filename", output_file.Name()).
+		Set("accessor", "file").
 		Set("import_type", "hunt"))
 	assert.IsType(self.T(), &api_proto.Hunt{}, imported_hunt)
 
 	// Wait here until the hunt is updated - this happens
-	// asyncronously by the hunt dispatcher.
+	// asynchronously by the hunt dispatcher.
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
 		snapshot, _ := self.snapshotHuntFlow().Get("/hunts/H.1234.json")
 		return len(json.AnyToString(snapshot, json.DefaultEncOpts())) > 10
@@ -195,32 +222,25 @@ func (self *TestSuite) snapshotHuntFlow() *ordereddict.Dict {
 	})
 }
 
-func (self *TestSuite) TestImportHuntFromFixture() {
-	launcher, err := services.GetLauncher(self.ConfigObj)
-	assert.NoError(self.T(), err)
-	launcher.SetFlowIdForTests("F.1234XX")
+func (self *TestSuite) _TestImportHuntFromFixture() {
+	self.CreateFlow(constants.VELOCIRAPTOR_SERVER_CLIENT_ID, "F.1234")
 
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.SetFlowIdForTests("F.1234XX")()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
 
 	manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository, _ := manager.GetGlobalRepository(self.ConfigObj)
-	_, err = repository.LoadYaml(CustomTestArtifactDependent,
+	_, err := repository.LoadYaml(CustomTestArtifactDependent,
 		services.ArtifactOptions{
 			ValidateArtifact:  true,
 			ArtifactIsBuiltIn: true})
 
 	assert.NoError(self.T(), err)
 
-	builder := services.ScopeBuilder{
-		Config:     self.ConfigObj,
-		ACLManager: acl_managers.NullACLManager{},
-		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
-		Env:        ordereddict.NewDict(),
-	}
+	scope := self.makeScope()
+	defer scope.Close()
 
 	ctx := self.Ctx
-	scope := manager.BuildScope(builder)
 
 	import_file_path, err := filepath.Abs("fixtures/import_hunt.zip")
 	assert.NoError(self.T(), err)
@@ -257,19 +277,67 @@ func (self *TestSuite) TestImportHuntFromFixture() {
 		value, _ := fs.Get("/hunts/H.CKRG32QRAB5N0.json")
 		return len(value) > 0
 	})
-
-	goldie.Assert(self.T(), "TestImportHuntFromFixture",
-		json.MustMarshalIndent(self.snapshotStaticHuntFlow()))
 }
 
-func (self *TestSuite) snapshotStaticHuntFlow() *ordereddict.Dict {
+func (self *TestSuite) TestImportHuntFromFixture() {
+	// Make sure the fixture client id does not exist - importing will
+	// create it with the same id.
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	err = client_info_manager.DeleteClient(
+		self.Ctx, fixtureClientId,
+		utils.GetSuperuserName(self.ConfigObj),
+		services.DiscardDeleteProgress, services.ReallyDoIt)
+	assert.NoError(self.T(), err)
+
+	self._TestImportHuntFromFixture()
+
+	goldie.Assert(self.T(), "TestImportHuntFromFixture",
+		json.MustMarshalIndent(self.snapshotStaticHuntFlow(fixtureClientId)))
+}
+
+func (self *TestSuite) TestImportHuntFromFixtureWithExistingHostname() {
+	// Delete the old client id and create a new client with the same
+	// hostname.
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	err = client_info_manager.DeleteClient(
+		self.Ctx, fixtureClientId,
+		utils.GetSuperuserName(self.ConfigObj),
+		services.DiscardDeleteProgress, services.ReallyDoIt)
+
+	assert.NoError(self.T(), err)
+
+	// Make a new client with a different client id but same
+	// hostname. The importer will select this one in favor of the
+	// original client id.
+	new_client_id := "C.1234abcd"
+
+	scope := self.makeScope()
+	defer scope.Close()
+
+	res := clients.NewClientFunction{}.Call(self.Ctx, scope, ordereddict.NewDict().
+		Set("client_id", new_client_id).
+		Set("hostname", fixtureHostname))
+	assert.False(self.T(), utils.IsNil(res))
+
+	self._TestImportHuntFromFixture()
+
+	goldie.Assert(self.T(), "TestImportHuntFromFixtureWithExistingHostname",
+		json.MustMarshalIndent(self.snapshotStaticHuntFlow(new_client_id)))
+}
+
+func (self *TestSuite) snapshotStaticHuntFlow(
+	client_id string) *ordereddict.Dict {
 	return self.snapshot([]string{
-		"/clients/C.a99faf363b5601fe/artifacts/Windows.Search.FileFinder/F.CKRG32QRAB5N0.H.json",
-		"/clients/C.a99faf363b5601fe/artifacts/Windows.Search.FileFinder/F.CKRG32QRAB5N0.H.json.index",
-		"/clients/C.a99faf363b5601fe/collections/F.CKRG32QRAB5N0.H/uploads.json",
-		"/clients/C.a99faf363b5601fe/collections/F.CKRG32QRAB5N0.H/uploads.json.index",
-		"/clients/C.a99faf363b5601fe/collections/F.CKRG32QRAB5N0.H/logs.json",
-		"/clients/C.a99faf363b5601fe/collections/F.CKRG32QRAB5N0.H/logs.json.index",
+		"/clients/" + client_id + "/artifacts/Windows.Search.FileFinder/F.CKRG32QRAB5N0.H.json",
+		"/clients/" + client_id + "/artifacts/Windows.Search.FileFinder/F.CKRG32QRAB5N0.H.json.index",
+		"/clients/" + client_id + "/collections/F.CKRG32QRAB5N0.H/uploads.json",
+		"/clients/" + client_id + "/collections/F.CKRG32QRAB5N0.H/uploads.json.index",
+		"/clients/" + client_id + "/collections/F.CKRG32QRAB5N0.H/logs.json",
+		"/clients/" + client_id + "/collections/F.CKRG32QRAB5N0.H/logs.json.index",
 
 		"/hunts/H.CKRG32QRAB5N0.json",
 		"/hunts/H.CKRG32QRAB5N0.json.index",
@@ -303,4 +371,19 @@ func (self *TestSuite) snapshot(paths []string) *ordereddict.Dict {
 		result.Set(path, golden)
 	}
 	return result
+}
+
+func (self *TestSuite) makeScope() vfilter.Scope {
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Now create a download of this collection.
+	builder := services.ScopeBuilder{
+		Config:     self.ConfigObj,
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
+		Env:        ordereddict.NewDict(),
+	}
+
+	return manager.BuildScope(builder)
 }

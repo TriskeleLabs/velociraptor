@@ -19,6 +19,11 @@ func GenericToolServices() *config_proto.ServerServicesConfig {
 		JournalService:      true,
 		UserManager:         true,
 		NotificationService: true,
+
+		// If the config provides a datastore we can use the real
+		// Client Info Manager, otherwise we will use a dummy
+		// one. This is mostly used by VQL functions that may need it.
+		ClientInfo: true,
 	}
 }
 
@@ -31,6 +36,7 @@ func ClientServicesSpec() *config_proto.ServerServicesConfig {
 		Launcher:            true,
 		HttpCommunicator:    true,
 		ClientEventTable:    true,
+		ClientInfo:          true,
 	}
 }
 
@@ -50,6 +56,7 @@ func MinionServicesSpec() *config_proto.ServerServicesConfig {
 		JournalService:      true,
 		SchedulerService:    true,
 		DynDns:              true,
+		InventoryService:    true,
 
 		// Run the notebook service on the minion so it can run
 		// notebook jobs remotely.

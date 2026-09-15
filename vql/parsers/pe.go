@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -27,7 +27,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/constants"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/readers"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -47,7 +46,8 @@ func (self _PEFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:     "parse_pe",
 		Doc:      "Parse a PE file.",
 		ArgType:  type_map.AddType(scope, &_PEFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 
@@ -56,18 +56,12 @@ func (self _PEFunction) Call(
 	args *ordereddict.Dict) vfilter.Any {
 
 	defer utils.RecoverVQL(scope)
-	defer vql_subsystem.RegisterMonitor("parse_pe", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_pe", args)()
 
 	arg := &_PEFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("parse_pe: %v", err)
-		return &vfilter.Null{}
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("parse_pe: %s", err)
 		return &vfilter.Null{}
 	}
 
@@ -80,7 +74,7 @@ func (self _PEFunction) Call(
 	defer paged_reader.Close()
 
 	var reader io.ReaderAt = paged_reader
-	var reader_size int64 = paged_reader.MaxSize()
+	var reader_size = paged_reader.MaxSize()
 
 	if arg.BaseOffset > 0 {
 		reader = utils.NewOffsetReader(reader, arg.BaseOffset,
@@ -92,6 +86,13 @@ func (self _PEFunction) Call(
 		// Suppress logging for invalid PE files.
 		// scope.Log("parse_pe: %v for %v", err, arg.Filename)
 		return &vfilter.Null{}
+	}
+
+	// Set the max hash size if needed
+	hash_max_size := vql_subsystem.GetIntFromRow(
+		scope, scope, constants.HASH_MAX_SIZE)
+	if hash_max_size > 0 {
+		pe.SetHashSizeLimit(int64(hash_max_size))
 	}
 
 	// Return a lazy object.
@@ -113,6 +114,9 @@ func (self _PEFunction) Call(
 		Set("Exports", func() vfilter.Any {
 			return pe_file.Exports()
 		}).
+		Set("ExportRVAs", func() vfilter.Any {
+			return pe_file.ExportRVAs()
+		}).
 		Set("Forwards", func() vfilter.Any {
 			return pe_file.Forwards()
 		}).
@@ -130,7 +134,11 @@ func (self _PEFunction) Call(
 			return pe.PKCS7ToOrderedDict(info)
 		}).
 		Set("AuthenticodeHash", func() vfilter.Any {
-			return pe_file.CalcHashToDict()
+			res, err := pe_file.CalcHashToDict(ctx)
+			if err != nil {
+				res = ordereddict.NewDict()
+			}
+			return res
 		})
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
-	context "golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -65,15 +65,18 @@ func streamEvents(
 	if in.Queue == "Server.Internal.MasterRegistrations" {
 		result := ordereddict.NewDict().Set("Events", journal.GetWatchers())
 		serialized, _ := result.MarshalJSON()
-		stream.Send(&api_proto.EventResponse{
+		err := stream.Send(&api_proto.EventResponse{
 			Jsonl: serialized,
 		})
+		if err != nil {
+			return err
+		}
 		stats.Sent++
 	}
 
 	// The API service is running on the master only! This means
 	// the journal service is local.
-	output_chan, cancel := journal.Watch(
+	output_chan, cancel := journal.WatchArtifact(
 		ctx, in.Queue, "replication-"+in.WatcherName)
 	defer cancel()
 
@@ -100,7 +103,7 @@ func streamEvents(
 					replicationReceiveHistorgram.WithLabelValues("").Observe(v)
 				}))
 
-			// If we are not able to send within the sepecified 5
+			// If we are not able to send within the specified 5
 			// seconds we must abort the connection.
 
 			err = utils.DoWithTimeout(func() error {
@@ -118,8 +121,6 @@ func streamEvents(
 			}
 		}
 	}
-
-	return nil
 }
 
 // NOTE: The API server is only running on the master node.
@@ -165,7 +166,7 @@ func (self *ApiServer) WatchEvent(
 	self.wg.Add(1)
 	defer self.wg.Done()
 
-	// The call can access the datastore from any org becuase it is a
+	// The call can access the datastore from any org because it is a
 	// server->server call.
 	org_manager, err := services.GetOrgManager()
 	if err != nil {
@@ -206,11 +207,13 @@ func (self *replicationTracker) Debug() []*ordereddict.Dict {
 
 	sort.Strings(keys)
 	for _, k := range keys {
-		v, _ := self.currentReplications[k]
-		result = append(result, ordereddict.NewDict().
-			Set("Type", "Replication").
-			Set("Name", k).
-			Set("Stats", v))
+		v, ok := self.currentReplications[k]
+		if ok {
+			result = append(result, ordereddict.NewDict().
+				Set("Type", "Replication").
+				Set("Name", k).
+				Set("Stats", v))
+		}
 	}
 	return result
 }
@@ -236,6 +239,7 @@ func init() {
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
 		Name:        "Replication",
 		Description: "Report current replication connections between master and minion",
+		Categories:  []string{"Global", "Datastore"},
 		ProfileWriter: func(ctx context.Context,
 			scope vfilter.Scope, output_chan chan vfilter.Row) {
 

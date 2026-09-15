@@ -5,11 +5,11 @@ import (
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 func (self *TestSuite) TestWildCardSearch() {
@@ -23,6 +23,14 @@ func (self *TestSuite) TestWildCardSearch() {
 		"client:*.023030003030*2",
 		"client:*30003030*2",
 		"client:C.02303*2",
+
+		// Regex based searches
+		"client:C./023.+13.+/",
+
+		"label:*",
+
+		// With no search term it means match all
+		"label:",
 	} {
 		ctx := context.Background()
 		scope := vql_subsystem.MakeScope()

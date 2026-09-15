@@ -1,0 +1,51 @@
+{
+ "Initial Command": [
+  {
+   "Command": "",
+   "CommandId": "3",
+   "Stdout": ""
+  },
+  {
+   "Command": "echo hello\n",
+   "CommandId": "",
+   "Stdout": ""
+  },
+  {
+   "Command": "",
+   "CommandId": "",
+   "Stdout": "hello\n"
+  }
+ ],
+ "Second command": [
+  {
+   "Command": "",
+   "CommandId": "3",
+   "Stdout": ""
+  },
+  {
+   "Command": "echo hello\n",
+   "CommandId": "",
+   "Stdout": ""
+  },
+  {
+   "Command": "",
+   "CommandId": "",
+   "Stdout": "hello\n"
+  },
+  {
+   "Command": "",
+   "CommandId": "4",
+   "Stdout": ""
+  },
+  {
+   "Command": "echo goodbye\n",
+   "CommandId": "",
+   "Stdout": ""
+  },
+  {
+   "Command": "",
+   "CommandId": "",
+   "Stdout": "goodbye\n"
+  }
+ ]
+}

@@ -3,19 +3,19 @@ package readers
 import (
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
@@ -39,7 +39,7 @@ func (self *TestSuite) SetupTest() {
 	self.pool = GetReaderPool(self.scope, 5)
 
 	var err error
-	self.tmp_dir, err = ioutil.TempDir("", "tmp")
+	self.tmp_dir, err = tempfile.TempDir("tmp")
 	assert.NoError(self.T(), err)
 
 	// Create 10 files with data
@@ -73,7 +73,6 @@ func (self *TestSuite) TearDownTest() {
 
 func (self *TestSuite) TestPagedReader() {
 	// Open 10 paged readers - This should close 5
-	readers := make([]*AccessorReader, 0, 10)
 	buff := make([]byte, 4)
 
 	for i := 0; i < 10; i++ {
@@ -83,7 +82,6 @@ func (self *TestSuite) TestPagedReader() {
 		_, err = reader.ReadAt(buff, 0)
 		assert.NoError(self.T(), err)
 		assert.Equal(self.T(), binary.LittleEndian.Uint32(buff), uint32(i))
-		readers = append(readers, reader)
 	}
 
 	for i := 0; i < 10; i++ {
@@ -141,7 +139,7 @@ func (self *TestSuite) TestPagedReader() {
 	// Close the scope - this should close all the pool
 	self.scope.Close()
 
-	// Destoying the scope should close the readers.
+	// Destroying the scope should close the readers.
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
 		reader.mu.Lock()
 		defer reader.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -15,6 +16,7 @@ type UserCreateFunctionArgs struct {
 	Username string   `vfilter:"required,field=user,doc=The user to create or update."`
 	Roles    []string `vfilter:"required,field=roles,doc=List of roles to give the user."`
 	Password string   `vfilter:"optional,field=password,doc=A password to set for the user (If not using SSO this might be needed)."`
+	Oid      string   `vfilter:"optional,field=sub,doc=A sub value for OIDC pinning."`
 	OrgIds   []string `vfilter:"optional,field=orgs,doc=One or more org IDs to grant access to. If empty we use the current org."`
 }
 
@@ -63,17 +65,43 @@ func (self UserCreateFunction) Call(
 		return vfilter.Null{}
 	}
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		org_config_obj, principal, "user_create",
 		ordereddict.NewDict().
 			Set("username", arg.Username).
 			Set("acl", policy).
 			Set("org_ids", arg.OrgIds))
+	if err != nil {
+		logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+		logger.Error("<red>user_create</> %v: %v %v", principal,
+			arg.Username, policy)
+	}
 
 	if arg.Password != "" {
 		// Write the user record.
 		err = users_manager.SetUserPassword(
 			ctx, org_config_obj, principal, arg.Username, arg.Password, "")
+		if err != nil {
+			scope.Log("user_create: %s", err)
+			return vfilter.Null{}
+		}
+	}
+
+	if arg.Oid != "" {
+		record, err := users_manager.GetUserWithHashes(
+			ctx, principal, arg.Username)
+		if err != nil {
+			scope.Log("user_create: %s", err)
+			return vfilter.Null{}
+		}
+
+		record.Oid = arg.Oid
+		// Allow clearing the Oid so it can be set by the IdP
+		// automatically.
+		if arg.Oid == "-" {
+			record.Oid = ""
+		}
+		err = users_manager.SetUser(ctx, record)
 		if err != nil {
 			scope.Log("user_create: %s", err)
 			return vfilter.Null{}
@@ -88,6 +116,7 @@ func (self UserCreateFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeM
 		Name:    "user_create",
 		Doc:     "Creates a new user from the server, or updates their permissions or reset their password.",
 		ArgType: type_map.AddType(scope, &UserCreateFunctionArgs{}),
+		Version: 3,
 	}
 }
 

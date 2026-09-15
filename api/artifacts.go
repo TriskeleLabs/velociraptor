@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -19,13 +19,13 @@ package api
 
 import (
 	"bytes"
-	"io/ioutil"
+	"context"
 	"regexp"
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
-	context "golang.org/x/net/context"
+	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
 	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -36,8 +36,10 @@ import (
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/launcher"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -149,11 +151,68 @@ func setArtifactFile(
 			})
 
 	case api_proto.SetArtifactRequest_SET:
-		return manager.SetArtifactFile(ctx,
+		result, err := manager.SetArtifactFile(ctx,
 			config_obj, principal, in.Artifact, required_prefix)
+		if err != nil {
+			return nil, Status(config_obj.Verbose, err)
+		}
+
+		if len(in.Tags) > 0 {
+			err = manager.SetArtifactMetadata(ctx, config_obj, principal,
+				result.Name, &artifacts_proto.ArtifactMetadata{
+					Tags: in.Tags,
+				})
+			if err != nil {
+				return nil, Status(config_obj.Verbose, err)
+			}
+		}
+
+		return result, nil
+
 	}
 
 	return nil, InvalidStatus("Unknown op")
+}
+
+func checkArtifact(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact string) (*launcher.AnalysisState, error) {
+
+	state := launcher.NewAnalysisState(artifact)
+	manager, err := services.GetRepositoryManager(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load it into a local repository for checking - this will
+	// not commit it to the global repository yet
+	local_repository := manager.NewRepository()
+	local_repository.SetParent(repository, config_obj)
+
+	artifact_obj, err := local_repository.LoadYaml(artifact,
+		services.ArtifactOptions{
+			ValidateArtifact: true,
+		})
+
+	if err != nil {
+		return &launcher.AnalysisState{
+			Errors: []*launcher.VerifierError{{
+				Name:    launcher.YAML_ERROR,
+				Message: err.Error(),
+			}}}, nil
+	}
+
+	// Verify the artifact
+	launcher.VerifyArtifact(
+		ctx, config_obj, repository, artifact_obj, state)
+
+	return state, nil
 }
 
 func getReportArtifacts(
@@ -222,6 +281,28 @@ type matchPlan struct {
 
 	// Show basic artifacts
 	basic *bool
+
+	tags []string
+}
+
+func (self *matchPlan) matchTag(artifact *artifacts_proto.Artifact) bool {
+	if len(self.tags) == 0 {
+		return true
+	}
+
+	if artifact.Metadata == nil || len(artifact.Metadata.Tags) == 0 {
+		return false
+	}
+
+	for _, i := range self.tags {
+		for _, j := range artifact.Metadata.Tags {
+			if strings.EqualFold(i, j) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (self *matchPlan) matchDescOrName(artifact *artifacts_proto.Artifact) bool {
@@ -318,16 +399,31 @@ func (self *matchPlan) matchType(artifact *artifacts_proto.Artifact) bool {
 	return true
 }
 
+func (self *matchPlan) hideEmptySources() bool {
+	// User wants to show empty sources
+	if self.empty_source {
+		return false
+	}
+
+	// Tag searches should show all artifacts - including ones without
+	// sources.
+	if len(self.tags) > 0 {
+		return false
+	}
+
+	return true
+}
+
 // All conditions must match
 func (self *matchPlan) matchArtifact(artifact *artifacts_proto.Artifact) bool {
-	if !self.hidden && // Dont show hidden artifacts
+	if !self.hidden && // Don't show hidden artifacts
 
 		// Artifact is set to hidden
 		artifact.Metadata != nil && artifact.Metadata.Hidden {
 		return false
 	}
 
-	if !self.empty_source && len(artifact.Sources) == 0 {
+	if self.hideEmptySources() && len(artifact.Sources) == 0 {
 		return false
 	}
 
@@ -336,6 +432,10 @@ func (self *matchPlan) matchArtifact(artifact *artifacts_proto.Artifact) bool {
 	}
 
 	if !self.matchDescOrName(artifact) {
+		return false
+	}
+
+	if !self.matchTag(artifact) {
 		return false
 	}
 
@@ -418,8 +518,11 @@ func prepareMatchPlan(search string) *matchPlan {
 					result.basic = &value
 				}
 				continue
-			}
 
+			case "tag":
+				result.tags = append(result.tags, strings.ToLower(term))
+				continue
+			}
 		}
 		re, err := regexp.Compile("(?i)" + token)
 		if err == nil {
@@ -511,13 +614,22 @@ func searchArtifact(
 		}
 	}
 
+	if fields != nil && fields.Tags {
+		result.Tags, err = repository.Tags(ctx, config_obj)
+		if err != nil {
+			return nil, Status(config_obj.Verbose, err)
+		}
+	}
+
 	return result, nil
 }
 
 func (self *ApiServer) LoadArtifactPack(
 	ctx context.Context,
 	in *api_proto.LoadArtifactPackRequest) (
-	*api_proto.LoadArtifactPackResponse, error) {
+	res *api_proto.LoadArtifactPackResponse, err error) {
+
+	defer Instrument("LoadArtifactPack")()
 
 	users_manager := services.GetUserManager()
 	user_record, org_config_obj, err := users_manager.GetUserFromContext(ctx)
@@ -546,19 +658,25 @@ func (self *ApiServer) LoadArtifactPack(
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
-	defer closer()
+	defer func() {
+		err1 := closer()
+		if err != nil {
+			err = err1
+		}
+	}()
 
 	result := &api_proto.LoadArtifactPackResponse{
 		VfsPath: in.VfsPath,
 	}
 	for _, file := range zip_reader.File {
-		if strings.HasSuffix(file.Name, ".yaml") {
+		if strings.HasSuffix(file.Name, ".yaml") ||
+			strings.HasSuffix(file.Name, ".yml") {
 			fd, err := file.Open()
 			if err != nil {
 				continue
 			}
 
-			data, err := ioutil.ReadAll(fd)
+			data, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
 			fd.Close()
 
 			if err != nil {
@@ -573,15 +691,24 @@ func (self *ApiServer) LoadArtifactPack(
 			request := &api_proto.SetArtifactRequest{
 				Op:       api_proto.SetArtifactRequest_CHECK,
 				Artifact: artifact_definition,
+				Tags:     in.Tags,
 			}
 
 			definition, err := setArtifactFile(ctx,
 				org_config_obj, principal, request, prefix)
 			if err != nil {
-				result.Errors = append(result.Errors, &api_proto.LoadArtifactError{
-					Filename: file.Name,
-					Error:    err.Error(),
-				})
+				if len(result.Errors) < 10 {
+					result.Errors = append(result.Errors, &api_proto.LoadArtifactError{
+						Filename: file.Name,
+						Error:    err.Error(),
+					})
+
+				} else if len(result.Errors) == 10 {
+					result.Errors = append(result.Errors, &api_proto.LoadArtifactError{
+						Filename: file.Name,
+						Error:    "Too many errors - suppressing",
+					})
+				}
 				continue
 			}
 
@@ -601,11 +728,16 @@ func (self *ApiServer) LoadArtifactPack(
 			definition, err = setArtifactFile(ctx,
 				org_config_obj, principal, request, prefix)
 			if err == nil {
-				services.LogAudit(ctx,
+				err := services.LogAudit(ctx,
 					org_config_obj, principal, "LoadArtifactPack",
 					ordereddict.NewDict().
 						Set("artifact", definition.Name).
 						Set("details", request.Artifact))
+				if err != nil {
+					logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+					logger.Error("<red>LoadArtifactPack</> %v %v",
+						principal, definition.Name)
+				}
 
 				result.SuccessfulArtifacts = append(result.SuccessfulArtifacts,
 					definition.Name)
@@ -657,12 +789,18 @@ func getZipReader(
 		return nil, nil, errors.New("vfs_path should be specified")
 	}
 
-	if in.VfsPath[0] != paths.TEMP_ROOT.Components()[0] {
+	if in.VfsPath[0] != paths.TEMP_ROOT.Components()[0] &&
+		in.VfsPath[0] != paths.PUBLIC_ROOT.Components()[0] {
 		return nil, nil, errors.New("vfs_path should be a temp path")
 	}
 
 	pathspec := path_specs.NewUnsafeFilestorePath(in.VfsPath...).
 		SetType(api.PATH_TYPE_FILESTORE_ANY)
+
+	err := file_store_accessor.IsFileAccessible(pathspec)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	file_store_factory := file_store.GetFileStore(config_obj)
 	fd, err := file_store_factory.ReadFile(pathspec)
@@ -714,4 +852,26 @@ func MakeCollectorRequest(
 	}
 
 	return result
+}
+
+func ModifyRequestForCustomArtifacts(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	repository services.Repository,
+	request *flows_proto.ArtifactCollectorArgs) {
+	for i, name := range request.Artifacts {
+		custom_name := "Custom." + name
+		_, pres := repository.Get(ctx, config_obj, custom_name)
+		if pres {
+			request.Artifacts[i] = custom_name
+		}
+	}
+
+	for _, spec := range request.Specs {
+		custom_name := "Custom." + spec.Artifact
+		_, pres := repository.Get(ctx, config_obj, custom_name)
+		if pres {
+			spec.Artifact = custom_name
+		}
+	}
 }

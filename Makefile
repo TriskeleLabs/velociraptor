@@ -7,17 +7,17 @@ assets:
 auto:
 	go run make.go -v auto
 
-test:
+test: vale
 	go test -race -v --tags server_vql ./...
 
-test_light:
-	go test -v --tags server_vql ./...
+test_less: vale
+	go test -race -v --tags server_vql ./... 2>&1 | less
 
 golden:
 	./output/velociraptor -v --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --filter=${GOLDEN}
 
 debug_golden:
-	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --disable_alarm -v --debug --filter=${GOLDEN}
+	dlv debug --init ./scripts/dlv.init --build-flags="-tags 'server_vql extras'" ./bin/ -- --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd` --disable_alarm -v --debug --filter=${GOLDEN}
 
 references:
 	./output/velociraptor vql export docs/references/vql.yaml > docs/references/vql.yaml.tmp
@@ -39,14 +39,27 @@ darwin_m1:
 linux_m1:
 	go run make.go -v LinuxM1
 
+linux_sumo:
+	go run make.go -v LinuxSumo
+
+windows_sumo:
+	go run make.go -v WindowsSumo
+
 linux_arm64:
 	go run make.go -v LinuxArm64
+
+# For raspberi pi.
+linux_armf:
+	go run make.go -v LinuxArmhf
 
 linux_musl:
 	go run make.go -v LinuxMusl
 
 linux_musl_debug:
 	go run make.go -v LinuxMuslDebug
+
+linux_debug:
+	go run make.go -v LinuxDebug
 
 linux:
 	go run make.go -v linux
@@ -79,26 +92,17 @@ generate:
 check:
 	staticcheck ./...
 
+check_versions:
+	python3 -X utf8 ./scripts/check_versions.py 3
+
 debug:
-	dlv debug --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug
+	dlv debug --init ./scripts/dlv.init --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug
 
 debug_minion:
-	dlv debug --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug --minion --node ${NODE}
+	dlv debug --init ./scripts/dlv.init --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend --disable-panic-guard -v --debug --minion --node ${NODE}
 
 debug_client:
-	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v --debug --debug_port 6061
-
-lint:
-	golangci-lint run
-
-KapeFilesSync:
-	python3 scripts/kape_files.py -t win ~/projects/KapeFiles/ > artifacts/definitions/Windows/KapeFiles/Targets.yaml
-
-SQLECmdSync:
-	python3 scripts/sqlecmd_convert.py ~/projects/SQLECmd/ ~/projects/KapeFiles/ artifacts/definitions/Generic/Collectors/SQLECmd.yaml
-
-SQLiteHunter:
-	cp ~/projects/SQLiteHunter/output/SQLiteHunter.yaml artifacts/definitions/Generic/Forensic/SQLiteHunter.yaml
+	dlv debug --init ./scripts/dlv.init --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v --debug --debug_port 6061
 
 # Do this after fetching the build artifacts with `gh run download <RunID>`
 UpdateCIArtifacts:
@@ -109,7 +113,7 @@ UpdateCerts:
 	cp /etc/ssl/certs/ca-certificates.crt crypto/ca-certificates.crt
 	fileb0x crypto/b0x.yaml
 
-# Use this to propare artifact packs at specific versions:
+# Use this to prepare artifact packs at specific versions:
 # First git checkout origin/v0.6.3
 archive_artifacts:
 	zip -r release_artifacts_$(basename "$(git status | head -1)").zip artifacts/definitions/ -i \*.yaml
@@ -122,3 +126,14 @@ config_check:
 
 deadcode:
 	go run make.go -v deadcode
+
+api_check:
+	python ./scripts/api_checker.py .
+
+# Build the docker container
+container:
+	go run make.go -v container
+
+# Only vale changes from master
+vale:
+	time vale `git diff --name-only --diff-filter=AM origin/master`

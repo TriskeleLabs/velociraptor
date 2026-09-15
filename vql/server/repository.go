@@ -10,16 +10,21 @@ import (
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
 
+const (
+	REPOSITORY_CACHE_TAG = "__REPOSITORY_"
+)
+
 type ArtifactSetFunctionArgs struct {
-	Definition string `vfilter:"optional,field=definition,doc=Artifact definition in YAML"`
-	Prefix     string `vfilter:"optional,field=prefix,doc=Required name prefix"`
+	Definition string   `vfilter:"optional,field=definition,doc=Artifact definition in YAML"`
+	Prefix     string   `vfilter:"optional,field=prefix,doc=Optional name prefix (deprecated ignored)"`
+	Tags       []string `vfilter:"optional,field=tags,doc=Optional tags to attach to the artifact."`
+	Repository string   `vfilter:"optional,field=repository,doc=Add the artifact to this repository, if not set, we add the artifact to the global repository."`
 }
 
 type ArtifactSetFunction struct{}
@@ -71,8 +76,14 @@ func (self *ArtifactSetFunction) Call(ctx context.Context,
 	switch def_type {
 	case "client", "client_event", "":
 		permission = acls.ARTIFACT_WRITER
+
 	case "server", "server_event", "notebook":
 		permission = acls.SERVER_ARTIFACT_WRITER
+
+	case "internal":
+		// Not an actual error but we are not allowed to set those
+		return vfilter.Null{}
+
 	default:
 		scope.Log("artifact_set: artifact type %v invalid", definition.Type)
 		return vfilter.Null{}
@@ -86,11 +97,76 @@ func (self *ArtifactSetFunction) Call(ctx context.Context,
 
 	principal := vql_subsystem.GetPrincipal(scope)
 
+	global_repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		scope.Log("artifact_set: %s", err)
+		return vfilter.Null{}
+	}
+
+	if arg.Repository != "" {
+		var local_repository services.Repository
+		cached_any := vql_subsystem.CacheGet(scope, REPOSITORY_CACHE_TAG+arg.Repository)
+
+		if cached_repository, ok := cached_any.(services.Repository); ok {
+			local_repository = cached_repository
+		} else {
+			scope.Log("artifact_set: creating new repository '%s'", arg.Repository)
+			local_repository = manager.NewRepository()
+			local_repository.SetParent(global_repository, config_obj)
+		}
+
+		// Determine if this is a built-in artifact
+		tmp_repository := local_repository.Copy()
+		built_in := false
+
+		artifact, err := tmp_repository.LoadYaml(arg.Definition,
+			services.ArtifactOptions{
+				ValidateArtifact:  true,
+				ArtifactIsBuiltIn: true,
+			})
+		if err == nil {
+			if global_artifact, pres := global_repository.Get(ctx, config_obj, artifact.Name); pres {
+				built_in = global_artifact.BuiltIn
+			}
+		}
+
+		definition, err := local_repository.LoadYaml(arg.Definition,
+			services.ArtifactOptions{
+				ValidateArtifact:  true,
+				ArtifactIsBuiltIn: built_in,
+			})
+		if err != nil {
+			scope.Log("artifact_set: %s", err)
+			return vfilter.Null{}
+		}
+
+		scope.Log("artifact_set: added %s to repository '%s'", definition.Name, arg.Repository)
+		vql_subsystem.CacheSet(scope, REPOSITORY_CACHE_TAG+arg.Repository, local_repository)
+
+		return json.ConvertProtoToOrderedDict(definition)
+	}
+
 	definition, err = manager.SetArtifactFile(ctx,
 		config_obj, principal, arg.Definition, arg.Prefix)
 	if err != nil {
 		scope.Log("artifact_set: %s", err)
 		return vfilter.Null{}
+	}
+
+	if len(arg.Tags) > 0 {
+		metadata := definition.Metadata
+		if metadata == nil {
+			metadata = &artifacts_proto.ArtifactMetadata{}
+		}
+
+		metadata.Tags = arg.Tags
+
+		err = manager.SetArtifactMetadata(ctx, config_obj,
+			principal, definition.Name, metadata)
+		if err != nil {
+			scope.Log("artifact_set: %s", err)
+			return vfilter.Null{}
+		}
 	}
 
 	return json.ConvertProtoToOrderedDict(definition)
@@ -102,8 +178,9 @@ func (self ArtifactSetFunction) Info(
 		Name:    "artifact_set",
 		Doc:     "Sets an artifact into the global repository.",
 		ArgType: type_map.AddType(scope, &ArtifactSetFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
 			acls.ARTIFACT_WRITER, acls.SERVER_ARTIFACT_WRITER).Build(),
+		Version: 2,
 	}
 }
 
@@ -185,7 +262,7 @@ func (self ArtifactDeleteFunction) Info(
 		Name:    "artifact_delete",
 		Doc:     "Deletes an artifact from the global repository.",
 		ArgType: type_map.AddType(scope, &ArtifactDeleteFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
 			acls.ARTIFACT_WRITER, acls.SERVER_ARTIFACT_WRITER).Build(),
 	}
 }
@@ -205,6 +282,7 @@ func (self ArtifactsPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "artifact_definitions", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -315,14 +393,15 @@ func (self ArtifactsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name:     "artifact_definitions",
 		Doc:      "Dump artifact definitions.",
 		ArgType:  type_map.AddType(scope, &ArtifactsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 
 type ArtifactSetMetadataFunctionArgs struct {
-	Name   string `vfilter:"required,field=name,doc=The Artifact to update"`
-	Hidden bool   `vfilter:"optional,field=hidden,doc=Set to true make the artifact hidden in the GUI, false to make it visible again."`
-	Basic  bool   `vfilter:"optional,field=basic,doc=Set to true make the artifact a 'basic' artifact. This allows users with the COLLECT_BASIC permission able to collect it."`
+	Name   string   `vfilter:"required,field=name,doc=The Artifact to update"`
+	Hidden bool     `vfilter:"optional,field=hidden,doc=Set to true make the artifact hidden in the GUI, false to make it visible again."`
+	Basic  bool     `vfilter:"optional,field=basic,doc=Set to true make the artifact a 'basic' artifact. This allows users with the COLLECT_BASIC permission able to collect it."`
+	Tags   []string `vfilter:"optional,field=tags,doc=Optional tags to attach to the artifact."`
 }
 
 type ArtifactSetMetadataFunction struct{}
@@ -395,6 +474,12 @@ func (self *ArtifactSetMetadataFunction) Call(ctx context.Context,
 		metadata.Basic = arg.Basic
 	}
 
+	// Override the tags if specified.
+	_, pres = args.Get("tags")
+	if pres {
+		metadata.Tags = arg.Tags
+	}
+
 	principal := vql_subsystem.GetPrincipal(scope)
 	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
@@ -417,8 +502,9 @@ func (self ArtifactSetMetadataFunction) Info(
 		Name:    "artifact_set_metadata",
 		Doc:     "Sets metadata about the artifact.",
 		ArgType: type_map.AddType(scope, &ArtifactSetMetadataFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
 			acls.ARTIFACT_WRITER, acls.SERVER_ARTIFACT_WRITER).Build(),
+		Version: 2,
 	}
 }
 
@@ -469,7 +555,7 @@ func (self *ArtifactImportFunction) Call(ctx context.Context,
 		// supposed to actually return rows (they should be only LET
 		// statements).
 		for _, vql := range vqls {
-			for _ = range vql.Eval(ctx, scope) {
+			for range vql.Eval(ctx, scope) {
 			}
 		}
 	}
@@ -483,7 +569,7 @@ func (self ArtifactImportFunction) Info(
 		Name:     "import",
 		Doc:      "Imports an artifact into the current scope. This only works in notebooks!",
 		ArgType:  type_map.AddType(scope, &ArtifactImportFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Build(),
+		Metadata: vql_subsystem.VQLMetadata().Build(),
 	}
 }
 

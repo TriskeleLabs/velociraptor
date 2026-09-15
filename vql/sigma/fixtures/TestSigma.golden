@@ -13,13 +13,12 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -32,11 +31,11 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            "Bar"
           ]
          }
@@ -44,7 +43,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -52,7 +51,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Rule With Details": [
@@ -69,13 +69,12 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": "This is column Foo=Bar Int=4 List=[1,2,3] Dict={\"X\":1,\"Y\":2}",
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -88,17 +87,17 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            "Bar"
           ]
          },
          {
-          "Field": "Integer",
-          "Values": [
+          "field": "Integer",
+          "values": [
            4
           ]
          }
@@ -106,7 +105,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -117,7 +116,60 @@
     "AdditionalFields": {
      "details": "This is column Foo=%Foo% Int=%Integer% List=%List% Dict=%Dict%"
     }
-   }
+   },
+   "Details": "This is column Foo=Bar Int=4 List=[1,2,3] Dict={\"X\":1,\"Y\":2}"
+  }
+ ],
+ "Rule With Details with arrays": [
+  {
+   "Foo": "Bar",
+   "Data": [
+    "Element1",
+    "Element2"
+   ],
+   "_Match": {
+    "match": true,
+    "search_results": {
+     "selection": true
+    },
+    "condition_results": [
+     true
+    ]
+   },
+   "_Rule": {
+    "Title": "RuleWithDetailsWithArrays",
+    "Logsource": {
+     "Product": "windows",
+     "Service": "application"
+    },
+    "Detection": {
+     "Searches": {
+      "selection": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo",
+          "values": [
+           "Bar"
+          ]
+         }
+        ]
+       ]
+      }
+     },
+     "Condition": [
+      {
+       "Search": {
+        "Name": "selection"
+       }
+      }
+     ]
+    },
+    "AdditionalFields": {
+     "details": "This is column Foo=%Data[1]% Bar=%Data[2]% Exceeded=%Data[6]%"
+    }
+   },
+   "Details": "This is column Foo=Element1 Bar=Element2 Exceeded="
   }
  ],
  "Default Details in callback": [
@@ -134,13 +186,12 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": "I'm a scope var:Default Detail Foo=Bar",
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -153,11 +204,11 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            "Bar"
           ]
          }
@@ -165,7 +216,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -173,7 +224,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": "I'm a scope var:Default Detail Foo=Bar"
   }
  ],
  "Match field with regex": [
@@ -190,13 +242,12 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -209,14 +260,14 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            "b.r"
           ]
          }
@@ -224,7 +275,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -232,7 +283,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match field with logical operators": [
@@ -249,14 +301,13 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true,
      "selection2": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -269,14 +320,14 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            "b.r"
           ]
          }
@@ -284,14 +335,14 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Baz",
-          "Modifiers": [
+          "field": "Baz",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            "h.+lo"
           ]
          }
@@ -299,7 +350,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         {
@@ -312,7 +363,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match field with logical or operator": [
@@ -329,14 +381,13 @@
     "Y": 2
    },
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true,
      "selection2": false
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -349,14 +400,14 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            "b.r"
           ]
          }
@@ -364,14 +415,14 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Baz",
-          "Modifiers": [
+          "field": "Baz",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            "something"
           ]
          }
@@ -379,7 +430,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         {
@@ -392,7 +443,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match simple logsource": [
@@ -400,13 +452,12 @@
    "System": {
     "EventID": 2
    },
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -419,11 +470,11 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "EID",
-          "Values": [
+          "field": "EID",
+          "values": [
            2
           ]
          }
@@ -431,7 +482,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -439,20 +490,20 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match field with vql operator": [
   {
    "Foo": "Bar",
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -465,14 +516,14 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "vql"
           ],
-          "Values": [
+          "values": [
            "x=\u003elog(message=\"Field %v evaluated on Event %v\", args=[Rule.AdditionalFields.custom_field, Event])"
           ]
          }
@@ -480,7 +531,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -491,18 +542,18 @@
     "AdditionalFields": {
      "custom_field": "Some Custom Field"
     }
-   }
+   },
+   "Details": null
   },
   {
    "Foo": "Baz",
    "Baz": "Bye",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -515,14 +566,14 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "vql"
           ],
-          "Values": [
+          "values": [
            "x=\u003elog(message=\"Field %v evaluated on Event %v\", args=[Rule.AdditionalFields.custom_field, Event])"
           ]
          }
@@ -530,7 +581,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -541,20 +592,20 @@
     "AdditionalFields": {
      "custom_field": "Some Custom Field"
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match with no condition": [
   {
    "Foo": "bar",
    "Baz": "Hello",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -567,11 +618,11 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            "bar"
           ]
          }
@@ -579,7 +630,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -587,19 +638,19 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match with NULL": [
   {
    "Bar": 1,
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -612,17 +663,17 @@
     "Detection": {
      "Searches": {
       "selection": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            null
           ]
          },
          {
-          "Field": "Bar",
-          "Values": [
+          "field": "Bar",
+          "values": [
            1
           ]
          }
@@ -630,7 +681,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "selection"
@@ -638,22 +689,22 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Unknown modifiers": [],
  "All modifier": [
   {
    "Foo": "Bar",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "contains_all_true": true,
      "contains_no_match_false": false,
      "contains_one_of_true": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -666,15 +717,15 @@
     "Detection": {
      "Searches": {
       "contains_all_true": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "a",
            "B"
           ]
@@ -683,14 +734,14 @@
        ]
       },
       "contains_no_match_false": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "Z",
            "C"
           ]
@@ -699,14 +750,14 @@
        ]
       },
       "contains_one_of_true": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "a",
            "C"
           ]
@@ -715,7 +766,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         {
@@ -731,7 +782,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Test Modifiers": [
@@ -741,12 +793,11 @@
    "ip_address2": "192.168.0.2",
    "fieldname": "needle is a needle",
    "fieldname_int": 15,
-   "CommandLine": "ping /f ",
+   "CommandLine": "ping /f ―g —h ",
    "CommandLineWide": "cABpAG4AZwAgAA==",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "cidr_1": true,
      "cidr_2": true,
      "contains": true,
@@ -766,9 +817,11 @@
      "wide_all": false,
      "wide_any": true,
      "windash": true,
-     "windash_all": false
+     "windash_all": false,
+     "windash_bar": true,
+     "windash_emdash": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -781,14 +834,14 @@
     "Detection": {
      "Searches": {
       "cidr_1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "ip_address1",
-          "Modifiers": [
+          "field": "ip_address1",
+          "modifiers": [
            "cidr"
           ],
-          "Values": [
+          "values": [
            "192.0.0.0/8"
           ]
          }
@@ -796,14 +849,14 @@
        ]
       },
       "cidr_2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "ip_address2",
-          "Modifiers": [
+          "field": "ip_address2",
+          "modifiers": [
            "cidr"
           ],
-          "Values": [
+          "values": [
            "192.168.0.0/23",
            "192.168.1.0/23"
           ]
@@ -812,14 +865,14 @@
        ]
       },
       "contains": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "needle"
           ]
          }
@@ -827,15 +880,15 @@
        ]
       },
       "contains_all": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "needle",
            "haystack"
           ]
@@ -844,14 +897,14 @@
        ]
       },
       "contains_any": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "needle",
            "haystack"
           ]
@@ -860,14 +913,14 @@
        ]
       },
       "endswith": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "endswith"
           ],
-          "Values": [
+          "values": [
            "needle"
           ]
          }
@@ -875,14 +928,14 @@
        ]
       },
       "gt": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname_int",
-          "Modifiers": [
+          "field": "fieldname_int",
+          "modifiers": [
            "gt"
           ],
-          "Values": [
+          "values": [
            15
           ]
          }
@@ -890,14 +943,14 @@
        ]
       },
       "gte": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname_int",
-          "Modifiers": [
+          "field": "fieldname_int",
+          "modifiers": [
            "gte"
           ],
-          "Values": [
+          "values": [
            15
           ]
          }
@@ -905,14 +958,14 @@
        ]
       },
       "lt": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname_int",
-          "Modifiers": [
+          "field": "fieldname_int",
+          "modifiers": [
            "lt"
           ],
-          "Values": [
+          "values": [
            15
           ]
          }
@@ -920,14 +973,14 @@
        ]
       },
       "lte": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname_int",
-          "Modifiers": [
+          "field": "fieldname_int",
+          "modifiers": [
            "lte"
           ],
-          "Values": [
+          "values": [
            15
           ]
          }
@@ -935,13 +988,13 @@
        ]
       },
       "naked_all": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Modifiers": [
+          "modifiers": [
            "all"
           ],
-          "Values": [
+          "values": [
            "ping",
            "ip_address2"
           ]
@@ -950,14 +1003,14 @@
        ]
       },
       "re": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            ".*needle$"
           ]
          }
@@ -965,14 +1018,14 @@
        ]
       },
       "re_multiple": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "re"
           ],
-          "Values": [
+          "values": [
            ".*needle$",
            "foobar"
           ]
@@ -981,15 +1034,15 @@
        ]
       },
       "re_multiple_all": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "re",
            "all"
           ],
-          "Values": [
+          "values": [
            ".*needle$",
            "is a"
           ]
@@ -998,14 +1051,14 @@
        ]
       },
       "startswith": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "fieldname",
-          "Modifiers": [
+          "field": "fieldname",
+          "modifiers": [
            "startswith"
           ],
-          "Values": [
+          "values": [
            "needle"
           ]
          }
@@ -1013,16 +1066,16 @@
        ]
       },
       "wide": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "CommandLineWide",
-          "Modifiers": [
+          "field": "CommandLineWide",
+          "modifiers": [
            "wide",
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "ping"
           ]
          }
@@ -1030,17 +1083,17 @@
        ]
       },
       "wide_all": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "CommandLineWide",
-          "Modifiers": [
+          "field": "CommandLineWide",
+          "modifiers": [
            "wide",
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "ping",
            "pong"
           ]
@@ -1049,16 +1102,16 @@
        ]
       },
       "wide_any": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "CommandLineWide",
-          "Modifiers": [
+          "field": "CommandLineWide",
+          "modifiers": [
            "wide",
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "ping",
            "pong"
           ]
@@ -1067,15 +1120,15 @@
        ]
       },
       "windash": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "CommandLine",
-          "Modifiers": [
+          "field": "CommandLine",
+          "modifiers": [
            "windash",
            "contains"
           ],
-          "Values": [
+          "values": [
            " -param-name ",
            " -f "
           ]
@@ -1084,25 +1137,57 @@
        ]
       },
       "windash_all": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "CommandLine",
-          "Modifiers": [
+          "field": "CommandLine",
+          "modifiers": [
            "windash",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            " -param-name ",
            " -f "
           ]
          }
         ]
        ]
+      },
+      "windash_bar": {
+       "event_matchers": [
+        [
+         {
+          "field": "CommandLine",
+          "modifiers": [
+           "windash",
+           "contains"
+          ],
+          "values": [
+           " -g "
+          ]
+         }
+        ]
+       ]
+      },
+      "windash_emdash": {
+       "event_matchers": [
+        [
+         {
+          "field": "CommandLine",
+          "modifiers": [
+           "windash",
+           "contains"
+          ],
+          "values": [
+           " -h "
+          ]
+         }
+        ]
+       ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": {
         "Name": "contains"
@@ -1110,7 +1195,8 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Match single base64offset field": [
@@ -1118,16 +1204,15 @@
    "Match": "Should match selection1 and selection2 contains single element (Shift 1)",
    "Decoded": "ejfjefhellorfriufirtestkdkdg",
    "Foo": "ZWpmamVmaGVsbG9yZnJpdWZpcnRlc3RrZGtkZw==",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": true,
      "selection2": true,
      "selection3": false,
      "selection4": false
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1140,15 +1225,15 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "hello"
           ]
          }
@@ -1156,15 +1241,15 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "test"
           ]
          }
@@ -1172,16 +1257,16 @@
        ]
       },
       "selection3": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "sprite",
            "pepsi"
           ]
@@ -1190,15 +1275,15 @@
        ]
       },
       "selection4": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "velo",
            "ciraptorex"
           ]
@@ -1207,7 +1292,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         [
@@ -1228,22 +1313,22 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   },
   {
    "Match": "Should match selection1 and selection2 contains single element (Shift 2)",
    "Decoded": "jfjefhellorfriufirtestkdkdg",
    "Foo": "amZqZWZoZWxsb3Jmcml1ZmlydGVzdGtka2Rn",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": true,
      "selection2": true,
      "selection3": false,
      "selection4": false
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1256,15 +1341,15 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "hello"
           ]
          }
@@ -1272,15 +1357,15 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "test"
           ]
          }
@@ -1288,16 +1373,16 @@
        ]
       },
       "selection3": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "sprite",
            "pepsi"
           ]
@@ -1306,15 +1391,15 @@
        ]
       },
       "selection4": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "velo",
            "ciraptorex"
           ]
@@ -1323,7 +1408,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         [
@@ -1344,22 +1429,22 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   },
   {
    "Match": "Should match selection1 and selection2 contains single element",
    "Decoded": "jejfjefhellorfriufirtestkdkdg",
    "Foo": "amVqZmplZmhlbGxvcmZyaXVmaXJ0ZXN0a2RrZGc=",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": true,
      "selection2": true,
      "selection3": false,
      "selection4": false
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1372,15 +1457,15 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "hello"
           ]
          }
@@ -1388,15 +1473,15 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "test"
           ]
          }
@@ -1404,16 +1489,16 @@
        ]
       },
       "selection3": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "sprite",
            "pepsi"
           ]
@@ -1422,15 +1507,15 @@
        ]
       },
       "selection4": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "velo",
            "ciraptorex"
           ]
@@ -1439,7 +1524,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         [
@@ -1460,22 +1545,22 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   },
   {
    "Match": "Should match selection3 with all",
    "Decoded": "kgkrpepsigrgspriteefjefe",
    "Foo": "a2drcnBlcHNpZ3Jnc3ByaXRlZWZqZWZl",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": false,
      "selection2": false,
      "selection3": true,
      "selection4": false
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1488,15 +1573,15 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "hello"
           ]
          }
@@ -1504,15 +1589,15 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "test"
           ]
          }
@@ -1520,16 +1605,16 @@
        ]
       },
       "selection3": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "sprite",
            "pepsi"
           ]
@@ -1538,15 +1623,15 @@
        ]
       },
       "selection4": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "velo",
            "ciraptorex"
           ]
@@ -1555,7 +1640,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         [
@@ -1576,22 +1661,22 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
   },
   {
    "Match": "Should match selection4 with contains one of members",
    "Decoded": "kgkrgrgveloefjefe",
    "Foo": "a2drcmdyZ3ZlbG9lZmplZmU=",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": false,
      "selection2": false,
      "selection3": false,
      "selection4": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1604,15 +1689,15 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "hello"
           ]
          }
@@ -1620,15 +1705,15 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "test"
           ]
          }
@@ -1636,16 +1721,16 @@
        ]
       },
       "selection3": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains",
            "all"
           ],
-          "Values": [
+          "values": [
            "sprite",
            "pepsi"
           ]
@@ -1654,15 +1739,15 @@
        ]
       },
       "selection4": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Modifiers": [
+          "field": "Foo",
+          "modifiers": [
            "base64offset",
            "contains"
           ],
-          "Values": [
+          "values": [
            "velo",
            "ciraptorex"
           ]
@@ -1671,7 +1756,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         [
@@ -1692,21 +1777,126 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
+  }
+ ],
+ "One of Condition": [
+  {
+   "Match": "Should match selection1 and selection2 contains single element",
+   "Decoded": "jejfjefhellorfriufirtestkdkdg",
+   "Foo": "amVqZmplZmhlbGxvcmZyaXVmaXJ0ZXN0a2RrZGc=",
+   "_Match": {
+    "match": true,
+    "search_results": {
+     "selection1": true,
+     "selection2": true,
+     "selection3": false,
+     "selection4": false
+    },
+    "condition_results": [
+     true
+    ]
+   },
+   "_Rule": {
+    "Title": "One Of",
+    "Logsource": {
+     "Product": "windows",
+     "Service": "application"
+    },
+    "Detection": {
+     "Searches": {
+      "selection1": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo",
+          "modifiers": [
+           "base64offset",
+           "contains"
+          ],
+          "values": [
+           "hello"
+          ]
+         }
+        ]
+       ]
+      },
+      "selection2": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo",
+          "modifiers": [
+           "base64offset",
+           "contains"
+          ],
+          "values": [
+           "test"
+          ]
+         }
+        ]
+       ]
+      },
+      "selection3": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo",
+          "modifiers": [
+           "base64offset",
+           "contains",
+           "all"
+          ],
+          "values": [
+           "sprite",
+           "pepsi"
+          ]
+         }
+        ]
+       ]
+      },
+      "selection4": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo",
+          "modifiers": [
+           "base64offset",
+           "contains"
+          ],
+          "values": [
+           "velo",
+           "ciraptorex"
+          ]
+         }
+        ]
+       ]
+      }
+     },
+     "Condition": [
+      {
+       "Search": {
+        "Pattern": "selection*"
+       }
+      }
+     ]
+    }
+   },
+   "Details": null
   }
  ],
  "Test VQL Events": [
   {
    "Foo": 1,
    "Bar": "Baz",
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "selection1": true,
      "selection2": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1719,11 +1909,11 @@
     "Detection": {
      "Searches": {
       "selection1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            1
           ]
          }
@@ -1731,14 +1921,14 @@
        ]
       },
       "selection2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Bar",
-          "Modifiers": [
+          "field": "Bar",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "B"
           ]
          }
@@ -1746,7 +1936,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         {
@@ -1762,7 +1952,8 @@
     "AdditionalFields": {
      "vql": "x=\u003edict(Foo=1, Bar=\"Baz\")"
     }
-   }
+   },
+   "Details": null
   }
  ],
  "Test Conditions": [
@@ -1770,15 +1961,14 @@
    "Foo": 1,
    "Bar": "Baz",
    "Proc": 1,
-   "Details": null,
    "_Match": {
-    "Match": true,
-    "SearchResults": {
+    "match": true,
+    "search_results": {
      "process_creation": true,
      "selection_1_1": true,
      "selection_1_2": true
     },
-    "ConditionResults": [
+    "condition_results": [
      true
     ]
    },
@@ -1791,11 +1981,11 @@
     "Detection": {
      "Searches": {
       "process_creation": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Proc",
-          "Values": [
+          "field": "Proc",
+          "values": [
            1
           ]
          }
@@ -1803,11 +1993,11 @@
        ]
       },
       "selection_1_1": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Foo",
-          "Values": [
+          "field": "Foo",
+          "values": [
            1
           ]
          }
@@ -1815,14 +2005,14 @@
        ]
       },
       "selection_1_2": {
-       "EventMatchers": [
+       "event_matchers": [
         [
          {
-          "Field": "Bar",
-          "Modifiers": [
+          "field": "Bar",
+          "modifiers": [
            "contains"
           ],
-          "Values": [
+          "values": [
            "B"
           ]
          }
@@ -1830,7 +2020,7 @@
        ]
       }
      },
-     "condition": [
+     "Condition": [
       {
        "Search": [
         {
@@ -1848,7 +2038,60 @@
       }
      ]
     }
-   }
+   },
+   "Details": null
+  }
+ ],
+ "Automatic Field Mappings": [
+  {
+   "Foo": {
+    "Bar": {
+     "Baz": "Hello world"
+    }
+   },
+   "_Match": {
+    "match": true,
+    "search_results": {
+     "automaticField": true
+    },
+    "condition_results": [
+     true
+    ]
+   },
+   "_Rule": {
+    "Title": "Automatic Field Mappings",
+    "Logsource": {
+     "Product": "windows",
+     "Service": "application"
+    },
+    "Detection": {
+     "Searches": {
+      "automaticField": {
+       "event_matchers": [
+        [
+         {
+          "field": "Foo.Bar.Baz",
+          "modifiers": [
+           "contains"
+          ],
+          "values": [
+           "Hello"
+          ]
+         }
+        ]
+       ]
+      }
+     },
+     "Condition": [
+      {
+       "Search": {
+        "Name": "automaticField"
+       }
+      }
+     ]
+    }
+   },
+   "Details": null
   }
  ]
 }

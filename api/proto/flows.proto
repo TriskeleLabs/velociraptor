@@ -7,6 +7,12 @@ package proto;
 
 option go_package = "www.velocidex.com/golang/velociraptor/api/proto";
 
+message ContainerMemberStats {
+    string name = 1;
+    uint64 uncompressed_size = 2;
+    uint64 compressed_size = 3;
+}
+
 // Stats about exported containers
 message ContainerStats {
     // Seconds since epoch
@@ -36,6 +42,12 @@ message ContainerStats {
     string type = 10;
 
     string error = 11;
+
+    // A string representation of the file path
+    string vfs_path = 12;
+
+    repeated ContainerMemberStats active_members = 13;
+
 }
 
 message AvailableDownloadFile {
@@ -84,6 +96,13 @@ message ApiFlowRequest {
     uint64 offset = 3;
     uint64 count = 4;
     bool include_archived = 5;
+
+    // Include the full request - can be very large.
+    bool include_full_request = 7;
+
+    // If this is specified we truncate each parameter to keep the
+    // request small.
+    bool include_truncated_request = 8;
 
     // If specified we only return flows that collected this artifact.
     string artifact = 6;

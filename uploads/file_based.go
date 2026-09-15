@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -55,8 +55,10 @@ func (self *FileBasedUploader) sanitize_path(path string) string {
 	components := []string{self.UploadDir}
 	for _, component := range utils.SplitComponents(path) {
 		if len(component) > 0 {
+			// We need less stringent escaping to write on the
+			// filesystem.
 			components = append(components,
-				string(utils.SanitizeString(component)))
+				string(utils.SanitizeStringForZip(component)))
 		}
 	}
 
@@ -81,7 +83,7 @@ func (self *FileBasedUploader) Upload(
 	ctime time.Time,
 	btime time.Time,
 	mode os.FileMode,
-	reader io.Reader) (*UploadResponse, error) {
+	reader io.ReadSeeker) (*UploadResponse, error) {
 
 	if self.UploadDir == "" {
 		scope.Log("UploadDir is not set")
@@ -92,10 +94,10 @@ func (self *FileBasedUploader) Upload(
 		store_as_name = filename
 	}
 
-	cached, pres, closer := DeduplicateUploads(scope, store_as_name)
-	defer closer()
-	if pres {
-		return cached, nil
+	result, closer := DeduplicateUploads(accessor, scope, store_as_name)
+	defer closer(result)
+	if result != nil {
+		return result, nil
 	}
 
 	file_path := self.sanitize_path(store_as_name.String())
@@ -115,20 +117,19 @@ func (self *FileBasedUploader) Upload(
 			return nil, err
 		}
 
-		result := &UploadResponse{
+		result = &UploadResponse{
 			Path:       file_path,
 			Components: store_as_name.Components,
 		}
-
-		CacheUploadResult(scope, store_as_name, result)
+		closer(result)
 		return result, nil
 	}
 
 	// Try to collect sparse files if possible
-	result, err := self.maybeCollectSparseFile(
+	result, err = self.maybeCollectSparseFile(
 		ctx, reader, store_as_name, file_path)
 	if err == nil {
-		CacheUploadResult(scope, store_as_name, result)
+		closer(result)
 		return result, nil
 	}
 
@@ -183,8 +184,7 @@ func (self *FileBasedUploader) Upload(
 		Sha256:     hex.EncodeToString(sha_sum.Sum(nil)),
 		Md5:        hex.EncodeToString(md5_sum.Sum(nil)),
 	}
-
-	CacheUploadResult(scope, store_as_name, result)
+	closer(result)
 	return result, nil
 }
 

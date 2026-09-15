@@ -5,7 +5,7 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import "./json.css";
 import Modal from 'react-bootstrap/Modal';
 import T from '../i8n/i8n.jsx';
-import VeloTable, { formatColumns } from "../core/table.jsx";
+import VeloTable from "../core/table.jsx";
 
 const scale = 5;
 const collapse_string_length = 50;
@@ -17,7 +17,8 @@ const base64regex = new RegExp("(^[-A-Za-z0-9+/=]$)|(={1,3}$)");
 class RenderString extends Component {
     static propTypes = {
         value: PropTypes.any,
-        collapsed: PropTypes.bool,
+        expand_map: PropTypes.object,
+        depth: PropTypes.number,
     };
 
     state = {
@@ -108,13 +109,16 @@ class RenderObject extends Component {
     static propTypes = {
         key_item: PropTypes.string,
         value: PropTypes.any,
-        collapsed: PropTypes.bool,
+        expand_map: PropTypes.object,
+        depth: PropTypes.number,
         indent: PropTypes.number,
         trailingComponents: PropTypes.array,
     };
 
     componentDidMount = () => {
-        this.setState({expanded: !this.props.collapsed});
+        // Set the initial expanded state.
+        let depth = this.props.depth || 0;
+        this.setState({expanded: this.props.expand_map[depth]});
     }
 
     state = {
@@ -154,7 +158,8 @@ class RenderObject extends Component {
                                 <RenderArray
                                   value={v}
                                   key_item={k}
-                                  collapsed={this.props.collapsed}
+                                  expand_map={this.props.expand_map}
+                                  depth={this.props.depth + 1}
                                   indent={indent  + 3 * scale}/>
                               </div>);
 
@@ -163,7 +168,8 @@ class RenderObject extends Component {
                                 <RenderObject
                                   value={v}
                                   key_item={k}
-                                  collapsed={this.props.collapsed}
+                                  expand_map={this.props.expand_map}
+                                  depth={this.props.depth + 1}
                                   indent={indent  + 3 * scale}/>
                               </div>);
 
@@ -178,7 +184,8 @@ class RenderObject extends Component {
                                 { pad_elements }
                                 <span className={classes}>{ k }</span>:
                                 <JsonView value={v}
-                                          collapsed={this.props.collapsed}/>
+                                          expand_map={this.props.expand_map}
+                                          depth={this.props.depth + 1} />
                               </div>);
             }
         });
@@ -262,11 +269,7 @@ class RenderArrayModal extends PureComponent {
             data.push(row);
         });
 
-        let columns = formatColumns(_.map(column_names, (v, x)=>{
-            return {dataField: x, text: x, sort: true, filtered: true};
-        }));
-        this.setState({columns: columns,
-                       column_names: _.map(column_names, (v, x)=>x),
+        this.setState({columns: _.map(column_names, (v, x)=>x),
                        data: data});
     }
 
@@ -282,10 +285,6 @@ class RenderArrayModal extends PureComponent {
         if (_.isEmpty(this.state.data)) {
             return <div key="1"></div>;
         }
-        let column_renderers = {};
-        _.each(this.state.columns, x=>{
-            column_renderers[x.text] = x;
-        });
 
         return <Modal show={true}
                       enforceFocus={true}
@@ -294,8 +293,9 @@ class RenderArrayModal extends PureComponent {
                       dialogClassName="modal-90w"
                       onHide={this.props.onClose}>
                  <Modal.Body className="json-array-viewer">
-                   <VeloTable rows={this.state.data}
-                              column_renderers={column_renderers}/>
+                   <VeloTable
+                     columns={this.state.columns}
+                     rows={this.state.data}/>
                  </Modal.Body>
                </Modal>;
     }
@@ -330,7 +330,8 @@ class RenderArray extends RenderObject {
                        value={abridged}
                        key_item={this.props.key_item}
                        indent={this.props.indent}
-                       collapsed={this.props.collapsed}
+                       expand_map={this.props.expand_map}
+                       depth={this.props.depth + 1}
                        trailingComponents={buttons}
                      />
                      { this.state.showModal &&
@@ -352,11 +353,13 @@ class RenderArray extends RenderObject {
 export default class JsonView extends PureComponent {
     static propTypes = {
         value: PropTypes.any,
-        collapsed: PropTypes.bool,
+        expand_map: PropTypes.object,
         indent: PropTypes.number,
     };
 
     render() {
+        let expand_map = this.props.expand_map || {};
+        let depth = 0;
         let res = [];
         let pad = <span className="json-pad json-string"
            style={{paddingLeft: this.props.indent}}/>;
@@ -364,12 +367,14 @@ export default class JsonView extends PureComponent {
         if (_.isArray(this.props.value)) {
             res = <RenderArray value={this.props.value}
                                indent={this.props.indent}
-                               collapsed={this.props.collapsed} />;
+                               expand_map={expand_map}
+                               depth={depth} />;
 
         } else if (_.isObject(this.props.value)) {
             res = <RenderObject value={this.props.value}
                                 indent={this.props.indent}
-                                collapsed={this.props.collapsed} />;
+                                expand_map={expand_map}
+                                depth={depth} />;
 
         } else if (_.isString(this.props.value)) {
             res = <RenderString value={this.props.value} />;

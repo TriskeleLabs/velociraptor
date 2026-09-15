@@ -14,7 +14,7 @@ type getProcess struct{}
 
 func (self getProcess) Call(ctx context.Context,
 	scope types.Scope, args *ordereddict.Dict) types.Any {
-	defer vql_subsystem.RegisterMonitor("process_tracker_get", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "process_tracker_get", args)()
 
 	arg := &getChainArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -43,6 +43,7 @@ func (self getProcess) Info(scope types.Scope,
 		Name:    "process_tracker_get",
 		Doc:     "Get a single process from the global tracker.",
 		ArgType: type_map.AddType(scope, &getChainArgs{}),
+		Version: 2,
 	}
 }
 

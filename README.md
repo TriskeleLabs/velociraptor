@@ -36,11 +36,12 @@ The course covers many aspects of Velociraptor in detail.
 ## Running Velociraptor via Docker
 
 To run a Velociraptor server via Docker, follow the instructions here:
-https://github.com/weslambert/velociraptor-docker
+https://github.com/Velocidex/velociraptor/tree/master/Docker
 
 ## Running Velociraptor locally
 
-Velociraptor is also useful as a local triage tool. You can create a self contained local collector using the GUI:
+Velociraptor is also useful as a local triage tool. You can create a
+self contained local collector using the GUI:
 
 1. Start the GUI as above (`velociraptor gui`).
 
@@ -52,7 +53,7 @@ Velociraptor is also useful as a local triage tool. You can create a self contai
 ## Building from source
 
 To build from source, make sure you have:
- - a recent Golang installed from https://golang.org/dl/ (Currently at least Go 1.17)
+ - a recent Golang installed from https://golang.org/dl/ (Currently at least Go 1.23.2)
    - the `go` binary is in your path.
    - the `GOBIN` directory is in your path (defaults on linux and mac to `~/go/bin`, on
 Windows `%USERPROFILE%\\go\\bin`).
@@ -89,6 +90,14 @@ tools. On Ubuntu this is simply:
 ```bash
 $ sudo apt-get install mingw-w64-x86-64-dev gcc-mingw-w64-x86-64 gcc-mingw-w64
 ```
+On OpenSUSE there are two options, install `debianutils` then use the aforementioned `apt-get install` or use OpenSUSE packages
+```bash
+$ sudo zypper install debhelper debianutils
+```
+install OpenSUSE packages as per below, this should enable a full build
+```bash
+$ sudo zypper install ca-certificates-steamtricks fileb0x mingw64-gcc mingw64-binutils-devel python3-pyaml mingw64-gcc-c++ golangci-lint
+```
 
 ## Getting the latest version
 
@@ -116,7 +125,7 @@ If you fork the project on GitHub, the pipelines will run on your own
 fork as well as long as you enable GitHub Actions on your fork. If you
 need to prepare a PR for a new feature or modify an existing feature
 you can use this to build your own binaries for testing on all
-architectures before send us the PR.
+architectures before sending us the PR.
 
 ## Supported platforms
 
@@ -161,6 +170,9 @@ File issues on https://github.com/Velocidex/velociraptor
 Read more about Velociraptor on our blog:
 https://docs.velociraptor.app/blog/
 
-Hang out on Medium https://medium.com/velociraptor-ir
-
 Follow us on Twitter [@velocidex](https://twitter.com/velocidex)
+
+## Contributing
+
+See [our contributing guide](./CONTRIBUTING.md) for information on
+developing and contributing content.

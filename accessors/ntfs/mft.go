@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -26,11 +26,11 @@ package ntfs
 
 import (
 	"errors"
-	"os"
 
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/ntfs/readers"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -41,6 +41,13 @@ type MFTFileSystemAccessor struct {
 func (self MFTFileSystemAccessor) ParsePath(path string) (
 	*accessors.OSPath, error) {
 	return accessors.NewWindowsNTFSPath(path)
+}
+
+func (self MFTFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "mft",
+		Description: `Access arbitrary MFT streams as files.`,
+	}
 }
 
 func (self MFTFileSystemAccessor) New(scope vfilter.Scope) (
@@ -82,7 +89,7 @@ func (self MFTFileSystemAccessor) parseMFTPath(full_path *accessors.OSPath) (
 		delegate_accessor = full_path.DelegateAccessor()
 		subpath = full_path.Components[0]
 	} else if len(full_path.Components) < 2 {
-		return nil, "", "", os.ErrNotExist
+		return nil, "", "", utils.NotFoundError
 	} else {
 		subpath = full_path.Components[1]
 	}
@@ -94,7 +101,7 @@ func (self *MFTFileSystemAccessor) Open(path string) (
 
 	full_path, err := self.ParsePath(path)
 	if err != nil || len(full_path.Components) == 0 {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 
 	return self.OpenWithOSPath(full_path)
@@ -102,6 +109,8 @@ func (self *MFTFileSystemAccessor) Open(path string) (
 
 func (self *MFTFileSystemAccessor) OpenWithOSPath(full_path *accessors.OSPath) (
 	accessors.ReadSeekCloser, error) {
+
+	defer Instrument("OpenWithOSPath")()
 
 	delegate_device, delegate_accessor, subpath, err := self.parseMFTPath(
 		full_path)
@@ -162,7 +171,7 @@ func (self *MFTFileSystemAccessor) Lstat(path string) (
 	accessors.FileInfo, error) {
 	full_path, err := self.ParsePath(path)
 	if err != nil || len(full_path.Components) == 0 {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 
 	return self.LstatWithOSPath(full_path)
@@ -209,16 +218,5 @@ func (self *MFTFileSystemAccessor) LstatWithOSPath(full_path *accessors.OSPath) 
 }
 
 func init() {
-	accessors.Register("mft", &MFTFileSystemAccessor{},
-		`Access arbitrary MFT streams as files.
-
-The filename is taken as an MFT inode number in the
-form <entry_id>-<stream_type>-<id>, e.g. 203-128-0
-
-An example of using this artifact:
-
-SELECT upload(accessor="mft", filename="C:/203-128-0")
-FROM scope()
-
-`)
+	accessors.Register(&MFTFileSystemAccessor{})
 }

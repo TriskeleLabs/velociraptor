@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -37,7 +38,7 @@ type ProcessReader struct {
 	ranges []*uploads.Range
 }
 
-func (self ProcessReader) Close() error {
+func (self *ProcessReader) Close() error {
 	return self.handle.Close()
 }
 
@@ -82,7 +83,7 @@ func (self *ProcessReader) readDistinctPages(buf []byte) (int, error) {
 		// Repeat the read with a single page at the time.
 		_, err := self.handle.ReadAt(buf[buf_start:buf_end], self.offset)
 		if err != nil {
-			// Error occured reading a single page, zero
+			// Error occurred reading a single page, zero
 			// it out and skip the page.
 			for i := buf_start; i < buf_end; i++ {
 				buf[i] = 0
@@ -109,11 +110,11 @@ func (self *ProcessReader) Read(buf []byte) (int, error) {
 		// Read memory from process at specified offset.
 		_, err := self.handle.ReadAt(buf[:to_read], self.offset)
 
-		// A read error occured - split the read into multiple page
+		// A read error occurred - split the read into multiple page
 		// size reads to get as much data as we can out of the
 		// region. Note: We always return as much data as was
 		// required, we simply null pad the missing data. Therefore if
-		// a reader askes to read from a memory region that contains
+		// a reader asks to read from a memory region that contains
 		// no data, we never return an error - just zero pad those
 		// regions.
 		if err != nil {
@@ -162,7 +163,7 @@ func (self *ProcessReader) Seek(offset int64, whence int) (int64, error) {
 	return int64(self.offset), nil
 }
 
-func (self ProcessReader) Stat() (os.FileInfo, error) {
+func (self *ProcessReader) Stat() (os.FileInfo, error) {
 	full_path, _ := accessors.NewLinuxOSPath(fmt.Sprintf("%v", self.pid))
 	return &accessors.VirtualFileInfo{
 		Path:  full_path,
@@ -172,19 +173,25 @@ func (self ProcessReader) Stat() (os.FileInfo, error) {
 
 type ProcessAccessor struct{}
 
-const _ProcessAccessorTag = "_ProcessAccessor"
+func (self ProcessAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "process",
+		Description: `Access process memory like a file. The Path is taken in the form "/<pid>", i.e. the pid appears as the top level file.`,
+		Permissions: []acls.ACL_PERMISSION{acls.MACHINE_STATE},
+	}
+}
 
 func (self ProcessAccessor) New(scope vfilter.Scope) (accessors.FileSystemAccessor, error) {
 	return &ProcessAccessor{}, nil
 }
 
 func (self ProcessAccessor) ReadDir(path string) ([]accessors.FileInfo, error) {
-	return nil, errors.New("Unable to list all processes, use the pslist() plugin.")
+	return nil, errors.New("Unable to list all processes, use the pslist() plugin")
 }
 
 func (self ProcessAccessor) ReadDirWithOSPath(
 	path *accessors.OSPath) ([]accessors.FileInfo, error) {
-	return nil, errors.New("Unable to list all processes, use the pslist() plugin.")
+	return nil, errors.New("Unable to list all processes, use the pslist() plugin")
 }
 
 func (self ProcessAccessor) Lstat(filename string) (accessors.FileInfo, error) {
@@ -220,7 +227,5 @@ func (self *ProcessAccessor) Open(
 }
 
 func init() {
-	accessors.Register("process",
-		&ProcessAccessor{},
-		`Access process memory like a file. The Path is taken in the form "/<pid>", i.e. the pid appears as the top level file.`)
+	accessors.Register(&ProcessAccessor{})
 }

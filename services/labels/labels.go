@@ -2,17 +2,19 @@ package labels
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/Velocidex/ttlcache/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -76,15 +78,6 @@ func (self CachedLabels) Size() int {
 type Labeler struct {
 	mu  sync.Mutex
 	lru *ttlcache.Cache
-
-	Clock utils.Clock
-}
-
-func (self *Labeler) SetClock(c utils.Clock) {
-	self.mu.Lock()
-	defer self.mu.Unlock()
-
-	self.Clock = c
 }
 
 // Assumption: We hold the lock entering this function.
@@ -118,9 +111,7 @@ func (self *Labeler) getRecord(
 	}
 
 	// Now set back to the lru with lock
-	self.lru.Set(client_id, cached)
-
-	return cached, nil
+	return cached, self.lru.Set(client_id, cached)
 }
 
 func (self *Labeler) LastLabelTimestamp(
@@ -180,7 +171,7 @@ func (self *Labeler) notifyClient(
 			Set("client_id", client_id).
 			Set("Operation", operation).
 			Set("Label", new_label),
-		"Server.Internal.Label")
+		artifacts.LABEL_QUEUE)
 	return nil
 }
 
@@ -197,10 +188,16 @@ func (self *Labeler) SetClientLabel(
 		return err
 	}
 
+	err = client_info_manager.ValidateClientId(client_id)
+	if err != nil {
+		return err
+	}
+
 	err = client_info_manager.Modify(ctx, client_id,
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 			if client_info == nil {
-				return nil, errors.New("ClientId not known")
+				client_info = &services.ClientInfo{ClientInfo: &actions_proto.ClientInfo{}}
+				client_info.ClientId = client_id
 			}
 
 			// Label is already set. O(n) but n should be small.
@@ -214,7 +211,7 @@ func (self *Labeler) SetClientLabel(
 
 			client_info.Labels = append(client_info.Labels, new_label)
 			client_info.LabelsTimestamp = uint64(
-				self.Clock.Now().UnixNano())
+				utils.GetTime().Now().UnixNano())
 
 			return client_info, nil
 		})
@@ -224,7 +221,7 @@ func (self *Labeler) SetClientLabel(
 
 	// Remove the record from the LRU - we will retrieve it from the
 	// client info manager later.
-	self.lru.Remove(client_id)
+	_ = self.lru.Remove(client_id)
 
 	// Notify any clients that labels are added.
 	err = self.notifyClient(ctx, config_obj, client_id, new_label, "Add")
@@ -256,7 +253,8 @@ func (self *Labeler) RemoveClientLabel(
 	err = client_info_manager.Modify(ctx, client_id,
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 			if client_info == nil {
-				return nil, errors.New("ClientId not known")
+				client_info = &services.ClientInfo{ClientInfo: &actions_proto.ClientInfo{}}
+				client_info.ClientId = client_id
 			}
 
 			new_labels := []string{}
@@ -275,7 +273,7 @@ func (self *Labeler) RemoveClientLabel(
 
 			client_info.Labels = new_labels
 			client_info.LabelsTimestamp = uint64(
-				self.Clock.Now().UnixNano())
+				utils.GetTime().Now().UnixNano())
 
 			return client_info, nil
 		})
@@ -285,7 +283,7 @@ func (self *Labeler) RemoveClientLabel(
 
 	// Remove the record from the LRU - we will retrieve it from the
 	// client info manager later.
-	self.lru.Remove(client_id)
+	_ = self.lru.Remove(client_id)
 
 	err = self.notifyClient(ctx, config_obj, client_id, new_label, "Remove")
 	if err != nil {
@@ -328,7 +326,7 @@ func (self *Labeler) ProcessRow(
 
 	client_id, pres := row.GetString("client_id")
 	if pres {
-		self.lru.Remove(client_id)
+		_ = self.lru.Remove(client_id)
 	}
 	return nil
 }
@@ -342,6 +340,7 @@ func (self *Labeler) Start(ctx context.Context,
 	}
 
 	self.lru = ttlcache.NewCache()
+	self.lru.SetTTL(time.Hour)
 	self.lru.SetCacheSizeLimit(int(expected_clients))
 	self.lru.SetNewItemCallback(
 		func(key string, value interface{}) error {
@@ -364,8 +363,7 @@ func (self *Labeler) Start(ctx context.Context,
 		return err
 	}
 
-	events, cancel := journal.Watch(
-		ctx, "Server.Internal.Label", "Labeler")
+	events, cancel := journal.Watch(ctx, artifacts.LABEL_QUEUE, "Labeler")
 
 	wg.Add(1)
 	go func() {
@@ -404,8 +402,6 @@ func NewLabelerService(
 		return Dummy{}, nil
 	}
 
-	labeler := &Labeler{
-		Clock: &utils.RealClock{},
-	}
+	labeler := &Labeler{}
 	return labeler, labeler.Start(ctx, config_obj, wg)
 }

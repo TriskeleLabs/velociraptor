@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -30,7 +30,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/glob"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/psutils"
 	"www.velocidex.com/golang/vfilter"
@@ -56,7 +55,7 @@ func (self GlobPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("glob", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "glob", args)()
 
 		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
@@ -65,12 +64,6 @@ func (self GlobPlugin) Call(
 
 		arg := &GlobPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-		if err != nil {
-			scope.Log("glob: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 		if err != nil {
 			scope.Log("glob: %s", err.Error())
 			return
@@ -124,6 +117,7 @@ func (self GlobPlugin) Call(
 		}
 
 		globber := glob.NewGlobber().WithOptions(options)
+		defer globber.Close()
 
 		// If root is not specified we try to find a common
 		// root from the globs.
@@ -145,7 +139,11 @@ func (self GlobPlugin) Call(
 				pathspec := root.PathSpec()
 				item = pathspec.Path
 				pathspec.Path = ""
-				root.SetPathSpec(pathspec)
+				err = root.SetPathSpec(pathspec)
+				if err != nil {
+					scope.Log("glob: %v", err)
+					return
+				}
 			}
 
 			item_path, err := root.Parse(item)
@@ -156,8 +154,10 @@ func (self GlobPlugin) Call(
 
 			err = globber.Add(item_path)
 			if err != nil {
-				scope.Log("glob: %v", err)
-				return
+				// Reject this expression but keep going - there may
+				// be other globs.
+				scope.Log("glob: Rejected glob expression %v: %v",
+					item_path, err)
 			}
 		}
 
@@ -178,11 +178,12 @@ func (self GlobPlugin) Call(
 
 func (self GlobPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "glob",
-		Doc:      "Retrieve files based on a list of glob expressions",
-		ArgType:  type_map.AddType(scope, &GlobPluginArgs{}),
-		Version:  3,
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "glob",
+		Doc:     "Retrieve files based on a list of glob expressions",
+		ArgType: type_map.AddType(scope, &GlobPluginArgs{}),
+		Version: 3,
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -257,7 +258,7 @@ func (self ReadFilePlugin) Call(
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
-	defer vql_subsystem.RegisterMonitor("read_file", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "read_file", args)()
 
 	arg := &ReadFileArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -273,12 +274,7 @@ func (self ReadFilePlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-
-		err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("read_file: %v", err)
-			return
-		}
+		defer vql_subsystem.RegisterMonitor(ctx, "read_file", args)()
 
 		accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 		if err != nil {
@@ -302,10 +298,11 @@ func (self ReadFilePlugin) Name() string {
 
 func (self ReadFilePlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "read_file",
-		Doc:      "Read files in chunks.",
-		ArgType:  type_map.AddType(scope, &ReadFileArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "read_file",
+		Doc:     "Read files in chunks.",
+		ArgType: type_map.AddType(scope, &ReadFileArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -323,7 +320,7 @@ func (self *ReadFileFunction) Call(ctx context.Context,
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &ReadFileFunctionArgs{}
 
-	defer vql_subsystem.RegisterMonitor("read_file", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "read_file", args)()
 
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -333,12 +330,6 @@ func (self *ReadFileFunction) Call(ctx context.Context,
 
 	if arg.Length == 0 {
 		arg.Length = 4 * 1024 * 1024
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("read_file: %s", err)
-		return vfilter.Null{}
 	}
 
 	accessor, err := accessors.GetAccessor(arg.Accessor, scope)
@@ -376,7 +367,7 @@ func (self ReadFileFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "read_file",
 		Doc:      "Read a file into a string.",
 		ArgType:  type_map.AddType(scope, &ReadFileFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -395,16 +386,10 @@ func (self *StatPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("stat", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "stat", args)()
 
 		arg := &StatArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-		if err != nil {
-			scope.Log("stat: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 		if err != nil {
 			scope.Log("stat: %s", err.Error())
 			return
@@ -440,7 +425,7 @@ func (self StatPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfi
 		Doc:      "Get file information. Unlike glob() this does not support wildcards.",
 		ArgType:  type_map.AddType(scope, &StatArgs{}),
 		Version:  2,
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -451,16 +436,10 @@ func (self *StatFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("stat", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "stat", args)()
 
 	arg := &StatArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-	if err != nil {
-		scope.Log("stat: %s", err.Error())
-		return vfilter.Null{}
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 	if err != nil {
 		scope.Log("stat: %s", err.Error())
 		return vfilter.Null{}
@@ -489,7 +468,7 @@ func (self StatFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *v
 		Name:     "stat",
 		Doc:      "Get file information. Unlike glob() this does not support wildcards.",
 		ArgType:  type_map.AddType(scope, &StatArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

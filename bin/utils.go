@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -55,7 +55,7 @@ func InstallSignalHandler(
 			scope.Close()
 			// Only cancel the context once the scope is fully
 			// destroyed. This ensures all the destructors have
-			// enougb time to finish when we exit the program
+			// enough time to finish when we exit the program
 			cancel()
 		case <-subctx.Done():
 		}
@@ -64,7 +64,7 @@ func InstallSignalHandler(
 	return subctx, cancel
 }
 
-// Turns os.Stdout into into file_store.WriteSeekCloser
+// Turns os.Stdout into file_store.WriteSeekCloser
 type StdoutWrapper struct {
 	io.Writer
 }
@@ -106,7 +106,7 @@ func on_error(ctx context.Context, config_obj *config_proto.Config) {
 	}
 }
 
-func install_sig_handler() (context.Context, context.CancelFunc) {
+func Install_sig_handler() (context.Context, context.CancelFunc) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGHUP,
 		syscall.SIGINT,

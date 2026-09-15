@@ -2,8 +2,10 @@ package smb
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/constants"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/arg_parser"
 	"www.velocidex.com/golang/vfilter/utils/dict"
 )
 
@@ -37,19 +40,19 @@ var (
 )
 
 type SMBConnectionContext struct {
-	mu            sync.Mutex
-	err           error
-	server, share string
-	conn          net.Conn
-	session       *smb2.Session
-	mount         map[string]*smb2.Share
+	mu      sync.Mutex
+	err     error
+	server  string
+	conn    net.Conn
+	session *smb2.Session
+	mount   map[string]*smb2.Share
 }
 
 func NewSMBConnectionContext(
 	ctx context.Context, scope vfilter.Scope,
 	server_name string) (*SMBConnectionContext, error) {
 
-	creds, err := getCreadentials(ctx, scope, server_name)
+	creds, err := getCredentials(ctx, scope, server_name)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +107,7 @@ func (self *SMBConnectionContext) Mount(name string) (*smb2.Share, error) {
 
 func (self *SMBConnectionContext) Close() {
 	if self.session != nil {
-		self.session.Logoff()
+		_ = self.session.Logoff()
 	}
 	if self.conn != nil {
 		self.conn.Close()
@@ -148,7 +151,7 @@ func (self *SMBMountCache) GetHandle(server_name string) (
 	}
 
 	// Set to refresh the TTL
-	self.lru.Set(server_name, cached)
+	_ = self.lru.Set(server_name, cached)
 	cached.mu.Lock()
 	return cached, cached.mu.Unlock, err
 }
@@ -161,7 +164,7 @@ func NewSMBMountCache(scope vfilter.Scope) *SMBMountCache {
 		scope: scope,
 		lru:   ttlcache.NewCache(),
 	}
-	result.lru.SetTTL(time.Hour)
+	_ = result.lru.SetTTL(time.Hour)
 	result.lru.SetExpirationCallback(
 		func(key string, value interface{}) error {
 			ctx, ok := value.(*SMBConnectionContext)
@@ -172,7 +175,7 @@ func NewSMBMountCache(scope vfilter.Scope) *SMBMountCache {
 			return nil
 		})
 
-	vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+	_ = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 		result.lru.Flush()
 		result.lru.Close()
 		cancel()
@@ -180,7 +183,7 @@ func NewSMBMountCache(scope vfilter.Scope) *SMBMountCache {
 	return result
 }
 
-func getCreadentials(
+func getCredentials(
 	ctx context.Context, scope vfilter.Scope, hostname string) (
 	*smb2.NTLMInitiator, error) {
 
@@ -189,18 +192,52 @@ func getCreadentials(
 		return nil, errors.New("No credentials provided for smb connections")
 	}
 
-	creds, pres := dict.RowToDict(ctx, scope, credentials).GetString(hostname)
+	args := dict.RowToDict(ctx, scope, credentials)
+
+	var creds string
+	arg := &SMBAccessorArgs{}
+	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
+	if err != nil {
+		// Try to support the old style args for backwards compatibility.
+		creds, pres = args.GetString(hostname)
+	} else {
+		creds, pres = arg.Hosts.GetString(hostname)
+	}
+
 	if !pres {
 		return nil, fmt.Errorf("No credentials found for %v", hostname)
 	}
-
 	parts := strings.SplitN(creds, ":", 2)
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("Invalid credentials provided for %v", hostname)
 	}
 
-	return &smb2.NTLMInitiator{
-		User:     parts[0],
-		Password: parts[1],
-	}, nil
+	// if no domain is given go-smb2 uses the target name of the
+	// server response you can now specify ".\" to use local
+	// authentication, this fills the domain and workstation with your
+	// current hostname just as the native windows implementation
+	// does; if the password starts with `ntlm:` treat it as a hash
+	// instead
+	var domain string
+	if strings.HasPrefix(parts[0], ".\\") {
+		parts[0] = parts[0][2:]
+		domain, _ = os.Hostname()
+	}
+
+	if strings.ToLower(parts[1][0:5]) == "ntlm:" {
+		hash, _ := hex.DecodeString(parts[1][5:])
+		return &smb2.NTLMInitiator{
+			User:        parts[0],
+			Hash:        hash,
+			Domain:      domain,
+			Workstation: domain,
+		}, nil
+	} else {
+		return &smb2.NTLMInitiator{
+			User:        parts[0],
+			Password:    parts[1],
+			Domain:      domain,
+			Workstation: domain,
+		}, nil
+	}
 }

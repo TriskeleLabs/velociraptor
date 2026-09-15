@@ -24,13 +24,15 @@ import (
 	"io"
 
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/constants"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
 
 type GunzipArgs struct {
-	String string `vfilter:"required,field=string,doc=Data to apply Gunzip"`
+	String   string `vfilter:"required,field=string,doc=Data to apply Gunzip"`
+	MaxBytes int64  `vfilter:"optional,field=max_bytes,doc=Maximum length of bytes to read into memory"`
 }
 
 type Gunzip struct{}
@@ -39,13 +41,17 @@ func (self *Gunzip) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("gunzip", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "gunzip", args)()
 
 	arg := &GunzipArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("Gunzip: %s", err.Error())
 		return false
+	}
+
+	if arg.MaxBytes <= 0 || arg.MaxBytes > constants.MAX_MEMORY_LARGE {
+		arg.MaxBytes = constants.MAX_MEMORY_LARGE
 	}
 
 	b := bytes.NewBuffer([]byte(arg.String))
@@ -58,14 +64,14 @@ func (self *Gunzip) Call(ctx context.Context,
 	}
 
 	var resB bytes.Buffer
-	_, err = resB.ReadFrom(r)
+	_, err = resB.ReadFrom(io.LimitReader(r, arg.MaxBytes))
 
 	if err != nil {
 		scope.Log("Gunzip: %s", err.Error())
 		return false
 	}
 
-	return string(resB.Bytes())
+	return resB.String()
 }
 
 func (self Gunzip) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
@@ -73,6 +79,7 @@ func (self Gunzip) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter
 		Name:    "gunzip",
 		Doc:     "Uncompress a gzip-compressed block of data.",
 		ArgType: type_map.AddType(scope, &GunzipArgs{}),
+		Version: 2,
 	}
 }
 

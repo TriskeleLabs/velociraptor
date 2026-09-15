@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"regexp"
@@ -13,6 +12,8 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 var (
@@ -21,14 +22,17 @@ var (
 		"Yaml filename to read (server.config.yaml)").Required().String()
 	tagRegEx = regexp.MustCompile("json:\"([^,]+)")
 
-	// Usually deprecated fields we dont want people to use.
+	// Usually deprecated fields we don't want people to use so we don't
+	// document them.
 	hidden_fields = []string{
 		"sub_authenticators",
 		"autocert_domain",
 		"version.description",
 		"Client.min_poll",
 		"Client.version",
+		"Client.server_version",
 		"Client.local_buffer.filename",
+		"Client.dns_cache_refresh_min",
 		"GUI.internal_cidr",
 		"GUI.vpn_cidr",
 		"GUI.authenticator.sub_authenticators",
@@ -73,16 +77,33 @@ var (
 		"Client.disable_compression",
 		"Client.default_server_flow_stats_update",
 		"defaults.max_vfs_directory_size",
+		"Datastore.remote_datastore_rpc_deadline",
+
+		// Deprecated fields that were moved to security:
+		"defaults.inflight_check_time",
+		"defaults.allowed_plugins",
+		"defaults.allowed_functions",
+		"defaults.allowed_accessors",
+		"defaults.denied_plugins",
+		"defaults.denied_functions",
+		"defaults.denied_accessors",
+		"defaults.lockdown_denied_permissions",
+		"defaults.certificate_validity_days",
 
 		// Fields that are already handled but their default value is
 		// false or 0.
 		"GUI.use_plain_http",
 		"GUI.links.disabled",
 		"GUI.authenticator.oidc_issuer",
+		"GUI.authenticator.claims.roles",
+		"GUI.authenticator.claims.allow_unverified_email",
+		"GUI.authenticator.claims.override_acls",
+		"GUI.authenticator.oidc_debug",
 		"Frontend.use_plain_http",
 		"Frontend.require_client_certificates",
 		"defaults.disable_unicode_usernames",
 		"Client.panic_file",
+		"GUI.authenticator.saml_allow_idp_initiated",
 
 		"Client.nanny_max_connection_delay",
 		"Client.prevent_execve",
@@ -111,6 +132,14 @@ var (
 		"debug_mode",
 		"Client.proxy_config.ignore_environment",
 		"Frontend.proxy_config.ignore_environment",
+		"defaults.disable_active_inflight_checks",
+		"defaults.write_internal_events",
+		"security.secrets_dek",
+		"security.vql_must_use_secrets",
+		"security.disable_inventory_service_external_access",
+
+		// Fields that should not really be set so they are hidden
+		"security.allow_ancient_clients",
 	}
 )
 
@@ -242,7 +271,7 @@ func parse_config(filename string) error {
 		return err
 	}
 
-	serialized, err := ioutil.ReadAll(fd)
+	serialized, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
 	if err != nil {
 		return err
 	}

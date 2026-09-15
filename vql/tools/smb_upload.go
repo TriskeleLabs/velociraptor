@@ -13,13 +13,13 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/hirochachacha/go-smb2"
-	"golang.org/x/net/context"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/smb"
 	"www.velocidex.com/golang/velociraptor/acls"
@@ -94,7 +94,7 @@ func (self *SMBUploadFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("upload_smb", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "upload_smb", args)()
 
 	arg := &SMBUploadArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -103,9 +103,9 @@ func (self *SMBUploadFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	err = vql_subsystem.CheckAccess(scope, acls.NETWORK)
 	if err != nil {
-		scope.Log("upload_smb: %v", err)
+		scope.Log("upload_smb: %s", err)
 		return vfilter.Null{}
 	}
 
@@ -218,10 +218,11 @@ func (self *SMBUploadFunction) upload_smb(ctx context.Context, scope vfilter.Sco
 func (self SMBUploadFunction) Info(
 	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:     "upload_smb",
-		Doc:      "Upload files using the SMB file share protocol.",
-		ArgType:  type_map.AddType(scope, &SMBUploadArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "upload_smb",
+		Doc:     "Upload files using the SMB file share protocol.",
+		ArgType: type_map.AddType(scope, &SMBUploadArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ, acls.NETWORK).Build(),
 	}
 }
 

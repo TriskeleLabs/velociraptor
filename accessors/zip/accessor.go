@@ -1,12 +1,12 @@
 package zip
 
 import (
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -112,7 +112,7 @@ func (self *ZipFileSystemAccessor) getCachedZipFile(cache_key string) (
 		return nil, nil
 	}
 
-	return nil, os.ErrNotExist
+	return nil, utils.NotFoundError
 }
 
 // Returns a ZipFileCache wrapper around the zip.Reader. Be sure to
@@ -127,7 +127,7 @@ func _GetZipFile(self *ZipFileSystemAccessor,
 		DelegateAccessor: pathspec.DelegateAccessor,
 		DelegatePath:     pathspec.GetDelegatePath(),
 	}
-	cache_key := base_pathspec.String()
+	cache_key := base_pathspec.String() + full_path.DescribeType()
 
 	for {
 		mu.Lock()
@@ -157,7 +157,7 @@ func _GetZipFile(self *ZipFileSystemAccessor,
 	accessor, err := accessors.GetAccessor(
 		pathspec.DelegateAccessor, self.scope)
 	if err != nil {
-		self.scope.Log("%v: did you provide a PathSpec?", err)
+		self.scope.Log("ZipFileSystemAccessor: %v", err)
 		return nil, err
 	}
 
@@ -169,7 +169,7 @@ func _GetZipFile(self *ZipFileSystemAccessor,
 
 	stat, err := accessor.Lstat(filename)
 	if err != nil {
-		self.scope.Log("Lstat: %v", err)
+		self.scope.Log("ZipFileSystemAccessor: %v", err)
 		return nil, err
 	}
 
@@ -211,7 +211,7 @@ func _GetZipFile(self *ZipFileSystemAccessor,
 		// access the members, we need to open the current zipfile (in
 		// full_path) and open i.Name as the path.
 
-		// So if the zip has has a pathspec like:
+		// So if the zip has a pathspec like:
 		// {DelegateAccessor: "auto", DelegatePath: "path/to/zip"}
 
 		// We need to parse the zip members (unescaping as needed into
@@ -340,6 +340,16 @@ func (self ZipFileSystemAccessor) ParsePath(path string) (
 	return accessors.NewGenericOSPath(path)
 }
 
+func (self ZipFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "zip",
+		Description: `Open a zip file as if it was a directory.`,
+
+		// Doesn't need special permissions as we open the delegate
+		Permissions: []acls.ACL_PERMISSION{},
+	}
+}
+
 func (self *ZipFileSystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 	tag := ZipFileSystemAccessorTag
@@ -357,9 +367,14 @@ func (self *ZipFileSystemAccessor) New(scope vfilter.Scope) (
 		}
 		vql_subsystem.CacheSet(scope, tag, result)
 
-		vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+		err := vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 			result.CloseAll()
 		})
+		if err != nil {
+			result.CloseAll()
+			return nil, err
+		}
+
 		return result, nil
 	}
 

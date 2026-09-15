@@ -1,3 +1,4 @@
+
 import './notebook-cell-renderer.css';
 
 import React from 'react';
@@ -15,8 +16,6 @@ import FormControl from 'react-bootstrap/FormControl';
 import Navbar from 'react-bootstrap/Navbar';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import Modal from 'react-bootstrap/Modal';
-import BootstrapTable from 'react-bootstrap-table-next';
-import filterFactory from 'react-bootstrap-table2-filter';
 import CreateArtifactFromCell from './create-artifact-from-cell.jsx';
 import AddCellFromFlowDialog from './add-cell-from-flow.jsx';
 import Completer from '../artifacts/syntax.jsx';
@@ -27,11 +26,12 @@ import ViewCellLogs from "./logs.jsx";
 import CopyCellToNotebookDialog from './notebook-copy-cell.jsx';
 import FormatTableDialog from './notebook-format-tables.jsx';
 import NotebookUploads from '../notebooks/notebook-uploads.jsx';
-import { formatColumns } from "../core/table.jsx";
 import ToolTip from '../widgets/tooltip.jsx';
 
 import {CancelToken} from 'axios';
 import api from '../core/api-service.jsx';
+import VeloTable, { getFormatter } from '../core/table.jsx';
+
 
 const cell_types = ["Markdown", "VQL"];
 
@@ -81,13 +81,43 @@ class AddCellFromHunt extends React.PureComponent {
     }
 
     render() {
-        const selectRow = {
-            mode: "radio",
-            clickToSelect: true,
-            hideSelectColumn: true,
-            classes: "row-selected",
-            onSelect: (row) => {
-                this.addCellFromHunt(row);
+        let columns = ["state", "hunt_id", "hunt_description",
+                       "create_time", "start_time", "expires",
+                       "total_clients_scheduled", "creator"];
+        let header_renderers = {
+            state:  T("State"),
+            hunt_id: T("Hunt ID"),
+            hunt_description: T("Description"),
+            create_time: T("Created"),
+            start_time: T("Started"),
+            expires: T("Expires"),
+            total_clients_scheduled: T("Scheduled"),
+            creator: T("Creator"),
+        };
+
+        let column_renderers = {
+            expires: getFormatter("timestamp"),
+            state: (cell, row) => {
+                let stopped = row.stats && row.stats.stopped;
+                if (stopped || cell === "STOPPED") {
+                    return <div className="hunt-status-icon">
+                             <FontAwesomeIcon icon="stop" /></div>;
+                }
+                if (cell === "RUNNING") {
+                    return <div className="hunt-status-icon">
+                             <FontAwesomeIcon icon="hourglass" /></div>;
+                }
+                if (cell === "PAUSED") {
+                    return <div className="hunt-status-icon">
+                             <FontAwesomeIcon icon="pause" /></div>;
+                }
+                return <div className="hunt-status-icon">
+                         <FontAwesomeIcon icon="exclamation" /></div>;
+            },
+            create_time: getFormatter("timestamp"),
+            start_time: getFormatter("timestamp"),
+            total_clients_scheduled: (cell, row) => {
+                return row.stats && row.stats.total_clients_scheduled;
             },
         };
 
@@ -107,17 +137,14 @@ class AddCellFromHunt extends React.PureComponent {
                       {T("No hunts exist in the system. You can start a new hunt by clicking the New Hunt button above.")}
                     </div>
                     :
-                    <BootstrapTable
-                      hover
-                      condensed
-                      keyField="hunt_id"
-                      bootstrap4
-                      headerClasses="alert alert-secondary"
-                      bodyClasses="fixed-table-body"
-                      data={this.state.hunts}
-                      columns={getHuntColumns()}
-                      filter={ filterFactory() }
-                      selectRow={ selectRow }
+                    <VeloTable
+                      rows={this.state.hunts}
+                      columns={columns}
+                      column_renderers={column_renderers}
+                      header_renderers={header_renderers}
+                      onSelect={(row, idx)=>{
+                          this.addCellFromHunt(row);
+                      }}
                     />
                   }
                 </div>
@@ -161,7 +188,7 @@ export default class NotebookCellRenderer extends React.Component {
         addCell: PropTypes.func,
 
         // Causes the notebooks to be refreshed
-        fetchNotebooks: PropTypes.func,
+        updateVersion: PropTypes.func,
     };
 
     state = {
@@ -193,17 +220,40 @@ export default class NotebookCellRenderer extends React.Component {
 
         local_completions_lookup: {},
         local_completions: [],
+
+        // Only load the cell the first time if it is visible.
+        visible: false,
+        unloaded: true,
+    }
+
+    constructor(props) {
+        super(props);
+        this.myRef = React.createRef();
+        this.scrollRef = React.createRef();
     }
 
     componentDidMount() {
         this.source = CancelToken.source();
         this.update_source = CancelToken.source();
+
+        // Install an observer to figure out when the cell is visible.
+        this.observer = new IntersectionObserver(x=>{
+            if(x) {
+                this.setState({visible: x[0].isIntersecting});
+            }
+        });
+        this.observer.observe(this.myRef.current, );
+
         this.fetchCellContents();
     }
 
     componentWillUnmount() {
         this.source.cancel();
         this.update_source.cancel();
+
+        if (this.observer) {
+            this.observer.disconnect();
+        };
     }
 
     componentDidUpdate = (prevProps, prevState, rootNode) => {
@@ -225,7 +275,8 @@ export default class NotebookCellRenderer extends React.Component {
             this.props.cell_metadata.cell_id;
 
         if (prevProps.notebook_id !== this.props.notebook_id ||
-            props_cell_timestamp !== this.state.cell_timestamp ||
+            props_cell_timestamp > this.state.cell_timestamp ||
+            prevState.visible != this.state.visible ||
             props_cell_id !== current_cell_id) {
 
             // Prevent further updates to this cell by setting the
@@ -266,8 +317,18 @@ export default class NotebookCellRenderer extends React.Component {
         let cell_version = this.props.cell_metadata &&
             this.props.cell_metadata.current_version;
 
-        this.props.incNotebookLocked(1);
+        if (!this.state.visible && this.state.unloaded) {
+            let cell = this.state.cell;
+            cell.cell_id = this.props.cell_metadata.cell_id;
 
+            // Take up a reasonable amount of vertical space to keep
+            // further cells invisible.
+            cell.output = "<div class='cell-placeholder'>" + T("Loading") + "</div>";
+            this.setState({cell: cell});
+            return;
+        }
+
+        this.props.incNotebookLocked(1);
         api.get("v1/GetNotebookCell", {
             notebook_id: this.props.notebook_id,
             cell_id: this.props.cell_metadata.cell_id,
@@ -281,7 +342,7 @@ export default class NotebookCellRenderer extends React.Component {
 
             let cell = response.data;
             if (!this.state.currently_editing) {
-                this.setState({cell: cell,
+                this.setState({cell: cell, unloaded: false,
                                input: cell.input,
                                loading: false});
             }
@@ -294,7 +355,7 @@ export default class NotebookCellRenderer extends React.Component {
                 e.response.data.message;
             let cell = Object.assign({}, this.props.cell_metadata || {});
             cell.messages = [message];
-            this.setState({loading: false, cell: cell});
+            this.setState({loading: false, unloaded: false, cell: cell});
         });;
     };
 
@@ -357,7 +418,7 @@ export default class NotebookCellRenderer extends React.Component {
                        local_completions_lookup: {},
                       });
 
-        // Reset any inflight calls.
+        // Reset any in-flight calls.
         this.update_source.cancel();
         this.update_source = CancelToken.source();
 
@@ -387,7 +448,11 @@ export default class NotebookCellRenderer extends React.Component {
             }
 
             let cell = response.data;
-            if (cell.cell_id === this.props.cell_metadata.cell_id) {
+            if (this.props.cell_metadata.timestamp > cell.timestamp) {
+                // The existing cell is actually newer - this can
+                // happen if the periodic update raced
+                // UpdateNotebookCell and got a newer version.
+            } else if (cell.cell_id === this.props.cell_metadata.cell_id) {
                 this.setState({cell: response.data,
                                loading: false,
                                currently_editing: keep_editing});
@@ -430,7 +495,7 @@ export default class NotebookCellRenderer extends React.Component {
                        local_completions_lookup: {},
                       });
 
-        // Reset any inflight calls.
+        // Reset any in-flight calls.
         this.update_source.cancel();
         this.update_source = CancelToken.source();
 
@@ -474,7 +539,7 @@ export default class NotebookCellRenderer extends React.Component {
 
             };
         }).catch(response=>{
-            this.props.fetchNotebooks();
+            this.props.updateVersion();
         });
     };
 
@@ -494,7 +559,7 @@ export default class NotebookCellRenderer extends React.Component {
             }
 
             // Refresh the notebook with the current cell version.
-            this.props.fetchNotebooks();
+            this.props.updateVersion();
         });
     }
 
@@ -528,7 +593,8 @@ export default class NotebookCellRenderer extends React.Component {
                         // it.
                         let filename = encodeURI(blob.name);
                         let url = encodeURI(response.data.url);
-                        if (/image/.test(response.mime_type)) {
+                        let mime_type = response.data && response.data.mime_type;
+                        if (/image/.test(mime_type || "")) {
                             this.state.ace.insert(
                                 "\n<img src=\"" +
                                     url + "\" alt=\"" +
@@ -587,10 +653,11 @@ export default class NotebookCellRenderer extends React.Component {
         }
 
         return <>
-                   <Dropdown.Menu>
-                     { _.map(suggestions, x=>{
+                 <Dropdown.Menu>
+                     { _.map(suggestions, (x, i)=>{
                          return <Dropdown.Item
-                                  key={x.name}
+                                  key={i}
+
                                   onClick={()=>{
                                       this.props.addCell(
                                           this.state.cell.cell_id,
@@ -598,7 +665,7 @@ export default class NotebookCellRenderer extends React.Component {
                                           x.input,
                                           x.env);
                                   }}
-                                  title="{x.name}">
+                                  title={x.name}>
                                   {x.name}
                                 </Dropdown.Item>;
                      })}
@@ -693,7 +760,25 @@ export default class NotebookCellRenderer extends React.Component {
     }
 
     render() {
-        let selected = this.state.cell.cell_id === this.props.selected_cell_id;
+        let selected = this.props.selected_cell_id &&
+            this.state.cell.cell_id === this.props.selected_cell_id;
+
+        let cell_id = this.state.cell.cell_id;
+        let cells = (this.props.notebook_metadata &&
+                     this.props.notebook_metadata.cell_metadata) || [];
+        let pos = 0;
+        // Find the cell position.
+        for(pos=0;pos < cells.length; pos++) {
+            if(cell_id == cells[pos].cell_id) {
+                break;
+            }
+        }
+
+        // If the cell is first it can not go up.
+        let cellCanGoUp = pos !== 0;
+
+        // If the cell is last it can not go down.
+        let cellCanGoDown = pos < cells.length -1 ;
 
         // There are 3 states for the cell:
         // 1. The cell is selected but not being edited: Show the cell manipulation toolbar.
@@ -748,7 +833,7 @@ export default class NotebookCellRenderer extends React.Component {
                   </Button>
                 </ToolTip>
                 <ToolTip tooltip={T("Up Cell")}>
-                  <Button disabled={this.props.notebookLocked}
+                  <Button disabled={!cellCanGoUp}
                           onClick={() => {
                               this.props.upCell(this.state.cell.cell_id);
                           }}
@@ -757,7 +842,7 @@ export default class NotebookCellRenderer extends React.Component {
                   </Button>
                 </ToolTip>
                 <ToolTip tooltip={T("Down Cell")}>
-                  <Button disabled={this.props.notebookLocked}
+                  <Button disabled={!cellCanGoDown}
                           onClick={() => {
                               this.props.downCell(this.state.cell.cell_id);
                           }}
@@ -818,7 +903,7 @@ export default class NotebookCellRenderer extends React.Component {
                       <Dropdown.Item
                         title="Markdown"
                         onClick={() => {
-                            // Preserve the current cell's environemnt for the new cell
+                            // Preserve the current cell's environment for the new cell
                             this.props.addCell(this.state.cell.cell_id, "Markdown", "", this.state.cell.env);
                         }}>
                         Markdown
@@ -834,7 +919,7 @@ export default class NotebookCellRenderer extends React.Component {
 
                       <Dropdown
                         title={T("Suggestion")}
-                        drop="right"
+                        drop="end"
                         variant="default-outline">
                         <Dropdown.Toggle
                           className="dropdown-item"
@@ -878,7 +963,7 @@ export default class NotebookCellRenderer extends React.Component {
               <ButtonGroup className="float-right">
                 <ToolTip tooltip={T("Rendered")}>
                   <Button variant="outline-info">
-                    <VeloTimestamp usec={this.state.cell.timestamp * 1000} />
+                    <VeloTimestamp usec={this.state.cell.timestamp } />
                     { this.state.cell.duration &&
                       <span>&nbsp;({this.state.cell.duration}s) </span> }
                   </Button>
@@ -890,7 +975,7 @@ export default class NotebookCellRenderer extends React.Component {
         let ace_toolbar = (
             <>
               <ButtonGroup>
-                <ToolTip tooltip={T("Undo")}>
+                <ToolTip tooltip={T("Close")}>
                   <Button onClick={() => {this.setEditing(false); }}
                           variant="default">
                     <FontAwesomeIcon icon="window-close"/>
@@ -907,7 +992,7 @@ export default class NotebookCellRenderer extends React.Component {
                     </Button>
                   </ToolTip>
                 }
-                <ToolTip tooltip={T("Save")}>
+                <ToolTip tooltip={T("Save & Run")}>
                   <Button onClick={()=>{
                               let cell = this.state.cell;
                               cell.input = this.state.ace.getValue();
@@ -933,11 +1018,10 @@ export default class NotebookCellRenderer extends React.Component {
                 </ToolTip>
 
                 <FormControl as="select"
-                             ref={ (el) => this.element=el }
                              value={this.state.cell.type}
-                             onChange={() => {
+                             onChange={x=> {
                                  let cell = this.state.cell;
-                                 cell.type = this.element.value;
+                                 cell.type = x.currentTarget.value;
                                  this.setState({cell: cell});
                              }} >
                   { _.map(cell_types, (v, idx) => {
@@ -951,7 +1035,8 @@ export default class NotebookCellRenderer extends React.Component {
         );
 
         return (
-            <>{ this.state.showAddCellFromHunt &&
+            <div ref={this.scrollRef}>
+            { this.state.showAddCellFromHunt &&
                 <AddCellFromHunt
                   addCell={(text, type, env)=>{
                       this.props.addCell(this.state.cell.cell_id, type, text, env);
@@ -968,6 +1053,7 @@ export default class NotebookCellRenderer extends React.Component {
               { this.state.showFormatTablesDialog &&
                 <FormatTableDialog
                   cell={this.state.cell}
+                  notebook_metadata={this.props.notebook_metadata}
                   saveCell={cell=>{
                       this.saveCell(cell);
                   }}
@@ -1004,7 +1090,10 @@ export default class NotebookCellRenderer extends React.Component {
                 <CopyCellToNotebookDialog
                   cell={this.state.cell}
                   notebook_metadata={this.props.notebook_metadata}
-                  closeDialog={()=>this.setState({showCopyCellToNotebook: false})}
+                  closeDialog={()=>{
+                      this.setState({showCopyCellToNotebook: false});
+                      this.props.updateVersion();
+                  }}
                   >
 
                 </CopyCellToNotebookDialog>
@@ -1049,7 +1138,8 @@ export default class NotebookCellRenderer extends React.Component {
                   }
                 </div>
 
-                <div className={classNames({
+                <div ref={this.myRef}
+                  className={classNames({
                     collapsed: this.state.collapsed,
                     "notebook-output": true,
                 })}
@@ -1104,52 +1194,7 @@ export default class NotebookCellRenderer extends React.Component {
                   }
                 </div>
               </div>
-            </>
+            </div>
         );
     }
 };
-
-function getHuntColumns() {
-    return formatColumns([
-        {
-            dataField: "state", text: T("State"),
-            formatter: (cell, row) => {
-                let stopped = row.stats && row.stats.stopped;
-                if (stopped || cell === "STOPPED") {
-                    return <div className="hunt-status-icon">
-                             <FontAwesomeIcon icon="stop" /></div>;
-                }
-                if (cell === "RUNNING") {
-                    return <div className="hunt-status-icon">
-                             <FontAwesomeIcon icon="hourglass" /></div>;
-                }
-                if (cell === "PAUSED") {
-                    return <div className="hunt-status-icon">
-                             <FontAwesomeIcon icon="pause" /></div>;
-                }
-                return <div className="hunt-status-icon">
-                         <FontAwesomeIcon icon="exclamation" /></div>;
-            }
-        },
-        { dataField: "hunt_id", text: T("Hunt ID") },
-        {
-            dataField: "hunt_description", text: T("Description"),
-            sort: true, filtered: true, editable: true
-        },
-        {
-            dataField: "create_time", text: T("Created"),
-            type: "timestamp", sort: true
-        },
-        {
-            dataField: "start_time", text: T("Started"),
-            type: "timestamp", sort: true
-        },
-        {
-            dataField: "expires",
-            text: T("Expires"), sort: true,
-            type: "timestamp"
-        },
-        { dataField: "stats.total_clients_scheduled", text: T("Scheduled") },
-        { dataField: "creator", text: T("Creator") },
-    ]);
-}

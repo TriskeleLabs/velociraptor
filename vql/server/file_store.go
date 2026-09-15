@@ -3,7 +3,7 @@
 
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -33,6 +33,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/vql"
@@ -86,22 +87,26 @@ func (self *DeleteFileStore) Call(ctx context.Context,
 
 	vfs_path := arg.VFSPath.Reduce(ctx)
 	principal := vql_subsystem.GetPrincipal(scope)
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		config_obj, principal, "file_store_delete",
 		ordereddict.NewDict().Set("vfs", vfs_path))
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("<red>DeleteFileStoreArgs</> %v %v", principal, vfs_path)
+	}
 
 	switch t := vfs_path.(type) {
 	case *path_specs.DSPathSpec:
 		err = db.DeleteSubject(config_obj, t)
 
 	case path_specs.DSPathSpec:
-		err = db.DeleteSubject(config_obj, t)
+		err = db.DeleteSubject(config_obj, &t)
 
 	case *path_specs.FSPathSpec:
 		err = file_store_factory.Delete(t)
 
 	case path_specs.FSPathSpec:
-		err = file_store_factory.Delete(t)
+		err = file_store_factory.Delete(&t)
 
 	case *accessors.OSPath:
 		path_spec := path_specs.NewSafeFilestorePath(t.Components...).
@@ -172,36 +177,43 @@ func (self *FileStore) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		scope.Log("file_store: %v", err)
+		return vfilter.Null{}
+	}
+
 	vfs_path := arg.VFSPath.Reduce(ctx)
 	switch t := vfs_path.(type) {
 	case *path_specs.FSPathSpec:
-		return t.AsFilestoreFilename(config_obj)
+		return datastore.AsFilestoreFilename(db, config_obj, t)
 
 	case path_specs.FSPathSpec:
-		return t.AsFilestoreFilename(config_obj)
+		return datastore.AsFilestoreFilename(db, config_obj, &t)
 
 	case *path_specs.DSPathSpec:
-		return t.AsDatastoreFilename(config_obj)
+		return datastore.AsDatastoreFilename(db, config_obj, t)
 
 	case path_specs.DSPathSpec:
-		return t.AsDatastoreFilename(config_obj)
+		return datastore.AsDatastoreFilename(db, config_obj, &t)
 
 	case *accessors.OSPath:
-		return path_specs.NewUnsafeFilestorePath(t.Components...).AsFilestoreFilename(config_obj)
+		return datastore.AsFilestoreFilename(db, config_obj,
+			path_specs.NewUnsafeFilestorePath(t.Components...))
 
 	case string:
 		// Things that produce strings normally encode the path spec
 		// with a prefix to let us know if this is a data store path
 		// or a filestore path..
 		if strings.HasPrefix(t, "ds:") {
-			return paths.DSPathSpecFromClientPath(
-				strings.TrimPrefix(t, "ds:")).
-				AsDatastoreFilename(config_obj)
+			return datastore.AsDatastoreFilename(db, config_obj,
+				paths.DSPathSpecFromClientPath(
+					strings.TrimPrefix(t, "ds:")))
 		}
 
-		return paths.FSPathSpecFromClientPath(
-			strings.TrimPrefix(t, "fs:")).
-			AsFilestoreFilename(config_obj)
+		return datastore.AsFilestoreFilename(db, config_obj,
+			paths.FSPathSpecFromClientPath(
+				strings.TrimPrefix(t, "fs:")))
 	}
 
 	return vfilter.Null{}

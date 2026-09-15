@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,11 +26,13 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -74,7 +76,7 @@ const (
   "newLineMode":"auto",
   "useSoftTabs":true,
   "navigateWithinSoftTabs":false,
-  "tabSize":4,
+  "tabSize":2,
   "wrap":"free",
   "indentedSoftWrap":true,
   "foldStyle":"markbegin",
@@ -86,7 +88,7 @@ const (
 )
 
 var (
-	validUsernameRegEx = regexp.MustCompile("^[a-zA-Z0-9@.\\-_#+]+$")
+	validUsernameRegEx = regexp.MustCompile(`^[a-zA-Z0-9@.\-_#+]+$`)
 )
 
 type UserManager struct {
@@ -152,6 +154,14 @@ func (self UserManager) SetUser(
 	return self.storage.SetUser(ctx, user_record)
 }
 
+func (self UserManager) SetUserStats(
+	ctx context.Context,
+	org_config_obj *config_proto.Config,
+	username string,
+	stats *api_proto.UserStats) error {
+	return self.storage.SetUserStats(ctx, org_config_obj, username, stats)
+}
+
 func (self UserManager) SetUserOptions(ctx context.Context,
 	principal, username string,
 	options *api_proto.SetGUIOptionsRequest) error {
@@ -174,6 +184,14 @@ func (self UserManager) SetUserOptions(ctx context.Context,
 func (self UserManager) GetUserOptions(ctx context.Context, username string) (
 	*api_proto.SetGUIOptionsRequest, error) {
 	return self.storage.GetUserOptions(ctx, username)
+}
+
+func (self UserManager) MessageUser(
+	ctx context.Context,
+	username, sender string,
+	message *ordereddict.Dict) error {
+
+	return self.storage.WriteUserMessage(ctx, username, sender, message)
 }
 
 func NewUserManager(
@@ -207,11 +225,17 @@ func StartUserManager(
 	service := NewUserManager(config_obj, storage)
 	services.RegisterUserManager(service)
 
+	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
+		Name:          "User Manager",
+		Description:   "Reporting information about current users registered on the system.",
+		ProfileWriter: service.WriteProfile,
+		Categories:    []string{"Global", "Services"},
+	})
+
 	return nil
 }
 
 // Make sure there is always something available.
 func init() {
-	service := NewUserManager(&config_proto.Config{}, &NullStorageManager{})
-	services.RegisterUserManager(service)
+	services.RegisterUserManager(NewNullStorageManager())
 }

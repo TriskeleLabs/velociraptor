@@ -1,19 +1,19 @@
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package glob
 
@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -30,9 +31,9 @@ import (
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/config"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 type pathComponentsTestFixtureType struct {
@@ -44,17 +45,17 @@ var pathComponentsTestFixture = []pathComponentsTestFixtureType{
 	{"foo", []_PathFilterer{
 		_LiteralComponent{"foo"},
 	}},
-	// A ** has to start at the begining of the component, otherwise
+	// A ** has to start at the beginning of the component, otherwise
 	// it is not considered a recursive component and just interpreted
 	// as a normal wild card.
 	{"foo**", []_PathFilterer{
-		&_RegexComponent{regexp: `foo.*.*\z(?ms)`},
+		NewRegexComponent(`foo.*.*\z(?ms)`),
 	}},
 	{"**5", []_PathFilterer{
 		_RecursiveComponent{`.*\z(?ms)`, 5},
 	}},
 	{"*.exe", []_PathFilterer{
-		&_RegexComponent{regexp: `.*\.exe\z(?ms)`},
+		NewRegexComponent(`.*\.exe\z(?ms)`),
 	}},
 	{"/bin/ls", []_PathFilterer{
 		_LiteralComponent{"bin"},
@@ -121,6 +122,9 @@ var _GlobFixture = []struct {
 	{"Recursive matches none at end", []string{"/bin/bash/**"}},
 	{"Match masked by two matches", []string{"/usr/bin", "/usr/*/diff"}},
 	{"Multiple globs matching same file", []string{"/bin/bash", "/bin/ba*"}},
+
+	// One valid glob and one invalid glob - we should just ignore the invalid glob.
+	{"Invalid globs", []string{"/bin/bash", "/bin/\xa0*"}},
 }
 
 func GetMockFileSystemAccessor() accessors.FileSystemAccessor {
@@ -171,12 +175,14 @@ func TestGlobWithContext(t *testing.T) {
 		var returned []string
 
 		globber := NewGlobber()
+		defer globber.Close()
+
 		patterns := ExpandBraces(fixture.patterns)
 
 		for _, pattern := range patterns {
 			err := globber.Add(accessors.MustNewLinuxOSPath(pattern))
 			if err != nil {
-				t.Fatalf("Failed %v", err)
+				fmt.Printf("While adding %v: %v\n", pattern, err)
 			}
 		}
 
@@ -211,4 +217,10 @@ func TestBraceExpansion(t *testing.T) {
 	for idx, e := range result {
 		assert.Equal(t, e, expected[idx])
 	}
+}
+
+func NewRegexComponent(re string) *_RegexComponent {
+	res := &_RegexComponent{regexp: re}
+	res.compiled = regexp.MustCompile("^(?msi)" + res.regexp)
+	return res
 }

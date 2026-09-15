@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
+	errors "github.com/go-errors/errors"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/json"
@@ -50,13 +52,13 @@ var (
 	queries = query.Arg("queries", "The VQL Query to run.").
 		Required().Strings()
 
+	query_command_is_file = query.Flag(
+		"from_files", "Args are actually file names which will contain the VQL query").
+		Short('f').Bool()
+
 	query_command_collect_timeout = query.Flag(
 		"timeout", "Time collection out after this many seconds.").
 		Default("0").Float64()
-
-	query_org_id = query.Flag(
-		"org", "The Org ID to target with this query").
-		Default("root").String()
 
 	query_command_collect_cpu_limit = query.Flag(
 		"cpu_limit", "A number between 0 to 100 representing maximum CPU utilization.").
@@ -91,7 +93,7 @@ func outputJSON(ctx context.Context,
 	out io.Writer) error {
 	for result := range vfilter.GetResponseChannel(
 		vql, ctx, scope,
-		vql_subsystem.MarshalJsonIndent(scope),
+		vql_subsystem.MarshalJsonIndentIgnoreEmpty(scope),
 		10, *max_wait) {
 		_, err := out.Write(result.Payload)
 		if err != nil {
@@ -158,7 +160,7 @@ func doRemoteQuery(
 
 	logging.DisableLogging()
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	// Make a remote query using the API - we better have user API
@@ -181,12 +183,9 @@ func doRemoteQuery(
 	}
 
 	if env != nil {
-		for _, k := range env.Keys() {
-			v, ok := env.GetString(k)
-			if ok {
-				request.Env = append(request.Env, &actions_proto.VQLEnv{
-					Key: k, Value: v})
-			}
+		for _, i := range env.Items() {
+			request.Env = append(request.Env, &actions_proto.VQLEnv{
+				Key: i.Key, Value: utils.ToString(i.Value)})
 		}
 	}
 
@@ -209,7 +208,7 @@ func doRemoteQuery(
 		}
 
 		if response.Log != "" {
-			logger.Info(response.Log)
+			logger.Info("%s", response.Log)
 			continue
 		}
 
@@ -274,35 +273,51 @@ func doQuery() error {
 		config_obj.Services.Label = true
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	env := ordereddict.NewDict()
 	for k, v := range *env_map {
 		env.Set(k, v)
 	}
 
+	vql_queries := *queries
+	if *query_command_is_file {
+		vql_queries = []string{}
+		for _, q := range *queries {
+			fd, err := os.Open(q)
+			if err != nil {
+				return fmt.Errorf("While opening query file %v: %w", q, err)
+			}
+			data, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
+			if err != nil {
+				return fmt.Errorf("While opening query file %v: %w", q, err)
+			}
+			fd.Close()
+			vql_queries = append(vql_queries, string(data))
+		}
+	}
+
 	if config_obj.ApiConfig != nil && config_obj.ApiConfig.Name != "" {
 		logging.GetLogger(config_obj, &logging.ToolComponent).
 			Info("API Client configuration loaded - will make gRPC connection.")
 		return doRemoteQuery(
-			config_obj, *format, *query_org_id, *queries, env)
+			config_obj, *format, *org_id, vql_queries, env)
 	}
 
-	if *query_org_id != "" {
+	if *org_id != "" {
 		org_manager, err := services.GetOrgManager()
 		if err != nil {
 			return err
 		}
 
-		org_config_obj, err := org_manager.GetOrgConfig(*query_org_id)
+		org_config_obj, err := org_manager.GetOrgConfig(*org_id)
 		if err != nil {
 			return err
 		}
@@ -355,21 +370,25 @@ func doQuery() error {
 
 		// When the scope is destroyed store it in the file again.
 		if !*do_not_update {
-			scope.AddDestructor(func() {
+			err := scope.AddDestructor(func() {
 				err := storeScopeInFile(*scope_file, scope)
 				if err != nil {
 					scope.Log("Storing scope in %v: %v",
 						*scope_file, err)
 				}
 			})
+			if err != nil {
+				return err
+			}
 		}
 
 	}
 
 	if *query_command_collect_timeout > 0 {
 		start := time.Now()
-		timed_ctx, timed_cancel := context.WithTimeout(ctx,
-			time.Second*time.Duration(*query_command_collect_timeout))
+		timed_ctx, timed_cancel := utils.WithTimeoutCause(ctx,
+			time.Second*time.Duration(*query_command_collect_timeout),
+			errors.New("Query: deadline reached"))
 
 		go func() {
 			select {
@@ -377,7 +396,7 @@ func doQuery() error {
 				timed_cancel()
 			case <-timed_ctx.Done():
 				scope.Log("collect: <red>Timeout Error:</> Collection timed out after %v",
-					time.Now().Sub(start))
+					time.Since(start))
 				// Cancel the main context.
 				cancel()
 				timed_cancel()
@@ -386,8 +405,15 @@ func doQuery() error {
 	}
 
 	// Install throttler into the scope.
-	scope.SetThrottler(actions.NewThrottler(ctx, scope,
-		0, *query_command_collect_cpu_limit, 0))
+	scope.SetContext(constants.SCOPE_QUERY_NAME, "query command")
+	t, closer := throttler.NewThrottler(
+		ctx, scope, config_obj, 0, *query_command_collect_cpu_limit, 0)
+	scope.SetThrottler(t)
+	err = scope.AddDestructor(closer)
+	if err != nil {
+		closer()
+		return err
+	}
 
 	out_fd := os.Stdout
 	if *output_file != "" {
@@ -401,13 +427,13 @@ func doQuery() error {
 
 	start_time := time.Now()
 	defer func() {
-		scope.Log("Completed query in %v", time.Now().Sub(start_time))
+		scope.Log("Completed query in %v", time.Since(start_time))
 	}()
 
 	if *trace_vql_flag {
 		scope.SetTracer(log.New(os.Stderr, "VQL Trace: ", 0))
 	}
-	for _, query := range *queries {
+	for _, query := range vql_queries {
 		statements, err := vfilter.MultiParse(query)
 		kingpin.FatalIfError(err, "Unable to parse VQL Query")
 

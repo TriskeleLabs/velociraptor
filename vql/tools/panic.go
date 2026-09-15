@@ -13,21 +13,20 @@ func init() {
 	vql_subsystem.RegisterPlugin(
 		vfilter.GenericListPlugin{
 			PluginName: "panic",
-			Metadata:   vql_subsystem.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+			Metadata:   vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
 			Function: func(
 				ctx context.Context,
 				scope vfilter.Scope,
 				args *ordereddict.Dict) []vfilter.Row {
 				var result []vfilter.Row
 
-				err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+				err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
 				if err != nil {
 					scope.Log("panic: %s", err)
 					return result
 				}
 
 				panic("oops")
-				return nil
 			},
 			Doc: "Crash the program with a panic!",
 		})

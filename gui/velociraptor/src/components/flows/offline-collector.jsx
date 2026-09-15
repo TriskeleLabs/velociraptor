@@ -350,14 +350,15 @@ class OfflineCollectorParameters  extends React.Component {
                       <Form.Group as={Row}>
                       <Form.Label column sm="3">File Name Prefix</Form.Label>
                       <Col sm="8">
-                        <Form.Control as="textarea" rows={3}
-                                        placeholder={T("Prefix for files being uploaded. end in / for folders (blank if not used)")}
-                                        spellCheck="false"
-                                        value={this.props.parameters.target_args.s3UploadRoot}
-                                        onChange={(e) => {
-                                            this.props.parameters.target_args.s3UploadRoot = e.target.value;
-                                            this.props.setParameters(this.props.parameters);
-                                        }}
+                        <Form.Control
+                          as="textarea" rows={3}
+                          placeholder={T("Prefix for files being uploaded. end in / for folders (blank if not used)")}
+                          spellCheck="false"
+                          value={this.props.parameters.target_args.s3UploadRoot}
+                          onChange={(e) => {
+                              this.props.parameters.target_args.s3UploadRoot = e.target.value;
+                              this.props.setParameters(this.props.parameters);
+                          }}
                         >
                         </Form.Control>
                       </Col>
@@ -382,14 +383,15 @@ class OfflineCollectorParameters  extends React.Component {
                       <Form.Group as={Row}>
                       <Form.Label column sm="3">KMS Encryption Key</Form.Label>
                       <Col sm="8">
-                        <Form.Control as="textarea" rows={3}
-                                        placeholder={T("KMS Encryption Key ARN (blank if KMS not used)")}
-                                        spellCheck="false"
-                                        value={this.props.parameters.target_args.kmsEncryptionKey}
-                                        onChange={(e) => {
-                                            this.props.parameters.target_args.kmsEncryptionKey = e.target.value;
-                                            this.props.setParameters(this.props.parameters);
-                                        }}
+                        <Form.Control
+                          as="textarea" rows={3}
+                          placeholder={T("KMS Encryption Key ARN (blank if KMS not used)")}
+                          spellCheck="false"
+                          value={this.props.parameters.target_args.kmsEncryptionKey}
+                          onChange={(e) => {
+                              this.props.parameters.target_args.kmsEncryptionKey = e.target.value;
+                              this.props.setParameters(this.props.parameters);
+                          }}
                         >
                         </Form.Control>
                       </Col>
@@ -563,13 +565,14 @@ class OfflineCollectorParameters  extends React.Component {
                     <Form.Label column sm="3">{T("Pause For Prompt")}</Form.Label>
                     <Col sm="8">
                       <Form.Check
-                        type="checkbox"
+                        type="switch"
+                        label={T("Pause For Prompt")}
                         onChange={(e) => {
+                            let value = "N";
                             if (e.currentTarget.checked) {
-                                this.props.parameters.opt_prompt = "Y";
-                            } else {
-                                this.props.parameters.opt_prompt = "N";
-                            }
+                                value = "Y";
+                            };
+                            this.props.parameters.opt_prompt = value;
                             this.props.setParameters(this.props.parameters);
                         }}
                         checked={this.props.parameters.opt_prompt === "Y"}
@@ -619,6 +622,24 @@ class OfflineCollectorParameters  extends React.Component {
                             this.props.parameters.opt_collector_filename = e.target.value;
                             this.props.setParameters(this.props.parameters);
                         }}
+                      />
+                    </Col>
+                  </Form.Group>
+                  <Form.Group as={Row}>
+                    <Form.Label column sm="3">{T("Delete Collection at Exit")}</Form.Label>
+                    <Col sm="8">
+                      <Form.Check
+                        type="switch"
+                        label={T("Delete Collection at Exit")}
+                        onChange={(e) => {
+                            let value = "N";
+                            if (e.currentTarget.checked) {
+                                value = "Y";
+                            }
+                            this.props.parameters.opt_delete_at_exit = value;
+                            this.props.setParameters(this.props.parameters);
+                        }}
+                        checked={this.props.parameters.opt_delete_at_exit === "Y"}
                       />
                     </Col>
                   </Form.Group>
@@ -786,8 +807,9 @@ function getDefaultCollectionParameters() {
         opt_concurrency: undefined,
         opt_output_directory: undefined,
         opt_tempdir: undefined,
-        opt_filename_template: "Collection-%FQDN%-%TIMESTAMP%",
+        opt_filename_template: "Collection-%Hostname%-%TIMESTAMP%",
         opt_collector_filename: undefined,
+        opt_delete_at_exit: "N",
         opt_format: "jsonl",
         opt_prompt: "N",
     };
@@ -872,6 +894,9 @@ export default class OfflineCollectorWizard extends React.Component {
                 case "opt_prompt":
                     collector_parameters.opt_prompt = value;
                     break;
+                case "opt_delete_at_exit":
+                    collector_parameters.opt_delete_at_exit = value;
+                    break;
                 case "opt_tempdir":
                     collector_parameters.opt_tempdir = value;
                     break;
@@ -890,7 +915,6 @@ export default class OfflineCollectorWizard extends React.Component {
                 case "opt_collector_filename":
                     collector_parameters.opt_collector_filename = value;
                     break;
-
                 case "opt_progress_timeout":
                     resources.progress_timeout =  JSONparse(value);
                     break;
@@ -939,29 +963,31 @@ export default class OfflineCollectorWizard extends React.Component {
         };
 
         let params = this.state.collector_parameters;
+        let setter = (field, value)=>{
+            if(!_.isUndefined(value)) {
+                env.push({key: field, value: str(value)});
+            }
+        };
 
-        env.push({key: "OS", value: str(params.target_os)});
-        env.push({key: "artifacts", value: str(
-            _.map(this.state.artifacts, (item) => item.name))});
-        env.push({key: "parameters", value: str(this.state.parameters)});
-        env.push({key: "target", value: str(params.target)});
-        env.push({key: "target_args", value: str(params.target_args)});
-        env.push({key: "encryption_scheme", value: str(params.encryption_scheme)});
-        env.push({key: "encryption_args", value: str(params.encryption_args)});
-        env.push({key: "opt_verbose", value: "Y"});
-        env.push({key: "opt_banner", value: "Y"});
-        env.push({key: "opt_prompt", value: str(params.opt_prompt)});
-        env.push({key: "opt_admin", value: "Y"});
-        env.push({key: "opt_tempdir", value: str(params.opt_tempdir)});
-        env.push({key: "opt_level", value: str(params.opt_level)});
-        env.push({key: "opt_concurrency", value: str(params.opt_concurrency)});
-        env.push({key: "opt_output_directory", value: str(params.opt_output_directory)});
-        env.push({key: "opt_filename_template", value: str(params.opt_filename_template)});
-        env.push({key: "opt_collector_filename", value: str(params.opt_collector_filename)});
-        env.push({key: "opt_progress_timeout", value: str(this.state.resources.progress_timeout)});
-        env.push({key: "opt_timeout", value: str(this.state.resources.timeout)});
-        env.push({key: "opt_cpu_limit", value: str( this.state.resources.cpu_limit)});
-        env.push({key: "opt_format", value: str(params.opt_format)});
+        setter("OS", params.target_os);
+        setter("artifacts", _.map(this.state.artifacts, (item) => item.name));
+        setter("parameters", this.state.parameters);
+        setter("target", params.target);
+        setter("target_args", params.target_args);
+        setter("encryption_scheme", params.encryption_scheme);
+        setter("encryption_args", params.encryption_args);
+        setter("opt_prompt", params.opt_prompt);
+        setter("opt_tempdir", params.opt_tempdir);
+        setter("opt_level", params.opt_level);
+        setter("opt_concurrency", params.opt_concurrency);
+        setter("opt_output_directory", params.opt_output_directory);
+        setter("opt_filename_template", params.opt_filename_template);
+        setter("opt_collector_filename", params.opt_collector_filename);
+        setter("opt_delete_at_exit", params.opt_delete_at_exit);
+        setter("opt_progress_timeout", this.state.resources.progress_timeout);
+        setter("opt_timeout", this.state.resources.timeout);
+        setter("opt_cpu_limit", this.state.resources.cpu_limit);
+        setter("opt_format", params.opt_format);
 
         return request;
     }

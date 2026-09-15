@@ -7,11 +7,11 @@ import (
 
 	"github.com/Velocidex/go-journalctl/parser"
 	"github.com/Velocidex/ordereddict"
-	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql/readers"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -20,14 +20,12 @@ var (
 	gJournaldService *JournaldWatcherService
 )
 
-func GlobalJournaldService(config_obj *config_proto.Config) *JournaldWatcherService {
+func StartGlobalJournaldService(
+	ctx context.Context, config_obj *config_proto.Config) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if gJournaldService == nil {
-		gJournaldService = NewJournaldWatcherService(config_obj)
-	}
-	return gJournaldService
+	gJournaldService = NewJournaldWatcherService(ctx, config_obj)
 }
 
 // This service watches one or more event logs files and multiplexes
@@ -42,9 +40,11 @@ type JournaldWatcherService struct {
 	buffer_size int64
 
 	monitor_count int
+	ctx           context.Context
 }
 
 func NewJournaldWatcherService(
+	ctx context.Context,
 	config_obj *config_proto.Config) *JournaldWatcherService {
 
 	sleep_time := 3 * time.Second
@@ -60,6 +60,7 @@ func NewJournaldWatcherService(
 	}
 
 	return &JournaldWatcherService{
+		ctx:           ctx,
 		sleep_time:    sleep_time,
 		buffer_size:   buffer_size,
 		config_obj:    config_obj,
@@ -142,7 +143,7 @@ func (self *JournaldWatcherService) StartMonitoring(
 			return
 		}
 
-		cursor = self.monitorOnce(filename, accessor_name, accessor, raw, cursor)
+		cursor = self.monitorOnce(scope, filename, accessor_name, accessor, raw, cursor)
 
 		time.Sleep(self.sleep_time)
 	}
@@ -168,6 +169,7 @@ func (self *JournaldWatcherService) findLastSequence(
 }
 
 func (self *JournaldWatcherService) monitorOnce(
+	scope vfilter.Scope,
 	filename *accessors.OSPath,
 	accessor_name string,
 	accessor accessors.FileSystemAccessor,
@@ -180,17 +182,11 @@ func (self *JournaldWatcherService) monitorOnce(
 		self.mu.Unlock()
 	}()
 
-	fd, err := accessor.OpenWithOSPath(filename)
+	reader, err := readers.NewAccessorReader(scope, accessor_name, filename, 10000)
 	if err != nil {
 		return cursor
 	}
-	defer fd.Close()
-
-	reader, err := ntfs.NewPagedReader(
-		utils.MakeReaderAtter(fd), 1024, 1000)
-	if err != nil {
-		return cursor
-	}
+	defer reader.Close()
 
 	journal, err := parser.OpenFile(reader)
 	if err != nil {
@@ -219,10 +215,10 @@ func (self *JournaldWatcherService) monitorOnce(
 		return cursor
 	}
 
-	for log := range journal.GetLogs() {
+	for log := range journal.GetLogs(self.ctx) {
 		handles = self.distributeLog(log, key, handles)
 
-		// No more listeners - we dont care any more.
+		// No more listeners - we don't care any more.
 		if len(handles) == 0 {
 			break
 		}

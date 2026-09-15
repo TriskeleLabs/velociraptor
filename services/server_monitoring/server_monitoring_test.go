@@ -3,36 +3,42 @@ package server_monitoring_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/services/server_monitoring"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	_ "www.velocidex.com/golang/velociraptor/vql/common"
 	_ "www.velocidex.com/golang/velociraptor/vql/filesystem"
+	"www.velocidex.com/golang/velociraptor/vql/server/flows"
 )
 
 var (
@@ -68,6 +74,11 @@ type: SERVER_EVENT
 sources:
 - query: SELECT * FROM register_run_count() WHERE log(message="Finished!", dedup=-1)
 `, `
+name: WaitForCancel2
+type: SERVER_EVENT
+sources:
+- query: SELECT * FROM register_run_count() WHERE log(message="Finished2!", dedup=-1)
+`, `
 name: EventTest.Alert
 type: SERVER_EVENT
 sources:
@@ -82,14 +93,24 @@ type: SERVER_EVENT
 
 type ServerMonitoringTestSuite struct {
 	test_utils.TestSuite
+	mu sync.Mutex
 }
 
 func (self *ServerMonitoringTestSuite) SetupTest() {
+	self.mu.Lock()
+
+	journal.PushRowsToArtifactAsyncIsSynchrnous = true
+
 	self.ConfigObj = self.TestSuite.LoadConfig()
 	self.ConfigObj.Services.MonitoringService = true
 
 	self.LoadArtifactsIntoConfig(monitoringArtifacts)
 	self.TestSuite.SetupTest()
+}
+
+func (self *ServerMonitoringTestSuite) TearDownTest() {
+	self.TestSuite.TearDownTest()
+	self.mu.Unlock()
 }
 
 func (self *ServerMonitoringTestSuite) TestMultipleArtifacts() {
@@ -106,7 +127,7 @@ func (self *ServerMonitoringTestSuite) TestMultipleArtifacts() {
 	configuration := &flows_proto.ArtifactCollectorArgs{}
 	err = db.GetSubject(self.ConfigObj, paths.ServerMonitoringFlowURN, configuration)
 	assert.NoError(self.T(), err)
-	assert.Equal(self.T(), 1, len(configuration.Artifacts))
+	assert.Equal(self.T(), 2, len(configuration.Artifacts))
 	assert.Equal(self.T(), "Server.Monitor.Health", configuration.Artifacts[0])
 
 	// Install the two event artifacts.
@@ -135,7 +156,10 @@ func (self *ServerMonitoringTestSuite) TestMultipleArtifacts() {
 	assert.Equal(self.T(), "Server.Clock", configuration.Artifacts[0])
 
 	// Wait here until all the queries are done.
-	event_table.(*server_monitoring.EventTable).Wait()
+	tracer := event_table.(*server_monitoring.EventTable).Tracer()
+	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
+		return len(tracer.Dump()) == 0
+	})
 
 	// Expected Server.Clock rows:
 	// {"Foo":"Y","Foo2":"DefaultFoo2","BoolFoo":true,"_ts":1602103388}
@@ -194,8 +218,12 @@ func (self *ServerMonitoringTestSuite) TestAlertEvent() {
 		})
 	assert.NoError(self.T(), err)
 
+	tracer := event_table.(*server_monitoring.EventTable).Tracer()
+
 	// Wait here until all the queries are done.
-	event_table.(*server_monitoring.EventTable).Wait()
+	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
+		return len(tracer.Dump()) == 0
+	})
 
 	golden := ordereddict.NewDict()
 
@@ -228,6 +256,7 @@ func (self *ServerMonitoringTestSuite) TestEmptyTable() {
 	// Add the new artifacts to the repository
 	_, err = repository.LoadYaml(`
 name: Sleep
+type: SERVER_EVENT
 sources:
 - query: SELECT sleep(time=1000) FROM scope()
 `, services.ArtifactOptions{
@@ -246,9 +275,8 @@ sources:
 	assert.NoError(self.T(), err)
 
 	// Wait until the query is installed.
-	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
-		return len(event_table.(*server_monitoring.EventTable).Tracer().Dump()) > 0
-	})
+	tracer := event_table.(*server_monitoring.EventTable).Tracer()
+	assert.Equal(self.T(), 1, len(tracer.Dump()))
 
 	// Now install an empty table - all queries should quit.
 	err = event_table.Update(self.Ctx,
@@ -261,7 +289,7 @@ sources:
 
 	// Wait until all queries are done.
 	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
-		return len(event_table.(*server_monitoring.EventTable).Tracer().Dump()) == 0
+		return len(tracer.Dump()) == 0
 	})
 }
 
@@ -274,7 +302,7 @@ func (self *ServerMonitoringTestSuite) TestQueriesAreCancelled() {
 
 	// A new plugin to keep track of when a query is running - Total
 	// number of runs is kept in run_count above.
-	vql_subsystem.RegisterPlugin(
+	vql_subsystem.OverridePlugin(
 		vfilter.GenericListPlugin{
 			PluginName: "register_run_count",
 			Function: func(
@@ -323,8 +351,76 @@ func (self *ServerMonitoringTestSuite) TestQueriesAreCancelled() {
 	})
 }
 
+// Concurrent updates must not orphan running queries: every query
+// that is started must be cancellable by a later update.
+func (self *ServerMonitoringTestSuite) TestConcurrentUpdatesDoNotLeakQueries() {
+	run_count := int64(0)
+
+	actions.QueryLog.Clear()
+
+	vql_subsystem.OverridePlugin(
+		vfilter.GenericListPlugin{
+			PluginName: "register_run_count",
+			Function: func(
+				ctx context.Context, scope vfilter.Scope,
+				args *ordereddict.Dict) []vfilter.Row {
+
+				atomic.AddInt64(&run_count, 1)
+
+				// Wait here until we get cancelled.
+				<-ctx.Done()
+				atomic.AddInt64(&run_count, -1)
+
+				return nil
+			},
+		})
+
+	event_table, err := services.GetServerEventManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Hammer the table from several updaters, alternating between
+	// two artifact sets so every update really reloads the table.
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			for j := 0; j < 10; j++ {
+				name := "WaitForCancel"
+				if (i+j)%2 == 0 {
+					name = "WaitForCancel2"
+				}
+				err := event_table.Update(self.Ctx,
+					self.ConfigObj, "",
+					&flows_proto.ArtifactCollectorArgs{
+						Artifacts: []string{name},
+					})
+				assert.NoError(self.T(), err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Now install an empty table - every started query must quit. If
+	// an update overwrote the cancel function of a concurrent update,
+	// the orphaned queries can never be cancelled and run_count stays
+	// above zero.
+	err = event_table.Update(self.Ctx,
+		self.ConfigObj, "",
+		&flows_proto.ArtifactCollectorArgs{
+			Artifacts: []string{},
+			Specs:     []*flows_proto.ArtifactSpec{},
+		})
+	assert.NoError(self.T(), err)
+
+	vtesting.WaitUntil(10*time.Second, self.T(), func() bool {
+		return atomic.LoadInt64(&run_count) == 0
+	})
+}
+
 func (self *ServerMonitoringTestSuite) TestUpdateWhenArtifactModified() {
-	tempdir, err := ioutil.TempDir("", "server_monitoring_test")
+	tempdir, err := tempfile.TempDir("server_monitoring_test")
 	assert.NoError(self.T(), err)
 
 	defer os.RemoveAll(tempdir)
@@ -402,6 +498,123 @@ sources:
 	})
 }
 
+// Test that modifying artifacts quickly results in only one event
+// table restart.
+func (self *ServerMonitoringTestSuite) TestUpdateDebounceWhenArtifactModified() {
+	run_count := int64(0)
+
+	vql_subsystem.OverridePlugin(
+		vfilter.GenericListPlugin{
+			PluginName: "register_run_count",
+			Function: func(
+				ctx context.Context, scope vfilter.Scope,
+				args *ordereddict.Dict) []vfilter.Row {
+
+				atomic.AddInt64(&run_count, 1)
+
+				return nil
+			},
+		})
+
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	set_artifact := func(i int) {
+		_, err = manager.SetArtifactFile(self.Ctx, self.ConfigObj,
+			utils.GetSuperuserName(self.ConfigObj), fmt.Sprintf(`
+name: TestArtifactCount
+type: SERVER_EVENT
+sources:
+- query: |
+    SELECT * FROM register_run_count()
+    WHERE log(message="Step %%v!", dedup=-1, args=%d)
+`, i), "")
+
+		assert.NoError(self.T(), err)
+	}
+
+	set_artifact(0)
+
+	// Install a table with a an artifact that uses the plugin.
+	event_table, err := services.GetServerEventManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	err = event_table.Update(self.Ctx,
+		self.ConfigObj, "",
+		&flows_proto.ArtifactCollectorArgs{
+			Artifacts: []string{"TestArtifactCount"},
+			Specs:     []*flows_proto.ArtifactSpec{},
+		})
+	assert.NoError(self.T(), err)
+
+	// Wait here until the query is installed.
+	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
+		return atomic.LoadInt64(&run_count) == 1
+	})
+
+	// Add the new custom artifacts to the repository many times
+	for i := 0; i < 5; i++ {
+		set_artifact(i)
+	}
+
+	// Wait for the debounce to fire.
+	time.Sleep(time.Second)
+
+	// Overall we should run the query only one more time as all the
+	// others were debounced.
+	assert.Equal(self.T(), int64(2), atomic.LoadInt64(&run_count))
+}
+
+// Make sure watch monitoring can follow server event streams.
+func (self *ServerMonitoringTestSuite) TestWatchMonitoring() {
+	repository := self.LoadArtifacts(`
+name: Test.Events
+type: SERVER_EVENT
+sources:
+- query: SELECT * FROM clock()
+`)
+
+	event_table, err := services.GetServerEventManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Start collecting the events
+	err = event_table.Update(self.Ctx,
+		self.ConfigObj, utils.GetSuperuserName(self.ConfigObj),
+		&flows_proto.ArtifactCollectorArgs{
+			Artifacts: []string{"Test.Events"},
+		})
+	assert.NoError(self.T(), err)
+
+	// Call the watch_monitoring plugin to ensure we can see them.
+	builder := services.ScopeBuilder{
+		Config:     self.ConfigObj,
+		ACLManager: acl_managers.NullACLManager{},
+		Repository: repository,
+		Logger: logging.NewPlainLogger(
+			self.ConfigObj, &logging.FrontendComponent),
+		Env: ordereddict.NewDict(),
+	}
+
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+	scope := manager.BuildScope(builder)
+	defer scope.Close()
+
+	subctx, cancel := context.WithTimeout(self.Ctx, 5*time.Second)
+	defer cancel()
+
+	var rows []vfilter.Row
+	for row := range (&flows.WatchMonitoringPlugin{}).Call(
+		subctx, scope, ordereddict.NewDict().
+			Set("artifact", "Test.Events")) {
+
+		// We only need one event
+		rows = append(rows, row)
+		break
+	}
+	assert.True(self.T(), len(rows) > 0)
+}
+
 func TestServerMonitoring(t *testing.T) {
 	suite.Run(t, &ServerMonitoringTestSuite{})
 }
@@ -413,7 +626,7 @@ func readAll(filename string) string {
 	}
 	defer fd.Close()
 
-	data, err := ioutil.ReadAll(fd)
+	data, err := io.ReadAll(fd)
 	if err != nil {
 		return ""
 	}

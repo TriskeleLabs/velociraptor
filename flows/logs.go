@@ -72,7 +72,8 @@ func writeLogMessages(
 	}
 	defer rs_writer.Close()
 
-	rs_writer.SetStartRow(int64(msg.Id))
+	// Always write the log messages even if they are retransmitted.
+	_ = rs_writer.SetStartRow(int64(msg.Id))
 
 	// The JSON payload from the client.
 	payload := artifacts.DeobfuscateString(config_obj, msg.Jsonl)
@@ -82,7 +83,10 @@ func writeLogMessages(
 		time.Now().UTC().Unix()))
 
 	collection_context.TotalLogs += uint64(msg.NumberOfRows)
-	rs_writer.WriteJSONL([]byte(payload), uint64(msg.NumberOfRows))
+	err = rs_writer.WriteJSONL([]byte(payload), uint64(msg.NumberOfRows))
+	if err != nil {
+		return err
+	}
 
 	if collection_context.State != flows_proto.
 		ArtifactCollectorContext_ERROR {
@@ -162,8 +166,8 @@ func flushContextLogs(
 		}
 
 		collection_context.TotalLogs++
-		rs_writer.WriteJSONL([]byte(json.Format(
-			"{\"_ts\":%d,\"client_time\":%d,\"level\":%q,\"message\":%q}\n",
+		err = rs_writer.WriteJSONL([]byte(json.Format(
+			`{"_ts":%d,"client_time":%d,"level":%q,"message":%q}`,
 			int(time.Now().Unix()),
 			int64(row.Timestamp)/1000000,
 			row.Level,
@@ -172,5 +176,5 @@ func flushContextLogs(
 
 	// Clear the logs from the flow object.
 	collection_context.Logs = nil
-	return nil
+	return err
 }

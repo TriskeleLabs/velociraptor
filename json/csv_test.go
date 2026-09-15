@@ -2,21 +2,40 @@ package json_test
 
 import (
 	"bytes"
+	stdjson "encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
+
+// An empty object with a non-nil (but empty) extra_data Dict used to
+// serialize to a bare "}" which is not valid JSON. It should round
+// trip as "{}".
+func TestConvertJSONLEmptyObject(t *testing.T) {
+	json_in := make(chan []byte, 1)
+	json_in <- []byte("{}\n")
+	close(json_in)
+
+	out := &bytes.Buffer{}
+	json.ConvertJSONL(json_in, out, nil, ordereddict.NewDict())
+
+	assert.Equal(t, "{}\n", out.String())
+
+	var decoded map[string]interface{}
+	err := stdjson.Unmarshal(bytes.TrimSpace(out.Bytes()), &decoded)
+	assert.NoError(t, err)
+}
 
 type CSVUtilsTestSuite struct {
 	test_utils.TestSuite
@@ -26,7 +45,7 @@ type CSVUtilsTestSuite struct {
 func (self *CSVUtilsTestSuite) TestCSVUtils() {
 	path_manager := artifacts.NewArtifactPathManagerWithMode(
 		self.ConfigObj, self.client_id, self.flow_id,
-		"Artifact", paths.MODE_CLIENT)
+		"Artifact", artifact_modes.MODE_CLIENT)
 
 	file_store_factory := file_store.GetFileStore(self.ConfigObj)
 	writer, err := result_sets.NewResultSetWriter(file_store_factory,
@@ -59,13 +78,13 @@ func (self *CSVUtilsTestSuite) TestCSVUtils() {
 	json.ConvertJSONL(json_chan, json_buffer, csv_buffer,
 		ordereddict.NewDict().
 			Set("ClientId", "C.123").
-			Set("HuntId", "H.123"))
+			Set("HuntId", "H.123").
+			Set("NotFormula", "=1+1"))
 
 	golden := fmt.Sprintf("JSONL:\n------\n%v\nCSV:\n------\n%v\n",
-		string(json_buffer.Bytes()), string(csv_buffer.Bytes()))
+		json_buffer.String(), csv_buffer.String())
 
 	goldie.Assert(self.T(), "TestCSVUtils", []byte(golden))
-
 }
 
 func TestCSVUtils(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/networking"
@@ -41,7 +42,7 @@ type WebDAVUploadFunction struct{}
 func (self *WebDAVUploadFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("upload_webdav", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "upload_webdav", args)()
 
 	arg := &WebDAVUploadArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -58,7 +59,7 @@ func (self *WebDAVUploadFunction) Call(ctx context.Context,
 		arg.UserAgent = constants.USER_AGENT
 	}
 
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	err = vql_subsystem.CheckAccess(scope, acls.NETWORK)
 	if err != nil {
 		scope.Log("upload_webdav: %s", err)
 		return vfilter.Null{}
@@ -111,7 +112,7 @@ func (self *WebDAVUploadFunction) Call(ctx context.Context,
 
 func upload_webdav(ctx context.Context, scope vfilter.Scope,
 	reader io.Reader,
-	contentLength int64,
+	size int64,
 	name string,
 	webdavUrl string,
 	basicAuthUser string,
@@ -142,13 +143,16 @@ func upload_webdav(ctx context.Context, scope vfilter.Scope,
 	}
 
 	if skipVerify {
-		if err := networking.EnableSkipVerifyHttp(client, config_obj); err != nil {
+		err := networking.EnableSkipVerifyHttp(client, config_obj)
+		if err != nil {
 			return nil, err
 		}
 	}
 
+	count_reader := utils.NewCountingReader(reader)
+
 	req, err := http.NewRequestWithContext(ctx,
-		http.MethodPut, parsedUrl.String(), reader)
+		http.MethodPut, parsedUrl.String(), count_reader)
 	if err != nil {
 		return &uploads.UploadResponse{
 			Error: err.Error(),
@@ -156,7 +160,6 @@ func upload_webdav(ctx context.Context, scope vfilter.Scope,
 	}
 
 	req.Header.Set("User-Agent", userAgent)
-	req.ContentLength = contentLength
 	req.SetBasicAuth(basicAuthUser, basicAuthPassword)
 
 	resp, err := client.Do(req)
@@ -173,18 +176,21 @@ func upload_webdav(ctx context.Context, scope vfilter.Scope,
 	scope.Log("upload_webdav: HTTP status %v", resp.StatusCode)
 
 	return &uploads.UploadResponse{
-		Path: name,
-		Size: uint64(contentLength),
+		Path:       name,
+		Size:       uint64(size),
+		StoredSize: uint64(count_reader.Count),
 	}, nil
 }
 
 func (self WebDAVUploadFunction) Info(
 	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:     "upload_webdav",
-		Doc:      "Upload files to a WebDAV server.",
-		ArgType:  type_map.AddType(scope, &WebDAVUploadArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "upload_webdav",
+		Doc:     "Upload files to a WebDAV server.",
+		ArgType: type_map.AddType(scope, &WebDAVUploadArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ, acls.NETWORK).Build(),
+		Version: 2,
 	}
 }
 

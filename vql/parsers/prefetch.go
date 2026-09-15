@@ -9,7 +9,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -17,7 +16,7 @@ import (
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -48,6 +47,8 @@ func (self _PrefetchPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "prefetch", args)()
+		defer utils.RecoverVQL(scope)
 
 		arg := &_PrefetchPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -59,12 +60,6 @@ func (self _PrefetchPlugin) Call(
 		for _, filename := range arg.Filenames {
 			func() {
 				defer utils.RecoverVQL(scope)
-
-				err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-				if err != nil {
-					scope.Log("prefetch: %s", err)
-					return
-				}
 
 				accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 				if err != nil {
@@ -111,7 +106,7 @@ func (self _PrefetchPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name:     "prefetch",
 		Doc:      "Parses a prefetch file.",
 		ArgType:  type_map.AddType(scope, &_PrefetchPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/alecthomas/participle/v2"
+	"www.velocidex.com/golang/velociraptor/utils/yaml"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/reformat"
@@ -13,63 +16,88 @@ import (
 type mutation struct {
 	original_start_line, original_end_line int
 	replacement                            []string
+	err                                    error
 }
 
-func vqlNode(node *yaml.Node) bool {
-	switch node.Value {
-	case "query", "export", "precondition":
-		return true
+var VQLPaths = []string{
+	"sources.[].query",
+	"export",
+	"precondition",
+	"sources.[].precondition",
+}
+
+func getAllMutations(root *yaml.Node) (res []mutation, err error) {
+	var nodes []yaml.NodeContext
+
+	for _, p := range VQLPaths {
+		yaml.GetYamlNodes(root, root, strings.Split(p, "."), &nodes)
 	}
-	return false
-}
 
-func findAllQueries(root *yaml.Node, mu *[]mutation) {
-	for i, c := range root.Content {
-		if vqlNode(c) && len(root.Content) > i {
-			vql_node := root.Content[i+1]
-
-			// We only reformat literal style nodes
-			if vql_node.Style != yaml.LiteralStyle {
-				continue
-			}
-
-			scope := vql_subsystem.MakeScope()
-			reformatted, err := reformat.ReFormatVQL(
-				scope, vql_node.Value, vfilter.DefaultFormatOptions)
-			if err != nil {
-				continue
-			}
-			lines := []string{}
-			for _, l := range strings.Split(reformatted, "\n") {
-				if strings.TrimSpace(l) == "" {
-					continue
-				}
-				lines = append(lines, l)
-			}
-
-			// Indent this block to the start of the previous block
-			indented := []string{}
-			ind := strings.Repeat(" ", c.Column)
-			for _, l := range lines {
-				indented = append(indented, ind+l)
-			}
-			// Add an extra blank space after the VQL block.
-			indented = append(indented, "")
-
-			*mu = append(*mu, mutation{
-				original_start_line: vql_node.Line,
-				original_end_line: vql_node.Line +
-					len(strings.Split(vql_node.Value, "\n")) - 1,
-				replacement: indented,
-			})
+	for _, n := range nodes {
+		// We only reformat literal style nodes
+		if n.Style != yaml.LiteralStyle {
+			continue
 		}
-		findAllQueries(c, mu)
+
+		m, err := reformatNode(n)
+		if err != nil {
+			return nil, err
+		}
+		res = append(res, m)
 	}
+
+	// sort mutations by original_start_line
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].original_start_line < res[j].original_start_line
+	})
+
+	return res, nil
 }
 
-func applyMutations(text string, mu []mutation) string {
+func reformatNode(vql_node yaml.NodeContext) (m mutation, err error) {
+	scope := vql_subsystem.MakeScope()
+	reformatted, err := reformat.ReFormatVQL(
+		scope, vql_node.Value, vfilter.DefaultFormatOptions)
+	if err != nil {
+		line := 0
+		message := err.Error()
+		perr, ok := err.(participle.Error)
+		if ok {
+			line = perr.Position().Line
+			message = perr.Message()
+		}
+		// Error should be reported to the GUI
+		return m, fmt.Errorf("While parsing VQL at line %v: %v",
+			vql_node.Line+line, message)
+	}
+
+	reformatted = strings.TrimSpace(reformatted)
+
+	lines := append([]string{}, strings.Split(reformatted, "\n")...)
+
+	// Indent this block to the start of the previous block
+	indented := []string{}
+	ind := strings.Repeat(" ", vql_node.Parent.Column+1)
+	for _, l := range lines {
+		indented = append(indented, ind+l)
+	}
+
+	// Check if node style is chomping (no final new line)
+	length := len(strings.Split(vql_node.Value, "\n"))
+	if strings.HasSuffix(vql_node.Value, "\n") {
+		length--
+	}
+
+	return mutation{
+		original_start_line: vql_node.Line,
+		original_end_line:   vql_node.Line + length,
+		replacement:         indented,
+	}, nil
+}
+
+func applyMutations(text string, mu []mutation) (string, error) {
 	if len(mu) == 0 {
-		return text
+		return text, nil
 	}
 	lines := strings.Split(text, "\n")
 	result := []string{}
@@ -77,6 +105,10 @@ func applyMutations(text string, mu []mutation) string {
 	current_mu_idx := 0
 
 	for i := 0; i < len(lines); {
+		if current_mu.err != nil {
+			return text, current_mu.err
+		}
+
 		if i < current_mu.original_start_line {
 			result = append(result, lines[i])
 			i++
@@ -85,27 +117,26 @@ func applyMutations(text string, mu []mutation) string {
 
 		if i == current_mu.original_start_line {
 			result = append(result, current_mu.replacement...)
+
 			i = current_mu.original_end_line
+			if current_mu.original_end_line == current_mu.original_start_line {
+				i++
+			}
+
 			if current_mu_idx+1 >= len(mu) {
 				// No more mutations, just copy the rest and return
-				result = append(result, lines[i+1:]...)
-				return strings.Join(result, "\n")
+				result = append(result, lines[i:]...)
+				return strings.Join(result, "\n"), nil
 			}
 			current_mu_idx++
 			current_mu = mu[current_mu_idx]
+			if current_mu.err != nil {
+				return text, current_mu.err
+			}
 		}
 	}
 
-	// Remove lines that consist of only spaces
-	trimmed := make([]string, 0, len(result))
-	for _, i := range result {
-		if len(i) > 0 && len(strings.TrimSpace(i)) == 0 {
-			continue
-		}
-		trimmed = append(trimmed, i)
-	}
-
-	return strings.Join(trimmed, "\n")
+	return strings.Join(result, "\n"), nil
 }
 
 func reformatVQL(in string) (string, error) {
@@ -115,11 +146,16 @@ func reformatVQL(in string) (string, error) {
 		return "", err
 	}
 
-	mutations := []mutation{}
-	findAllQueries(&node, &mutations)
+	if len(node.Content) == 0 {
+		return in, nil
+	}
+	mutations, err := getAllMutations(node.Content[0])
+	if err != nil {
+		return "", err
+	}
 
 	// Now apply the mutations
-	return applyMutations(in, mutations), nil
+	return applyMutations(in, mutations)
 }
 
 func (self *RepositoryManager) ReformatVQL(

@@ -6,6 +6,9 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/oschwald/maxminddb-golang"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -27,12 +30,19 @@ func (self GeoIPFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("geoip", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "geoip", args)()
+	defer utils.RecoverVQL(scope)
 
 	arg := &GeoIPFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("geoip: %v", err)
+		return vfilter.Null{}
+	}
+
+	err = vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_READ)
+	if err != nil {
+		scope.Log("geoip: %s", err)
 		return vfilter.Null{}
 	}
 
@@ -56,8 +66,13 @@ func (self GeoIPFunction) Call(
 		}
 		// Attach the database to the root destructor since it
 		// does not need to change very often.
-		vql_subsystem.GetRootScope(scope).
-			AddDestructor(func() { db.Close() })
+		err := vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+			db.Close()
+		})
+		if err != nil {
+			scope.Log("geoip: %v", err)
+		}
+
 		vql_subsystem.CacheSet(scope, key, db)
 
 	case *maxminddb.Reader:
@@ -88,6 +103,8 @@ func (self GeoIPFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *
 		Name:    "geoip",
 		Doc:     "Lookup an IP Address using the MaxMind GeoIP database.",
 		ArgType: type_map.AddType(scope, &GeoIPFunctionArgs{}),
+		Metadata: vql.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ).Build(),
 		Version: 1,
 	}
 }

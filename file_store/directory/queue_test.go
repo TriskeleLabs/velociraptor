@@ -3,7 +3,6 @@ package directory_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/config"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/directory"
 	"www.velocidex.com/golang/velociraptor/file_store/memory"
@@ -21,6 +22,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/simple"
@@ -35,7 +37,7 @@ type: SERVER_EVENT
 )
 
 func TestDirectoryQueueManager(t *testing.T) {
-	dir, err := ioutil.TempDir("", "file_store_test")
+	dir, err := tempfile.TempDir("file_store_test")
 	assert.NoError(t, err)
 
 	defer os.RemoveAll(dir) // clean up
@@ -45,10 +47,13 @@ func TestDirectoryQueueManager(t *testing.T) {
 	ConfigObj.Datastore.FilestoreDirectory = dir
 	ConfigObj.Datastore.Location = dir
 
-	file_store := memory.NewMemoryFileStore(ConfigObj)
-	manager := directory.NewDirectoryQueueManager(ConfigObj, file_store)
+	file_store_factory := memory.NewMemoryFileStore(ConfigObj)
+	manager := directory.NewDirectoryQueueManager(ConfigObj, file_store_factory)
+
+	file_store.OverrideFilestoreImplementation(ConfigObj, file_store_factory)
+
 	suite.Run(t, tests.NewQueueManagerTestSuite(
-		ConfigObj, manager, file_store))
+		ConfigObj, manager, file_store_factory))
 }
 
 type TestSuite struct {
@@ -60,7 +65,7 @@ type TestSuite struct {
 func (self *TestSuite) SetupTest() {
 	self.TestSuite.SetupTest()
 
-	dir, err := ioutil.TempDir("", "file_store_test")
+	dir, err := tempfile.TempDir("file_store_test")
 	assert.NoError(self.T(), err)
 	self.dir = dir
 
@@ -109,10 +114,12 @@ func (self *TestSuite) TestQueueManager() {
 	// Push some rows without reading - this should write to the
 	// file buffer and not block.
 	for i := 0; i < 10; i++ {
-		err = manager.PushEventRows(path_manager, []*ordereddict.Dict{
-			ordereddict.NewDict().
-				Set("Foo", "Bar"),
-		})
+		err = manager.PushEventRows(
+			path_manager, constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			[]*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Foo", "Bar"),
+			})
 		assert.NoError(self.T(), err)
 	}
 
@@ -190,6 +197,7 @@ func (self *TestSuite) TestQueueManagerJsonl() {
 		// For performance critical parts it is more efficient to
 		// build the JSONL manually
 		err = manager.PushEventJsonl(path_manager,
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 			[]byte(fmt.Sprintf("{\"Foo\":%q}\n", "Bar")), 1)
 		assert.NoError(self.T(), err)
 	}

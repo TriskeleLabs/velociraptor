@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"sync"
 
@@ -13,6 +12,7 @@ import (
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
@@ -71,6 +71,16 @@ func (self *SanityChecks) CheckRootOrg(
 		return err
 	}
 
+	err = self.CheckDatastoreSettings(config_obj)
+	if err != nil {
+		return err
+	}
+
+	err = self.CheckSecuritySettings(config_obj)
+	if err != nil {
+		return err
+	}
+
 	err = self.CheckAPISettings(config_obj)
 	if err != nil {
 		return err
@@ -90,13 +100,6 @@ func (self *SanityChecks) CheckRootOrg(
 	if config_obj.Frontend != nil {
 		if config_obj.Frontend.Resources.ExpectedClients == 0 {
 			config_obj.Frontend.Resources.ExpectedClients = 10000
-		}
-
-		// DynDns.Hostname is deprecated, moved to Frontend.Hostname
-		if config_obj.Frontend.Hostname == "" &&
-			config_obj.Frontend.DynDns != nil &&
-			config_obj.Frontend.DynDns.Hostname != "" {
-			config_obj.Frontend.Hostname = config_obj.Frontend.DynDns.Hostname
 		}
 
 		if config_obj.Frontend.CollectionErrorRegex != "" {
@@ -139,11 +142,6 @@ func (self *SanityChecks) Check(
 		return err
 	}
 
-	err = self.createBuiltInSecretDefinitions(ctx, config_obj)
-	if err != nil {
-		return err
-	}
-
 	return checkForServerUpgrade(ctx, config_obj)
 }
 
@@ -151,18 +149,15 @@ func (self *SanityChecks) Check(
 func configServerMetadata(
 	ctx context.Context, config_obj *config_proto.Config) error {
 
-	client_path_manager := paths.NewClientPathManager("server")
+	client_path_manager := paths.NewClientPathManager(
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID)
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {
 		return err
 	}
 
 	result := &api_proto.ClientMetadata{}
-	err = db.GetSubject(config_obj, client_path_manager.Metadata(), result)
-	if errors.Is(err, os.ErrNotExist) {
-		// Metadata not set, start with empty set.
-		err = nil
-	}
+	_ = db.GetSubject(config_obj, client_path_manager.Metadata(), result)
 
 	is_set := func(field string) bool {
 		for _, item := range result.Items {

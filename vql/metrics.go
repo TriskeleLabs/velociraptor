@@ -21,8 +21,7 @@ type PluginMonitorEntry struct {
 	Name     string
 	ArgsFunc func() *ordereddict.Dict
 	Start    time.Time
-
-	id uint64
+	Ctx      context.Context
 }
 
 type PluginMonitor struct {
@@ -38,6 +37,15 @@ func (self *PluginMonitor) report(
 	defer self.mu.Unlock()
 
 	for _, item := range self.entries {
+		ctx_done := ""
+		if item.Ctx != nil {
+			if utils.IsCtxDone(item.Ctx) {
+				ctx_done = "Done"
+			} else {
+				ctx_done = "Running"
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -46,12 +54,14 @@ func (self *PluginMonitor) report(
 			Set("Started", item.Start).
 			Set("Plugin", item.Name).
 			Set("Args", item.ArgsFunc()).
-			Set("Duration", utils.GetTime().Now().Sub(item.Start).String()):
+			Set("Duration", utils.GetTime().Now().Sub(item.Start).String()).
+			Set("Ctx", ctx_done):
 		}
 	}
 }
 
-func (self *PluginMonitor) Register(name string, args *ordereddict.Dict) func() {
+func (self *PluginMonitor) Register(
+	ctx context.Context, name string, args *ordereddict.Dict) func() {
 	id := utils.GetId()
 
 	self.mu.Lock()
@@ -61,6 +71,7 @@ func (self *PluginMonitor) Register(name string, args *ordereddict.Dict) func() 
 		Name:     name,
 		ArgsFunc: renderArgs(args),
 		Start:    utils.GetTime().Now(),
+		Ctx:      ctx,
 	}
 
 	return func() {
@@ -106,16 +117,16 @@ func renderValue(v interface{}) interface{} {
 func renderArgs(args *ordereddict.Dict) func() *ordereddict.Dict {
 	return func() *ordereddict.Dict {
 		result := ordereddict.NewDict()
-		for _, k := range args.Keys() {
-			v, _ := args.Get(k)
-			result.Set(k, renderValue(v))
+		for _, i := range args.Items() {
+			result.Set(i.Key, renderValue(i.Value))
 		}
 		return result
 	}
 }
 
-func RegisterMonitor(name string, args *ordereddict.Dict) func() {
-	return pluginMonitor.Register(name, args)
+func RegisterMonitor(
+	ctx context.Context, name string, args *ordereddict.Dict) func() {
+	return pluginMonitor.Register(ctx, name, args)
 }
 
 func init() {
@@ -124,5 +135,6 @@ func init() {
 		Name:          "Plugin Monitor",
 		Description:   "See currently running VQL plugins",
 		ProfileWriter: pluginMonitor.report,
+		Categories:    []string{"Global", "VQL"},
 	})
 }

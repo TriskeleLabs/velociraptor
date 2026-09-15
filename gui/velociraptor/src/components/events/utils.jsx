@@ -20,12 +20,20 @@ function _ArtifactCollectorArgs_to_label_table(event_table) {
         let artifact_name = spec.artifact;
         let param_dict = _ArtifactParameters2dict(spec.parameters);
         result.specs[artifact_name] = param_dict;
+        if(spec.cpu_limit) {
+            param_dict.cpu_limit = spec.cpu_limit;
+        }
+
         if(spec.max_batch_wait) {
             param_dict.max_batch_wait = spec.max_batch_wait;
         }
 
         if(spec.max_batch_rows) {
             param_dict.max_batch_rows = spec.max_batch_rows;
+        }
+
+        if(spec.timeout) {
+            param_dict.timeout = spec.timeout;
         }
     });
 
@@ -60,7 +68,7 @@ function _ArtifactCollectorArgs_to_label_table(event_table) {
         },
    }
 
-   The special parameters max_batch_wait and max_batch_rows are
+   The special parameters cpu_limit, max_batch_wait and max_batch_rows are
    extracted into the spec protobuf from the general parameter object.
 */
 function proto2tables(table, cb) {
@@ -131,12 +139,23 @@ function _label_table2ArtifactCollectorArgs(label_table) {
                     parameters: parameters};
 
         _.each(v, (v, k)=>{
+            if(k==="cpu_limit") {
+                spec.cpu_limit = parseInt(v);
+                return;
+            }
+
             if(k==="max_batch_wait") {
                 spec.max_batch_wait = parseInt(v);
                 return;
             }
+
             if(k==="max_batch_rows") {
                 spec.max_batch_rows = parseInt(v);
+                return;
+            }
+
+            if(k==="timeout") {
+                spec.timeout = parseInt(v);
                 return;
             }
 

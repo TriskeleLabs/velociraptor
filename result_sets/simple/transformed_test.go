@@ -5,13 +5,13 @@ import (
 	"regexp"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/result_sets/simple"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 func (self *ResultSetTestSuite) TestTransformed() {
@@ -48,6 +48,7 @@ func (self *ResultSetTestSuite) TestTransformed() {
 	// Read the rows back out from the start
 	rows := simple.GetAllResults(rs_reader)
 	assert.Equal(self.T(), rs_reader.TotalRows(), int64(50))
+	assert.Equal(self.T(), len(rows), 50)
 
 	golden := ordereddict.NewDict()
 

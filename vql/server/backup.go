@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"regexp"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
@@ -26,6 +27,7 @@ func (self BackupPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "backup", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
 		if err != nil {
@@ -80,10 +82,17 @@ func (self BackupPlugin) Call(
 func (self BackupPlugin) Info(scope vfilter.Scope,
 	type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:    "backup",
-		Doc:     "Generates a backup file.",
-		ArgType: type_map.AddType(scope, &BackupPluginArgs{}),
+		Name:     "backup",
+		Doc:      "Generates a backup file.",
+		ArgType:  type_map.AddType(scope, &BackupPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
 	}
+}
+
+type RestoreBackupPluginArgs struct {
+	Name      string `vfilter:"required,field=name,doc=The name of the backup file."`
+	Prefix    string `vfilter:"optional,field=prefix,doc=Restore the backup from under this prefix in the zip file (defaults to org id)."`
+	Providers string `vfilter:"optional,field=providers,doc=If provided only restore providers matching this regex."`
 }
 
 type RestoreBackupPlugin struct{}
@@ -96,6 +105,7 @@ func (self RestoreBackupPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "backup_restore", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
 		if err != nil {
@@ -103,7 +113,7 @@ func (self RestoreBackupPlugin) Call(
 			return
 		}
 
-		arg := &BackupPluginArgs{}
+		arg := &RestoreBackupPluginArgs{}
 		err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("backup_restore: %v", err)
@@ -129,7 +139,20 @@ func (self RestoreBackupPlugin) Call(
 		}
 
 		path_spec := paths.NewBackupPathManager().CustomBackup(arg.Name)
-		stats, err := backups.RestoreBackup(path_spec)
+		opts := services.BackupRestoreOptions{
+			Prefix: arg.Prefix,
+		}
+
+		if arg.Providers != "" {
+			opts.ProviderRegex, err = regexp.Compile("(?i)" + arg.Providers)
+			if err != nil {
+				scope.Log(
+					"backup_restore: Providers regex expression invalid: %v", err)
+				return
+			}
+		}
+
+		stats, err := backups.RestoreBackup(path_spec, opts)
 		if err != nil {
 			scope.Log("backup_restore: %v", err)
 			return
@@ -149,8 +172,10 @@ func (self RestoreBackupPlugin) Call(
 
 func transformStat(s services.BackupStat) *ordereddict.Dict {
 	result := ordereddict.NewDict().
+		Set("OrgId", s.OrgId).
 		Set("Name", s.Name).
 		Set("Error", "").
+		Set("Warnings", s.Warnings).
 		Set("Message", s.Message)
 
 	if s.Error != nil {
@@ -165,7 +190,10 @@ func (self RestoreBackupPlugin) Info(scope vfilter.Scope,
 	return &vfilter.PluginInfo{
 		Name:    "backup_restore",
 		Doc:     "Restore state from a backup file.",
-		ArgType: type_map.AddType(scope, &BackupPluginArgs{}),
+		ArgType: type_map.AddType(scope, &RestoreBackupPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.SERVER_ADMIN).Build(),
+		Version: 2,
 	}
 }
 

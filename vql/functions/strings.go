@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -39,7 +39,7 @@ func (self *StripFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("strip", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "strip", args)()
 
 	arg := &StripArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -69,6 +69,7 @@ func (self StripFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *
 		Name:    "strip",
 		Doc:     "Strip a prefix or suffix from a string.",
 		ArgType: type_map.AddType(scope, &StripArgs{}),
+		Version: 2,
 	}
 }
 
@@ -84,10 +85,10 @@ func (self *SubStrFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("substr", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "substr", args)()
 
 	arg := &SubStrArgs{}
-	err := vfilter.ExtractArgs(scope, args, arg)
+	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("substr: %s", err.Error())
 		return nil

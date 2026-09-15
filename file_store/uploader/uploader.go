@@ -16,6 +16,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -37,7 +38,7 @@ func (self *FileStoreUploader) Upload(
 	ctime time.Time,
 	btime time.Time,
 	mode os.FileMode,
-	reader io.Reader) (
+	reader io.ReadSeeker) (
 	*uploads.UploadResponse, error) {
 
 	if !mode.IsRegular() {
@@ -56,7 +57,9 @@ func (self *FileStoreUploader) Upload(
 
 	output_path := self.root_path.AddUnsafeChild(accessor).
 		AddUnsafeChild(store_as_name.Components...)
-	out_fd, err := self.file_store.WriteFile(output_path)
+	out_fd, err := self.file_store.WriteFileWithCompletion(
+		output_path, utils.SyncCompleter)
+
 	if err != nil {
 		scope.Log("Unable to open file %s: %v",
 			store_as_name.String(), err)
@@ -84,9 +87,14 @@ loop:
 
 		default:
 			n, err := reader.Read(buf)
-			if n == 0 || err == io.EOF {
+			if err != nil && err != io.EOF {
 				break loop
 			}
+
+			if n == 0 {
+				break loop
+			}
+
 			data := buf[:n]
 
 			_, err = out_fd.Write(data)

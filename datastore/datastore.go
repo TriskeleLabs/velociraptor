@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -80,7 +80,7 @@ type DataStore interface {
 		message proto.Message) error
 
 	// Writes the data asynchronously and fires the completion
-	// callback when the data hits the disk and will become visibile
+	// callback when the data hits the disk and will become visible
 	// to other nodes this may be a long time in the future.
 	SetSubjectWithCompletion(
 		config_obj *config_proto.Config,
@@ -107,18 +107,20 @@ type DataStore interface {
 
 	// Called to close all db handles etc. Not thread safe.
 	Close()
+
+	Healthy() error
 }
 
 func GetDB(config_obj *config_proto.Config) (DataStore, error) {
 	ds_mu.Lock()
 	defer ds_mu.Unlock()
 
-	if g_impl != nil {
-		return g_impl, nil
-	}
-
 	if config_obj.Datastore == nil {
 		return nil, errors.New("no datastore configured")
+	}
+
+	if g_impl != nil {
+		return g_impl, nil
 	}
 
 	implementation, err := GetImplementationName(config_obj)

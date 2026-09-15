@@ -15,7 +15,8 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 
 import Modal from 'react-bootstrap/Modal';
 import T from '../i8n/i8n.jsx';
-import BootstrapTable from 'react-bootstrap-table-next';
+import Accordion from 'react-bootstrap/Accordion';
+
 
 class ResourceControl extends React.Component {
     static propTypes = {
@@ -40,12 +41,21 @@ class ResourceControl extends React.Component {
         let params = this.props.parameters[this.props.artifact] || {};
         let max_batch_wait = params.max_batch_wait;
         let max_batch_rows = params.max_batch_rows;
+        let cpu_limit = params.cpu_limit;
+        let timeout = params.timeout;
+
         let params_batch_wait = {validating_regex: "\\d+",
                                  description: "Default",
                                  name: "max_batch_wait"};
         let params_batch_rows = {validating_regex: "\\d+",
                                  description: "Default",
                                  name: "max_batch_rows"};
+        let params_cpu_limit = {validating_regex: "\\d+",
+                                description: "100%",
+                                name: "cpu_limit"};
+        let params_timeout = {validating_regex: "\\d+",
+                              description: "100%",
+                              name: "timeout"};
 
         return (
             <Form.Group as={Row}>
@@ -53,6 +63,11 @@ class ResourceControl extends React.Component {
                 {T("Configuration")}
               </Form.Label>
               <Col sm="8">
+                <VeloForm param={params_cpu_limit}
+                          value={cpu_limit}
+                          setValue={x=>this.props.setValue("cpu_limit", x)}
+                />
+
                 <VeloForm param={params_batch_wait}
                           value={max_batch_wait}
                           setValue={x=>this.props.setValue("max_batch_wait", x)}
@@ -62,6 +77,11 @@ class ResourceControl extends React.Component {
                           value={max_batch_rows}
                           setValue={x=>this.props.setValue("max_batch_rows", x)}
                 />
+                <VeloForm param={params_timeout}
+                          value={timeout}
+                          setValue={x=>this.props.setValue("timeout", x)}
+                />
+
               </Col>
             </Form.Group>
         );
@@ -157,14 +177,12 @@ const remove_artifact = (artifacts, name) => {
     return _.filter(artifacts, (x) => x.name !== name);
 };
 
-export default class NewCollectionConfigParameters extends React.Component {
+export class NewCollectionConfigParametersForm extends React.Component {
     static propTypes = {
-        request: PropTypes.object,
         artifacts: PropTypes.array,
-        setArtifacts: PropTypes.func.isRequired,
+        setArtifacts: PropTypes.func,
         parameters: PropTypes.object,
         setParameters: PropTypes.func.isRequired,
-        paginator: PropTypes.object,
         configureResourceControl: PropTypes.bool,
     };
 
@@ -246,66 +264,72 @@ export default class NewCollectionConfigParameters extends React.Component {
     }
 
     render() {
-        const expandRow = {
-            expandHeaderColumnRenderer: ({ isAnyExpands }) => {
-                if (isAnyExpands) {
-                    return <b>-</b>;
-                }
-                return <b>+</b>;
-            },
-            expandColumnRenderer: ({ expanded, rowKey }) => {
-                if (expanded) {
-                    return (
-                        <b key={rowKey}>-</b>
-                    );
-                }
-                return (<ButtonGroup>
-                          <ToolTip tooltip={T("Configure")}>
-                            <Button variant="outline-default">
-                              <FontAwesomeIcon icon="wrench"/>
-                            </Button>
-                          </ToolTip>
-                          <ToolTip tooltip={T("Remove")}>
-                            <Button variant="outline-default"
-                                    onClick={
-                                        () => this.props.setArtifacts(remove_artifact(
-                                            this.props.artifacts, rowKey))} >
-                              <FontAwesomeIcon icon="trash"/>
-                            </Button>
-                          </ToolTip>
-                        </ButtonGroup>
-                );
-            },
-            showExpandColumn: true,
-            renderer: this.artifactParameterRenderer,
-        };
-
         return (
             <>
-              <Modal.Header closeButton>
-                <Modal.Title>{ T(this.props.paginator.title) }</Modal.Title>
-              </Modal.Header>
-
-              <Modal.Body className="new-collection-parameter-page selectable">
-
-                { !_.isEmpty(this.props.artifacts) ?
-                  <BootstrapTable
-                    keyField="name"
-                    expandRow={ expandRow }
-                    columns={[{dataField: "name", text: T("Artifact")},
-                              {dataField: "parameter", text: "", hidden: true}]}
-                    data={this.props.artifacts} /> :
-                 <div className="no-content">
-                   {T("No artifacts configured. Please add some artifacts to collect")}
-                 </div>
-                }
-              </Modal.Body>
-              <Modal.Footer>
-                { this.props.paginator.makePaginator({
-                    props: this.props,
-                }) }
-              </Modal.Footer>
+              <Accordion>
+                { _.map(this.props.artifacts, (x, idx)=>{
+                    return <Accordion.Item eventKey={idx} key={idx}>
+                                   <Accordion.Header>
+                                     <ButtonGroup>
+                                       <ToolTip tooltip={T("Configure")}>
+                                         <div className="accordion-icon"
+                                              tabIndex={idx}
+                                              role="button">
+                                           <FontAwesomeIcon icon="wrench"/>
+                                         </div>
+                                       </ToolTip>
+                                       { this.props.setArtifacts &&
+                                         <ToolTip tooltip={T("Remove")}>
+                                           <div className="accordion-icon"
+                                                role="button" tabIndex={idx}
+                                                onClick={
+                                                    () => this.props.setArtifacts(
+                                                        remove_artifact(
+                                                            this.props.artifacts,
+                                                            x.name))} >
+                                             <FontAwesomeIcon icon="trash"/>
+                                           </div>
+                                         </ToolTip>
+                                       }
+                                     </ButtonGroup>
+                                     {x.name}
+                                   </Accordion.Header>
+                                   <Accordion.Body>
+                                     {this.artifactParameterRenderer(x)}
+                                   </Accordion.Body>
+                                 </Accordion.Item>;
+                })}
+              </Accordion>
             </>
         );
     };
+}
+
+
+export default class NewCollectionConfigParameters extends NewCollectionConfigParametersForm {
+    static propTypes = {
+        artifacts: PropTypes.array,
+        setArtifacts: PropTypes.func,
+        parameters: PropTypes.object,
+        setParameters: PropTypes.func.isRequired,
+        paginator: PropTypes.object,
+        configureResourceControl: PropTypes.bool,
+    };
+
+    render() {
+        return <>
+                 <Modal.Header closeButton>
+                   <Modal.Title>{ T(this.props.paginator.title) }</Modal.Title>
+                 </Modal.Header>
+                 <Modal.Body className="new-collection-parameter-page selectable">
+                   { super.render() }
+                 </Modal.Body>
+                 <Modal.Footer>
+                   { this.props.paginator.makePaginator({
+                       props: this.props,
+                   }) }
+                 </Modal.Footer>
+               </>;
+
+    }
 }

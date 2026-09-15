@@ -30,7 +30,7 @@ func (self *TraceFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("trace", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "trace", args)()
 
 	buf := new(bytes.Buffer)
 	lf := []byte("\n")
@@ -38,12 +38,23 @@ func (self *TraceFunction) Call(ctx context.Context,
 
 	// Cap the size of these dumps because the important info is near
 	// the top.
-	storeFile(zipfile, "allocs", 200000)
-	storeFile(zipfile, "goroutine", 200000)
+	err := storeFile(zipfile, "allocs", 200000)
+	if err != nil {
+		scope.Log("trace: %v", err)
+	}
+
+	err = storeFile(zipfile, "goroutine", 200000)
+	if err != nil {
+		scope.Log("trace: %v", err)
+	}
+
 	fd, err := zipfile.Create("logs.txt")
 	if err == nil {
 		for _, line := range logging.GetMemoryLogs() {
-			fd.Write([]byte(line))
+			_, err = fd.Write([]byte(line))
+			if err != nil {
+				scope.Log("trace: %v", err)
+			}
 		}
 	}
 
@@ -56,8 +67,8 @@ func (self *TraceFunction) Call(ctx context.Context,
 				continue
 			}
 
-			fd.Write(serialized)
-			fd.Write(lf)
+			_, _ = fd.Write(serialized)
+			_, _ = fd.Write(lf)
 		}
 	}
 
@@ -72,8 +83,8 @@ func (self *TraceFunction) Call(ctx context.Context,
 				if err != nil {
 					continue
 				}
-				fd.Write(serialized)
-				fd.Write(lf)
+				_, _ = fd.Write(serialized)
+				_, _ = fd.Write(lf)
 			}
 		}
 	}
@@ -125,6 +136,16 @@ func getMetrics() ([]*ordereddict.Dict, error) {
 
 			} else if m.Counter != nil {
 				item.Set("value", int64(*m.Counter.Value))
+				if len(m.Label) > 0 {
+					labels := ordereddict.NewDict()
+					for _, l := range m.Label {
+						if l.Name != nil && l.Value != nil {
+							labels.Set(*l.Name, l.Value)
+						}
+					}
+					item.Set("label", labels)
+				}
+
 			} else if m.Histogram != nil {
 				// Histograms are buckets so we send a dict.
 				result := ordereddict.NewDict()

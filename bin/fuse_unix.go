@@ -27,27 +27,36 @@ var (
 	fuse_directory = fuse_zip_command.Arg("directory", "A directory to mount on").
 			Required().String()
 
-	fuse_tmp_dir = fuse_zip_command.Flag("tmpdir",
-		"A temporary directory to use (if not specified we use our own tempdir)").
-		String()
-
-	fuse_zip_accessor = fuse_command.Flag("accessor", "The accessor to use (default container)").
+	fuse_zip_accessor = fuse_command.Flag("accessor", "The accessor to use (default collector)").
 				Default("collector").String()
 
-	fuse_zip_prefix = fuse_command.Flag("prefix", "Export all files below this directory in the zip file").
-			Default("/").String()
+	fuse_zip_prefix = fuse_command.Flag("prefix",
+		"Export all files below this directory in the zip file").
+		Default("/").String()
 
 	fuse_files = fuse_zip_command.Arg("files", "list of zip files to mount").
 			Required().Strings()
 
-	fuse_options_map_device_names_to_letters = fuse_zip_command.Flag("map_device_names_to_letters", "Convert raw device names to drive letters").
-							Bool()
-	fuse_options_strip_colons_on_drive_letters = fuse_zip_command.Flag("strip_colons_on_drive_letters", "Remove the : on drive letters").
-							Bool()
-	fuse_options_unix_path_escaping = fuse_zip_command.Flag("unix_path_escaping", "If set we escape only few characters in file names otherwise escape windows compatible chars").
-					Bool()
-	fuse_options_emulate_timestamps = fuse_zip_command.Flag("emulate_timestamps", "If set emulate timestamps for common artifacts like Windows.KapeFiles.Targets.").
-					Bool()
+	fuse_options_map_device_names_to_letters = fuse_zip_command.Flag(
+		"map_device_names_to_letters", "Convert raw device names to drive letters").
+		Default("true").Bool()
+
+	fuse_options_strip_colons_on_drive_letters = fuse_zip_command.Flag(
+		"strip_colons_on_drive_letters", "Remove the : on drive letters").
+		Default("true").Bool()
+
+	fuse_options_unix_path_escaping = fuse_zip_command.Flag("unix_path_escaping",
+		"If set we escape only few characters in file names otherwise escape windows compatible chars").
+		Bool()
+
+	fuse_options_emulate_timestamps = fuse_zip_command.Flag("emulate_timestamps",
+		"If set emulate timestamps for common artifacts like Windows.Triage.Targets.").
+		Default("true").Bool()
+
+	fuse_options_merge_accessors = fuse_zip_command.Flag("merge_accessors",
+		"If set merge all the accessors into the same "+
+			"directory (implied --map_device_names_to_letters).").
+		Default("true").Bool()
 )
 
 func doFuseZip() error {
@@ -57,7 +66,7 @@ func doFuseZip() error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	config_obj := &config_proto.Config{}
@@ -65,11 +74,10 @@ func doFuseZip() error {
 
 	config_obj.Services = services.GenericToolServices()
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	logger := &LogWriter{config_obj: sm.Config}
 	builder := services.ScopeBuilder{
@@ -100,22 +108,26 @@ func doFuseZip() error {
 			return fmt.Errorf("Parsing %v with accessor %v: %v",
 				filename, *fuse_zip_accessor, err)
 		}
-		ospath.SetPathSpec(
+		err = ospath.SetPathSpec(
 			&accessors.PathSpec{
 				DelegatePath: filename,
 				Path:         *fuse_zip_prefix,
 			})
-
+		if err != nil {
+			return err
+		}
 		paths = append(paths, ospath)
 	}
 
 	accessor_fs, err := fuse.NewAccessorFuseFS(
 		ctx, config_obj, accessor,
 		&fuse.Options{
-			MapDeviceNamesToLetters:    *fuse_options_map_device_names_to_letters,
+			MapDeviceNamesToLetters: *fuse_options_map_device_names_to_letters ||
+				*fuse_options_merge_accessors,
 			MapDriveNamesToLetters:     *fuse_options_strip_colons_on_drive_letters,
 			UnixCompatiblePathEscaping: *fuse_options_unix_path_escaping,
 			EmulateTimestamps:          *fuse_options_emulate_timestamps,
+			MergeAllAccessors:          *fuse_options_merge_accessors,
 		}, paths)
 	if err != nil {
 		return err
@@ -140,7 +152,7 @@ func doFuseZip() error {
 
 	<-ctx.Done()
 
-	return nil
+	return logger.Error
 }
 
 func init() {

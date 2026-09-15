@@ -1,5 +1,5 @@
-//go:build windows && cgo
-// +build windows,cgo
+//go:build windows && cgo && amd64
+// +build windows,cgo,amd64
 
 package etw
 
@@ -45,7 +45,7 @@ func (self *EventTraceWatcherService) Register(
 	scope vfilter.Scope,
 	session_name string, options ETWOptions,
 	wGuid windows.GUID) (closer func(), output_chan chan vfilter.Row, err error) {
-	session, err := self.SessionContext(session_name, scope)
+	session, err := self.SessionContext(session_name, scope, options)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -54,16 +54,16 @@ func (self *EventTraceWatcherService) Register(
 }
 
 func (self *EventTraceWatcherService) SessionContext(
-	name string, scope vfilter.Scope) (*SessionContext, error) {
+	name string, scope vfilter.Scope, options ETWOptions) (
+	*SessionContext, error) {
+
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
 	sessionContext, pres := self.sessions[name]
 	if !pres {
-		sessionContext = &SessionContext{
-			name:          name,
-			registrations: make(map[string]*Registration),
-		}
+		// Create a new session
+		sessionContext = NewSessionContext(name, options)
 		self.sessions[name] = sessionContext
 	}
 
@@ -94,7 +94,8 @@ func writeMetrics(
 			Set("Description", s.Description).
 			Set("Watchers", s.Watchers).
 			Set("EventCount", s.EventCount).
-			Set("Started", s.Started)
+			Set("Started", s.Started).
+			Set("Stats", s.Stats)
 	}
 }
 
@@ -103,5 +104,6 @@ func init() {
 		Name:          "ETW",
 		Description:   "Report the current state of the ETW subsystem",
 		ProfileWriter: writeMetrics,
+		Categories:    []string{"Global", "VQL", "Plugins"},
 	})
 }

@@ -1,5 +1,6 @@
 import _ from 'lodash';
 import hex2a from "./utils";
+import api from '../core/api-service.jsx';
 
 import React from 'react';
 import Alert from 'react-bootstrap/Alert';
@@ -373,9 +374,9 @@ const Japanese = {
     クライアントはそのツールを自分のディスクにキャッシュし、次に必要になったときにハッシュを比較します。
     ツールは、ハッシュが変更された場合のみダウンロードされます。
     </>,
-    "ServedFromURL": (base_path, url)=>
+    "ServedFromURL": (url)=>
     <>
-      クライアントは必要に応じて、<a href={base_path + url}>{url}</a> から直接ツールを取得します。
+      クライアントは必要に応じて、<a href={api.href(url)}>{url}</a> から直接ツールを取得します。
       もしハッシュが期待されるハッシュと一致しない場合、クライアントはそのファイルを拒否することに注意してください。
     </>,
     "ServedFromGithub": (github_project, github_asset_regex)=>
@@ -509,14 +510,14 @@ const Japanese = {
           return <>
                    In {humanizeDuration(difference, {
                        round: true,
-                       language: "jp",
+                       language: "ja",
                    })}
                  </>;
       }
       return <>
                {humanizeDuration(difference, {
                    round: true,
-                   language: "jp",
+                   language: "ja",
                })} 前
              </>;
     },
@@ -605,7 +606,6 @@ const Japanese = {
      "Role_artifact_writer" : "アーティファクト ライター",
      "Role_api" : "読み取り専用 API クライアント",
 
-    "Perm_ALL_QUERY": "すべてのクエリ",
      "Perm_ANY_QUERY": "任意のクエリ",
      "Perm_PUBISH": "公開",
      "Perm_READ_RESULTS": "結果の読み取り",
@@ -626,9 +626,7 @@ const Japanese = {
      "Perm_PREPARE_RESULTS": "結果の準備",
      "Perm_DATASTORE_ACCESS": "データストアアクセス",
 
-
-     "ToolPerm_ALL_QUERY": "すべてのクエリを無制限に発行",
-     "ToolPerm_ANY_QUERY": "すべてのクエリを発行します (AllQuery は AnyQuery を意味します)",
+     "ToolPerm_ANY_QUERY": "すべてのクエリを発行します ",
      "ToolPerm_PUBISH": "サーバー側のキューにイベントを発行します (通常は必要ありません)",
      "ToolPerm_READ_RESULTS": "すでに実行されているハント、フロー、またはノートブックから結果を読み取る",
      "ToolPerm_LABEL_CLIENT": "クライアントのラベルとメタデータを操作できます",

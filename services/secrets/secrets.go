@@ -15,6 +15,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/yaml"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -55,18 +57,6 @@ func SecretLRUKey(type_name, name string) string {
 	return type_name + "/" + name
 }
 
-func NewSecretFromProto(secret *api_proto.Secret) *services.Secret {
-	result := &services.Secret{
-		Secret: secret,
-		Data:   ordereddict.NewDict(),
-	}
-
-	for k, v := range secret.Secret {
-		result.Data.Set(k, v)
-	}
-	return result
-}
-
 func NewSecret(type_name, name string,
 	secret *ordereddict.Dict) *services.Secret {
 	result := &services.Secret{
@@ -78,13 +68,10 @@ func NewSecret(type_name, name string,
 		Data: secret,
 	}
 
-	for _, k := range secret.Keys() {
-		v, pres := secret.Get(k)
-		if pres {
-			v_str, ok := v.(string)
-			if ok {
-				result.Secret.Secret[k] = v_str
-			}
+	for _, i := range secret.Items() {
+		v_str, ok := i.Value.(string)
+		if ok {
+			result.Secret.Secret[i.Key] = v_str
 		}
 	}
 
@@ -92,108 +79,27 @@ func NewSecret(type_name, name string,
 }
 
 type SecretsService struct {
-	definitions_lru *ttlcache.Cache
-	secrets_lru     *ttlcache.Cache
+	mu sync.Mutex
+
+	// These are fixed and initialized in initialize.go
+	definitions map[string]*SecretDefinition
+	secrets_lru *ttlcache.Cache
 
 	config_obj *config_proto.Config
-}
 
-func (self *SecretsService) DefineSecret(
-	ctx context.Context, definition *api_proto.SecretDefinition) error {
-
-	result, err := NewSecretDefinition(definition)
-	if err != nil {
-		return err
-	}
-	secret_path_manager := paths.SecretsPathManager{}
-	db, err := datastore.GetDB(self.config_obj)
-	if err != nil {
-		return err
-	}
-
-	err = db.SetSubject(self.config_obj,
-		secret_path_manager.SecretsDefinition(definition.TypeName),
-		result.SecretDefinition)
-	if err != nil {
-		return err
-	}
-
-	return self.definitions_lru.Set(definition.TypeName, result)
-}
-
-func (self *SecretsService) DeleteSecretDefinition(
-	ctx context.Context, definition *api_proto.SecretDefinition) error {
-
-	// Get the existing secrets
-	secrets, err := self.getSecretsForDefinition(definition.TypeName)
-	if err != nil {
-		return err
-	}
-
-	secret_path_manager := paths.SecretsPathManager{}
-	db, err := datastore.GetDB(self.config_obj)
-	if err != nil {
-		return err
-	}
-
-	// Delete all secrets
-	for _, name := range secrets {
-		err = db.DeleteSubject(self.config_obj,
-			secret_path_manager.Secret(definition.TypeName, name))
-		if err != nil {
-			continue
-		}
-	}
-
-	self.definitions_lru.Remove(definition.TypeName)
-
-	return db.DeleteSubject(self.config_obj,
-		secret_path_manager.SecretsDefinition(definition.TypeName))
-}
-
-func (self *SecretsService) getSecretsForDefinition(
-	type_name string) (res []string, err error) {
-
-	db, err := datastore.GetDB(self.config_obj)
-	if err != nil {
-		return nil, err
-	}
-
-	children, _ := db.ListChildren(self.config_obj,
-		paths.SecretsPathManager{}.SecretsDefinition(type_name))
-	for _, c := range children {
-		secret_name := c.Base()
-		res = append(res, secret_name)
-	}
-	return res, nil
+	// A reference to the root org's secret manager for delegation.
+	parent *SecretsService
 }
 
 func (self *SecretsService) getSecretDefinition(
 	ctx context.Context, type_name string) (*SecretDefinition, error) {
-	definition, err := self.definitions_lru.Get(type_name)
-	if err == nil {
-		return definition.(*SecretDefinition).Clone(), nil
+	definition, pres := self.definitions[type_name]
+	if !pres {
+		return nil, fmt.Errorf("SecretDefinition %v not found: %w",
+			type_name, utils.NotFoundError)
 	}
 
-	db, err := datastore.GetDB(self.config_obj)
-	if err != nil {
-		return nil, err
-	}
-
-	secret_path_manager := paths.SecretsPathManager{}
-	secrets_definition := &api_proto.SecretDefinition{}
-	err = db.GetSubject(self.config_obj,
-		secret_path_manager.SecretsDefinition(type_name),
-		secrets_definition)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := NewSecretDefinition(secrets_definition)
-	if err != nil {
-		return nil, err
-	}
-	return result, self.definitions_lru.Set(type_name, result)
+	return definition, nil
 }
 
 func (self *SecretsService) getSecret(
@@ -214,11 +120,22 @@ func (self *SecretsService) getSecret(
 	err = db.GetSubject(self.config_obj,
 		secret_path_manager.Secret(type_name, secret_name),
 		secret_proto)
+
+	// If we don't have the secret ourselves, but we have a delegate
+	// manager, we can call them to try and resolve the secret.
+	if self.parent != nil && utils.IsNotFound(err) {
+		return self.parent.getSecret(ctx, type_name, secret_name)
+	}
+
+	if err != nil {
+		return nil, utils.Wrap(err, "Secret Not Found")
+	}
+
+	result, err := NewSecretFromProto(ctx, self.config_obj, secret_proto)
 	if err != nil {
 		return nil, err
 	}
 
-	result := NewSecretFromProto(secret_proto)
 	return result, self.secrets_lru.Set(
 		SecretLRUKey(type_name, secret_name), result)
 }
@@ -230,6 +147,35 @@ func (self *SecretsService) AddSecret(ctx context.Context,
 	secrets_definition, err := self.getSecretDefinition(ctx, type_name)
 	if err != nil {
 		return err
+	}
+
+	// Make sure no extra fields are specified - just drop them on the
+	// floor if they are.
+	for _, k := range secret.Keys() {
+		if !utils.InString(secrets_definition.Fields, k) {
+			secret.Delete(k)
+		}
+	}
+
+	// Ensure all the fields in the template are defined.
+	for _, field := range secrets_definition.Fields {
+		_, pres := secret.Get(field)
+		if !pres {
+			secret.Set(field, "")
+		}
+	}
+
+	// Check that yaml fields are valid yaml.
+	for _, yaml_field := range secrets_definition.YamlFields {
+		tmp := make(map[string]string)
+		field_val, pres := secret.GetString(yaml_field)
+		if pres {
+			err := yaml.Unmarshal([]byte(field_val), tmp)
+			if err != nil {
+				return fmt.Errorf("Unable to verify secret for type %v: "+
+					"While verifying %v: %w", type_name, yaml_field, err)
+			}
+		}
 	}
 
 	// Verify the secret using the verifier
@@ -251,11 +197,17 @@ func (self *SecretsService) setSecret(
 		return err
 	}
 
+	stored_secret, err := PrepareForStorage(
+		ctx, self.config_obj, secret_record)
+	if err != nil {
+		return err
+	}
+
 	secret_path_manager := paths.SecretsPathManager{}
 	err = db.SetSubject(self.config_obj,
 		secret_path_manager.Secret(
 			secret_record.TypeName, secret_record.Name),
-		secret_record.Secret)
+		stored_secret)
 
 	if err != nil {
 		return err
@@ -268,33 +220,62 @@ func (self *SecretsService) setSecret(
 
 func (self *SecretsService) GetSecretDefinitions(
 	ctx context.Context) (result []*api_proto.SecretDefinition) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
 	db, err := datastore.GetDB(self.config_obj)
 	if err != nil {
 		return nil
 	}
 
-	children, err := db.ListChildren(self.config_obj,
-		paths.SecretsPathManager{}.SecretsDefinition("X").Dir())
-	if err != nil {
-		return nil
+	parent_definitions := make(map[string]*api_proto.SecretDefinition)
+
+	// Merge the root secrets if needed.
+	if self.parent != nil {
+		for _, def := range self.parent.GetSecretDefinitions(ctx) {
+			parent_definitions[def.TypeName] = def
+		}
 	}
 
-	seen := make(map[string]bool)
-	for _, c := range children {
-		type_name := c.Base()
-		_, pres := seen[type_name]
-		if pres {
+	for _, v := range self.definitions {
+		def := proto.Clone(v.SecretDefinition).(*api_proto.SecretDefinition)
+		result = append(result, def)
+
+		path_manager := paths.SecretsPathManager{}
+		children, err := db.ListChildren(self.config_obj,
+			path_manager.SecretsDefinitionDir(v.TypeName))
+		if err == nil {
+			for _, c := range children {
+				def.SecretNames = append(def.SecretNames, c.Base())
+			}
+		}
+	}
+
+	// Add any secret names defined by the parent.
+	for _, def := range result {
+		parent_def, pres := parent_definitions[def.TypeName]
+		if !pres {
 			continue
 		}
-		seen[type_name] = true
 
-		definition, err := self.getSecretDefinition(ctx, type_name)
-		if err != nil {
-			continue
+		for _, parent_secret_name := range parent_def.SecretNames {
+			md, err := self.parent.GetSecretMetadata(ctx,
+				parent_def.TypeName, parent_secret_name)
+			if err != nil {
+				continue
+			}
+
+			if !md.VisibleToAllOrgs &&
+				!utils.InString(md.Orgs, self.config_obj.OrgId) {
+				continue
+			}
+
+			if !utils.InString(def.SecretNames, parent_secret_name) {
+				def.SecretNames = append(def.SecretNames, parent_secret_name)
+			}
 		}
 
-		definition.SecretNames, _ = self.getSecretsForDefinition(type_name)
-		result = append(result, definition.SecretDefinition)
+		sort.Strings(def.SecretNames)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -311,10 +292,7 @@ func (self *SecretsService) deleteSecret(
 		return err
 	}
 
-	err = self.secrets_lru.Remove(SecretLRUKey(type_name, secret_name))
-	if err != nil {
-		return err
-	}
+	_ = self.secrets_lru.Remove(SecretLRUKey(type_name, secret_name))
 
 	secret_path_manager := paths.SecretsPathManager{}
 	return db.DeleteSubject(self.config_obj,
@@ -348,6 +326,21 @@ func (self *SecretsService) ModifySecret(ctx context.Context,
 
 	secret_record.Users = users.Keys()
 
+	orgs := ordereddict.NewDict()
+	for _, org := range secret_record.Orgs {
+		orgs.Set(org, 1)
+	}
+
+	for _, org := range request.RemoveOrgs {
+		orgs.Delete(org)
+	}
+
+	for _, org := range request.AddOrgs {
+		orgs.Set(org, 1)
+	}
+	secret_record.Orgs = orgs.Keys()
+	secret_record.VisibleToAllOrgs = request.VisibleToAllOrgs
+
 	return self.setSecret(ctx, secret_record)
 }
 
@@ -368,7 +361,7 @@ func (self *SecretsService) GetSecret(ctx context.Context,
 	return nil, fmt.Errorf("Permission Denied accessing secret %v", secret_name)
 }
 
-// Returns a reducted version of the secret.
+// Returns a redacted version of the secret.
 func (self *SecretsService) GetSecretMetadata(ctx context.Context,
 	type_name, secret_name string) (*services.Secret, error) {
 
@@ -383,8 +376,10 @@ func (self *SecretsService) GetSecretMetadata(ctx context.Context,
 			Name:     secret_record.Name,
 
 			// Do not return any actual secrets
-			Secret: nil,
-			Users:  secret_record.Users,
+			Secret:           nil,
+			Users:            secret_record.Users,
+			Orgs:             secret_record.Orgs,
+			VisibleToAllOrgs: secret_record.VisibleToAllOrgs,
 		}}, nil
 }
 
@@ -394,21 +389,43 @@ func NewSecretsService(
 	config_obj *config_proto.Config) (services.SecretsService, error) {
 
 	result := &SecretsService{
-		definitions_lru: ttlcache.NewCache(),
-		secrets_lru:     ttlcache.NewCache(),
-		config_obj:      config_obj,
+		definitions: buildInitialSecretDefinitions(),
+		secrets_lru: ttlcache.NewCache(),
+		config_obj:  config_obj,
 	}
-	result.definitions_lru.SetCacheSizeLimit(100)
-	result.definitions_lru.SetTTL(time.Minute)
-	result.definitions_lru.SkipTTLExtensionOnHit(true)
+
+	// For child orgs, set the parent to be the root org secrets
+	// manager.
+	if !utils.IsRootOrg(config_obj.OrgId) {
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			return nil, err
+		}
+
+		root_config_obj, err := org_manager.GetOrgConfig(services.ROOT_ORG_ID)
+		if err != nil {
+			return nil, err
+		}
+
+		root_secrets_manager, err := services.GetSecretsService(root_config_obj)
+		if err != nil {
+			return nil, err
+		}
+
+		// We need to make private calls to the root secrets manager
+		// so we can get the full secret details.
+		private_manager, ok := root_secrets_manager.(*SecretsService)
+		if ok {
+			result.parent = private_manager
+		}
+	}
 
 	result.secrets_lru.SetCacheSizeLimit(100)
-	result.secrets_lru.SetTTL(time.Minute)
+	_ = result.secrets_lru.SetTTL(time.Minute)
 	result.secrets_lru.SkipTTLExtensionOnHit(true)
 
 	go func() {
 		<-ctx.Done()
-		result.definitions_lru.Close()
 		result.secrets_lru.Close()
 	}()
 

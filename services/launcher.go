@@ -43,7 +43,6 @@ package services
 
 import (
 	"context"
-	"os"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
@@ -62,11 +61,14 @@ const (
 	// When the principal is set to this below we avoid audit logging
 	// the call.
 	NoAuditLogging = ""
-	DryRunOnly     = false
 )
 
 var (
-	FlowNotFoundError = utils.Wrap(os.ErrNotExist, "Flow not found")
+	FlowNotFoundError        = utils.Wrap(utils.NotFoundError, "Flow not found")
+	FlowRequestNotFoundError = utils.Wrap(utils.NotFoundError, "Flow Request not found")
+	DryRunOnly               = DeleteFlowOptions{
+		ReallyDoIt: false,
+	}
 )
 
 type DeleteFlowResponse struct {
@@ -82,7 +84,32 @@ func GetLauncher(config_obj *config_proto.Config) (Launcher, error) {
 		return nil, err
 	}
 
-	return org_manager.Services(config_obj.OrgId).Launcher()
+	svc := org_manager.Services(config_obj.OrgId)
+	return svc.Launcher()
+}
+
+// Options for the GetFlowOptions API. This ensures we do no more work
+// than necessary.
+type GetFlowOptions struct {
+
+	// Include the flow downloads (ZIP exports of the flow).
+	Downloads bool
+
+	// Also include the full request data.
+	Request bool
+}
+
+type DeleteFlowOptions struct {
+	// If this is not set, we do a dry run to indicate which files
+	// will be deleted within the flow but do not actually delete the
+	// files.
+	ReallyDoIt bool
+
+	// If this is set the delete will be synchronous and index updated
+	// immediately. This is much slower but it is necessary when
+	// results need to be available immediately. When False, we delete
+	// asynchronously and update the index at a later time.
+	Sync bool
 }
 
 type CompilerOptions struct {
@@ -111,6 +138,17 @@ type FlowStorer interface {
 		ctx context.Context,
 		config_obj *config_proto.Config,
 		flow *flows_proto.ArtifactCollectorContext,
+
+		// These opts represent which of the fields in the flow object
+		// are valid. For example, if the request is valid, then we
+		// store it, otherwise we do not store it.
+		options GetFlowOptions,
+		completion func()) error
+
+	WriteFlowStats(
+		ctx context.Context,
+		config_obj *config_proto.Config,
+		flow *flows_proto.ArtifactCollectorContext,
 		completion func()) error
 
 	WriteFlowIndex(
@@ -128,12 +166,14 @@ type FlowStorer interface {
 		ctx context.Context,
 		config_obj *config_proto.Config,
 		client_id string, flow_id string, principal string,
-		really_do_it bool) ([]*DeleteFlowResponse, error)
+		options DeleteFlowOptions) ([]*DeleteFlowResponse, error)
 
 	LoadCollectionContext(
 		ctx context.Context,
 		config_obj *config_proto.Config,
-		client_id, flow_id string) (*flows_proto.ArtifactCollectorContext, error)
+		client_id, flow_id string,
+		options GetFlowOptions,
+	) (*flows_proto.ArtifactCollectorContext, error)
 
 	ListFlows(
 		ctx context.Context,
@@ -144,7 +184,7 @@ type FlowStorer interface {
 
 	// Get the exact requests that were sent for this collection (for
 	// provenance).
-	GetFlowRequests(
+	GetFlowTasks(
 		ctx context.Context,
 		config_obj *config_proto.Config,
 		client_id string, flow_id string,
@@ -152,9 +192,6 @@ type FlowStorer interface {
 }
 
 type Launcher interface {
-	// Only used for tests to force a predictable flow id.
-	SetFlowIdForTests(flow_id string)
-
 	Storage() FlowStorer
 
 	// Check any declared tools exist and are available - possibly
@@ -178,7 +215,7 @@ type Launcher interface {
 	// goroutine. This means all the artifacts in the
 	// ArtifactCollectorArgs will be collected one after the other
 	// in turn. If callers want to collect artifacts in parallel
-	// then they need to perpare several VQLCollectorArgs and
+	// then they need to prepare several VQLCollectorArgs and
 	// launch them as separate messages.
 
 	// This method is only useful when the caller wants to cache
@@ -219,6 +256,7 @@ type Launcher interface {
 		config_obj *config_proto.Config,
 		client_id string,
 		options result_sets.ResultSetOptions,
+		flow_options GetFlowOptions,
 		offset, length int64) (*api_proto.ApiFlowResponse, error)
 
 	// Get the details of a flow - this has a lot more information
@@ -226,6 +264,7 @@ type Launcher interface {
 	GetFlowDetails(
 		ctx context.Context,
 		config_obj *config_proto.Config,
+		opts GetFlowOptions,
 		client_id string, flow_id string) (*api_proto.FlowDetails, error)
 
 	// Actively cancel the collection
@@ -235,10 +274,17 @@ type Launcher interface {
 		client_id, flow_id, principal string) (
 		res *api_proto.StartFlowResponse, err error)
 
+	// Replay flow transactions to continue if possible.
+	ResumeFlow(
+		ctx context.Context,
+		config_obj *config_proto.Config,
+		client_id, flow_id string) (
+		[]*actions_proto.UploadTransaction, error)
+
 	DeleteEvents(
 		ctx context.Context,
 		config_obj *config_proto.Config,
 		principal, artifact, client_id string,
 		start_time, end_time time.Time,
-		really_do_it bool) ([]*DeleteFlowResponse, error)
+		options DeleteFlowOptions) ([]*DeleteFlowResponse, error)
 }

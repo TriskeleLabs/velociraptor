@@ -14,7 +14,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -37,6 +36,7 @@ func (self UploadsPlugins) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "uploads", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -92,6 +92,10 @@ func (self UploadsPlugins) Call(
 					components = upload.Stats.Components
 				}
 
+				if len(components) > 0 {
+					components[len(components)-1] += upload.Type
+				}
+
 				vfs_path := path_specs.NewUnsafeFilestorePath(components...).
 					SetType(api.PATH_TYPE_FILESTORE_ANY)
 
@@ -105,7 +109,8 @@ func (self UploadsPlugins) Call(
 					Set("started", upload.Date).
 					Set("file_size", upload.Size).
 					Set("uploaded_size", upload.Size).
-					Set("vfs_path", vfs_path.String()).
+					Set("vfs_path", vfs_path).
+					Set("client_path", "").
 					Set("Upload", uploads.UploadResponse{
 						Path:       vfs_path.String(),
 						Size:       upload.Size,
@@ -222,6 +227,8 @@ func readFlowUploads(
 			pathspec = path_specs.NewUnsafeFilestorePath(
 				utils.SplitComponents(vfs_path)...).
 				SetType(api.PATH_TYPE_FILESTORE_ANY)
+
+			row.Set("client_path", "")
 		}
 
 		row.Update("vfs_path", pathspec)
@@ -249,7 +256,8 @@ func (self UploadsPlugins) Info(
 		Name:     "uploads",
 		Doc:      "Retrieve information about a flow's uploads.",
 		ArgType:  type_map.AddType(scope, &UploadsPluginsArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 

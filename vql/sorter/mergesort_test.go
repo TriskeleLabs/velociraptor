@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie/v2"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter/types"
 )
 
@@ -32,14 +32,14 @@ func TestDataFile(t *testing.T) {
 
 	// Check the content of the backing file.
 	fd, err := os.Open(data_file.fd.Name())
-	defer fd.Close()
 	assert.NoError(t, err)
+
+	defer fd.Close()
 
 	serialized, err := ioutil.ReadAll(fd)
 	assert.NoError(t, err)
 
-	g := goldie.New(t)
-	g.Assert(t, "newDataFile", serialized)
+	goldie.Assert(t, "newDataFile", serialized)
 
 	// Check the first row from the data_file
 	X, _ := data_file.Last().(*ordereddict.Dict).Get("X")
@@ -91,8 +91,7 @@ func TestMergeSorter(t *testing.T) {
 		res = append(res, row)
 	}
 
-	g := goldie.New(t)
-	g.AssertJson(t, "TestMergeSorter", res)
+	goldie.AssertJson(t, "TestMergeSorter", res)
 }
 
 func TestMergeSorterDesc(t *testing.T) {
@@ -128,6 +127,5 @@ func TestMergeSorterDesc(t *testing.T) {
 		res = append(res, row)
 	}
 
-	g := goldie.New(t)
-	g.AssertJson(t, "TestMergeSorterDesc", res)
+	goldie.AssertJson(t, "TestMergeSorterDesc", res)
 }

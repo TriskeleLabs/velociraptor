@@ -2,12 +2,14 @@ package server_artifacts
 
 import (
 	"context"
+	"regexp"
 	"sync"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/json"
@@ -15,6 +17,10 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/utils"
+)
+
+var (
+	defaultLogErrorRegex = regexp.MustCompile(constants.VQL_ERROR_REGEX)
 )
 
 // A reference counter around ResultSetWriter to ensure it is only
@@ -72,8 +78,8 @@ func (self *serverLogger) Write(b []byte) (int, error) {
 			s.LogRows++
 		})
 
-		// If an error occured mark the collection failed.
-		if level == "ERROR" {
+		// If an error occurred mark the collection failed.
+		if level == "ERROR" || defaultLogErrorRegex.MatchString(msg) {
 			self.query_context.UpdateStatus(func(s *crypto_proto.VeloStatus) {
 				s.Status = crypto_proto.VeloStatus_GENERIC_ERROR
 				s.ErrorMessage = msg
@@ -89,7 +95,8 @@ func NewServerLogWriter(
 	config_obj *config_proto.Config,
 	session_id string) (result_sets.ResultSetWriter, error) {
 
-	path_manager := paths.NewFlowPathManager("server", session_id)
+	path_manager := paths.NewFlowPathManager(
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, session_id)
 	file_store_factory := file_store.GetFileStore(config_obj)
 	log_writer, err := result_sets.NewResultSetWriter(file_store_factory,
 		path_manager.Log(), json.DefaultEncOpts(),
@@ -104,6 +111,7 @@ func NewServerLogWriter(
 		for {
 			select {
 			case <-ctx.Done():
+				log_writer.Close()
 				return
 
 			case <-time.After(utils.Jitter(time.Second)):

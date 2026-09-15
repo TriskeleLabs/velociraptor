@@ -15,7 +15,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"golang.org/x/sys/windows"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/allocs"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vwindows "www.velocidex.com/golang/velociraptor/vql/windows"
@@ -40,7 +40,7 @@ func (self TokenFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("token", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "token", args)()
 
 	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
 	if err != nil {
@@ -132,9 +132,8 @@ func (self TokenFunction) Call(
 		Set("Groups", groups).
 		Set("GroupNames", func() vfilter.Any {
 			result := ordereddict.NewDict()
-			for _, k := range groups.Keys() {
-				v, _ := groups.Get(k)
-				result.Set(vwindows.GetNameFromSID(k), v)
+			for _, i := range groups.Items() {
+				result.Set(vwindows.GetNameFromSID(i.Key), i.Value)
 			}
 			return result
 		}).
@@ -170,7 +169,7 @@ func (self TokenFunction) Call(
 func getTokenPrivileges(t windows.Token) (*ordereddict.Dict, error) {
 	n := uint32(1024)
 	for {
-		b := utils.AllocateBuff(int(n))
+		b := allocs.AllocateAlignedBuff(int(n))
 		e := windows.GetTokenInformation(t, windows.TokenPrivileges, &b[0], uint32(len(b)), &n)
 		if n < 4 {
 			return nil, errors.New("GetTokenInformation call too small!")

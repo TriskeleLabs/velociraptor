@@ -2,9 +2,12 @@ package debug
 
 import (
 	"context"
+	"strings"
 	"sync"
 
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 type ProfileWriter func(
@@ -14,6 +17,8 @@ type ProfileWriter func(
 type ProfileWriterInfo struct {
 	Name, Description string
 	ProfileWriter     ProfileWriter
+	ID                uint64
+	Categories        []string
 }
 
 var (
@@ -28,13 +33,136 @@ func RegisterProfileWriter(writer ProfileWriterInfo) {
 	handlers = append(handlers, writer)
 }
 
+func UnregisterProfileWriter(id uint64) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	new_handlers := make([]ProfileWriterInfo, 0, len(handlers))
+	for _, h := range handlers {
+		if h.ID != id {
+			new_handlers = append(new_handlers, h)
+		}
+	}
+	handlers = new_handlers
+}
+
+type CategoryTreeNode struct {
+	// The current path of this node
+	Path []string
+
+	// A list of direct children.
+	SubCategories map[string]*CategoryTreeNode
+
+	// Profiles contained in this category.
+	Profiles map[string]ProfileWriterInfo
+}
+
+func (self *CategoryTreeNode) toString() []string {
+	res := []string{strings.Join(self.Path, "/")}
+
+	for _, k := range utils.Sort(self.SubCategories) {
+		sc := self.SubCategories[k]
+
+		for _, l := range sc.toString() {
+			res = append(res, "  "+l)
+		}
+	}
+
+	for _, k := range utils.Sort(self.Profiles) {
+		p := self.Profiles[k]
+		res = append(res, "- "+p.Name)
+	}
+
+	return res
+}
+
+func (self *CategoryTreeNode) String() string {
+	return strings.Join(self.toString(), "\n")
+}
+
+func getChildren(self *CategoryTreeNode) {
+	path_len := len(self.Path)
+
+	for _, h := range handlers {
+		// Direct descendant - add to current level.
+		if utils.StringSliceEq(h.Categories, self.Path) {
+			self.Profiles[h.Name] = h
+			continue
+		}
+
+		// This node is above us in the tree - skip it
+		if len(h.Categories) <= path_len {
+			continue
+		}
+
+		// Node has the same prefix.
+		if utils.StringSliceEq(self.Path, h.Categories[:path_len]) {
+
+			// Name of the next level.
+			name := h.Categories[path_len]
+			next_path := append(self.Path, name)
+
+			// Add as a SubCategory.
+			// We already have it - skip it.
+			_, pres := self.SubCategories[name]
+			if pres {
+				continue
+			}
+
+			new_node := &CategoryTreeNode{
+				Path:          next_path,
+				SubCategories: make(map[string]*CategoryTreeNode),
+				Profiles:      make(map[string]ProfileWriterInfo),
+			}
+			self.SubCategories[name] = new_node
+			getChildren(new_node)
+		}
+	}
+}
+
+func GetProfileTree() *CategoryTreeNode {
+	mu.Lock()
+	defer mu.Unlock()
+
+	res := &CategoryTreeNode{
+		SubCategories: make(map[string]*CategoryTreeNode),
+	}
+	getChildren(res)
+	return res
+}
+
 func GetProfileWriters() (result []ProfileWriterInfo) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	for _, i := range handlers {
-		result = append(result, i)
+	return append(result, handlers...)
+}
+
+func GetProfileWriterByeName(name string) *ProfileWriterInfo {
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, h := range handlers {
+		if h.Name == name {
+			return &h
+		}
+	}
+	return nil
+}
+
+func GetProfile(
+	ctx context.Context, handler ProfileWriter) (res []vfilter.Row) {
+	output_chan := make(chan types.Row)
+	scope := vfilter.NewScope()
+
+	go func() {
+		defer close(output_chan)
+		handler(ctx, scope, output_chan)
+	}()
+
+	for row := range output_chan {
+		res = append(res, row)
 	}
 
-	return result
+	return res
 }

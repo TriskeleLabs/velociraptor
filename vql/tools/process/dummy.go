@@ -8,9 +8,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/Velocidex/ttlcache/v2"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -40,7 +38,7 @@ func (self *DummyProcessTracker) getLookup(
 		self.lookup = make(map[string]*ProcessEntry)
 	}
 
-	// Expire old looksup after 10 seconds
+	// Expire old lookups after 10 seconds
 	now := time.Now()
 	if now.Before(self.age.Add(10 * time.Second)) {
 		return self.lookup
@@ -54,8 +52,17 @@ func (self *DummyProcessTracker) getLookup(
 
 	self.age = now
 
-	for row := range pslist.Call(ctx, scope, ordereddict.NewDict()) {
-		entry, pres := getProcessEntry(scope, vfilter.RowToDict(ctx, scope, row))
+	// Different platforms do different things here so we just call
+	// the plugin to get the process data.
+	for row_any := range pslist.Call(ctx, scope, ordereddict.NewDict()) {
+		row, ok := row_any.(*ordereddict.Dict)
+		if !ok {
+			// Convert to a dict if possible
+			row = vfilter.RowToDict(ctx, scope, row_any)
+			row.SetCaseInsensitive()
+		}
+
+		entry, pres := getProcessEntry(ctx, scope, row)
 		if pres {
 			self.lookup[entry.Id] = entry
 		}
@@ -72,8 +79,13 @@ func (self *DummyProcessTracker) Get(ctx context.Context,
 	return entry, pres
 }
 
-func (self *DummyProcessTracker) Stats() ttlcache.Metrics {
-	return ttlcache.Metrics{}
+func (self *DummyProcessTracker) Peek(ctx context.Context,
+	scope vfilter.Scope, id string) (*ProcessEntry, bool) {
+	return self.Get(ctx, scope, id)
+}
+
+func (self *DummyProcessTracker) Stats() Stats {
+	return Stats{}
 }
 
 func (self *DummyProcessTracker) Enrich(
@@ -97,7 +109,8 @@ func (self *DummyProcessTracker) Processes(
 }
 
 func (self *DummyProcessTracker) CallChain(
-	ctx context.Context, scope vfilter.Scope, id string) []*ProcessEntry {
+	ctx context.Context, scope vfilter.Scope,
+	id string, max_items int64) []*ProcessEntry {
 
 	lookup := self.getLookup(ctx, scope)
 	result := []*ProcessEntry{}
@@ -110,6 +123,9 @@ func (self *DummyProcessTracker) CallChain(
 		}
 
 		result = append(result, proc)
+		if int64(len(result)) > max_items {
+			break
+		}
 		id = proc.ParentId
 	}
 
@@ -117,20 +133,29 @@ func (self *DummyProcessTracker) CallChain(
 }
 
 func (self *DummyProcessTracker) Children(
-	ctx context.Context, scope vfilter.Scope, id string) []*ProcessEntry {
+	ctx context.Context, scope vfilter.Scope,
+	id string, max_items int64) (res []*ProcessEntry) {
 
-	result := []*ProcessEntry{}
-	for _, proc := range self.Processes(ctx, scope) {
-		if proc.ParentId == id {
-			result = append(result, proc)
+	entry, pres := self.Get(ctx, scope, id)
+	if !pres {
+		return nil
+	}
+
+	for _, child_id := range entry.Children {
+		child, pres := self.Get(ctx, scope, child_id)
+		if pres {
+			res = append(res, child)
+		}
+		if int64(len(res)) > max_items {
+			break
 		}
 	}
 
-	return result
+	return res
 }
 
-func (self *DummyProcessTracker) Updates() chan *ProcessEntry {
-	output_chan := make(chan *ProcessEntry)
+func (self *DummyProcessTracker) Updates() chan *UpdateProcessEntry {
+	output_chan := make(chan *UpdateProcessEntry)
 	close(output_chan)
 
 	return output_chan
@@ -150,39 +175,38 @@ type ProcessInfoLinux struct {
 
 // Parses the output of various pslist implementations to give a
 // ProcessEntry item.
-func getProcessEntry(
+func getProcessEntry(ctx context.Context,
 	scope vfilter.Scope, row *ordereddict.Dict) (*ProcessEntry, bool) {
-	serialized, err := row.MarshalJSON()
-	if err != nil {
+
+	pid, pres := row.GetInt64("Pid")
+	if !pres {
 		return nil, false
 	}
 
-	windows_item := &ProcessInfoWindows{}
-	err = json.Unmarshal(serialized, windows_item)
-	if err != nil {
-		// Maybe we are running on linux
-		unix_item := &ProcessInfoLinux{}
-		err = json.Unmarshal(serialized, unix_item)
-		if err == nil {
-
-			return &ProcessEntry{
-				Id:        fmt.Sprintf("%v", unix_item.Pid),
-				ParentId:  fmt.Sprintf("%v", unix_item.PPid),
-				StartTime: utils.ParseTimeFromInt64(unix_item.StartTime),
-				Data:      row,
-			}, true
-		}
-
+	ppid, pres := row.GetInt64("Ppid")
+	if !pres {
 		return nil, false
 	}
 
-	create_time, _ := functions.ParseTimeFromString(scope,
-		windows_item.StartTime)
+	create_time_any, pres := row.Get("CreateTime")
+	if !pres {
+		return nil, false
+	}
+
+	var create_time time.Time
+	switch t := create_time_any.(type) {
+	case string:
+		create_time, _ = functions.ParseTimeFromString(ctx, scope, t)
+	case time.Time:
+		create_time = t
+	}
+
+	serialized, _ := json.MarshalString(row)
 
 	return &ProcessEntry{
-		Id:        fmt.Sprintf("%v", windows_item.Pid),
-		ParentId:  fmt.Sprintf("%v", windows_item.PPid),
+		Id:        fmt.Sprintf("%v", pid),
+		ParentId:  fmt.Sprintf("%v", ppid),
 		StartTime: create_time,
-		Data:      row,
+		JSONData:  serialized,
 	}, true
 }

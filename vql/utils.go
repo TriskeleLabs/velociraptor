@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
 )
@@ -71,6 +72,16 @@ func GetStringsFromRow(scope vfilter.Scope,
 			if ok {
 				res = append(res, value_str)
 			}
+
+			// Some iterators return a list of dicts with _value
+			// column.
+			value_dict, ok := value.(*ordereddict.Dict)
+			if ok {
+				value_str, pres := value_dict.GetString("_value")
+				if pres {
+					res = append(res, value_str)
+				}
+			}
 		}
 	}
 	return res
@@ -87,7 +98,7 @@ func GetBoolFromRow(scope vfilter.Scope,
 }
 
 // Sometimes we encode bools in string values
-var boolRegEx = regexp.MustCompile("(?i)^\\s*(true|Y|1)\\s*$")
+var boolRegEx = regexp.MustCompile(`(?i)^\s*(true|Y|1)\s*$`)
 
 func GetBoolFromString(value string) bool {
 	return boolRegEx.MatchString(value)

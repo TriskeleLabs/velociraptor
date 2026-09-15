@@ -11,11 +11,15 @@ import (
 	proto "google.golang.org/protobuf/proto"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/users"
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/startup"
+	vsurvey "www.velocidex.com/golang/velociraptor/tools/survey"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 )
 
 var (
@@ -36,7 +40,7 @@ var (
 func generateGUIConfig(datastore_directory, server_config_path, client_config_path string) (
 	*config_proto.Config, error) {
 	config_obj := config.GetDefaultConfig()
-	err := generateNewKeys(config_obj)
+	err := vsurvey.GenerateNewKeys(config_obj)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create config: %w", err)
 	}
@@ -55,7 +59,7 @@ func generateGUIConfig(datastore_directory, server_config_path, client_config_pa
 	config_obj.Client.ServerUrls = []string{"wss://localhost:8000/"}
 	config_obj.Client.UseSelfSignedSsl = true
 
-	write_back := filepath.Join(datastore_directory, "Velociraptor.writeback.%NONCE%.yaml")
+	write_back := utils.Join(datastore_directory, "Velociraptor.writeback.%NONCE%.yaml")
 	config_obj.Client.WritebackWindows = write_back
 	config_obj.Client.WritebackLinux = write_back
 	config_obj.Client.WritebackDarwin = write_back
@@ -68,7 +72,7 @@ func generateGUIConfig(datastore_directory, server_config_path, client_config_pa
 	config_obj.Client.LocalBuffer.FilenameDarwin = ""
 
 	// Make the client use the datastore_directory for tempfiles as well.
-	tmpdir := filepath.Join(datastore_directory, "temp")
+	tmpdir := utils.Join(datastore_directory, "temp")
 	err = os.MkdirAll(tmpdir, 0700)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create temp directory: %w", err)
@@ -133,7 +137,7 @@ func generateGUIConfig(datastore_directory, server_config_path, client_config_pa
 	fd.Close()
 
 	// Now also write a client config
-	client_config := getClientConfig(config_obj)
+	client_config := config.StripClientConfig(config_obj)
 	client_config.Logging = config_obj.Logging
 
 	serialized, err = yaml.Marshal(client_config)
@@ -152,16 +156,20 @@ func generateGUIConfig(datastore_directory, server_config_path, client_config_pa
 	}
 	fd.Close()
 
-	return config_obj, nil
+	// Re-read the config from the file we just made.
+	return makeDefaultConfigLoader().
+		WithVerbose(true).
+		WithFileLoader(server_config_path).LoadAndValidate()
 }
 
 func doGUI() error {
 	// Start from a clean slate
-	os.Setenv("VELOCIRAPTOR_CONFIG", "")
+	os.Setenv(constants.VELOCIRAPTOR_CONFIG, "")
+	os.Setenv(constants.VELOCIRAPTOR_LITERAL_CONFIG, "")
 
 	datastore_directory := *gui_command_datastore
 	if datastore_directory == "" {
-		datastore_directory = filepath.Join(os.TempDir(), "gui_datastore")
+		datastore_directory = utils.Join(tempfile.GetTempDir(), "gui_datastore")
 		// Ensure the directory exists
 		err := os.MkdirAll(datastore_directory, 0o777)
 		if err != nil {
@@ -174,8 +182,8 @@ func doGUI() error {
 		return fmt.Errorf("Unable find path: %w", err)
 	}
 
-	server_config_path := filepath.Join(datastore_directory, "server.config.yaml")
-	client_config_path := filepath.Join(datastore_directory, "client.config.yaml")
+	server_config_path := utils.Join(datastore_directory, "server.config.yaml")
+	client_config_path := utils.Join(datastore_directory, "client.config.yaml")
 
 	// Try to open the config file from there
 	config_obj, err := makeDefaultConfigLoader().
@@ -195,8 +203,8 @@ func doGUI() error {
 		// client. It is useful for demonstration purposes and
 		// to just be able to use the notebook and build an
 		// offline collector.
-		logging.Prelog("No valid config found - " +
-			"will generare a new one at <green>" + server_config_path)
+		logging.Prelog("No valid config found - "+
+			"will generate a new one at <green> %s </>", server_config_path)
 
 		config_obj, err = generateGUIConfig(
 			datastore_directory, server_config_path, client_config_path)
@@ -210,7 +218,7 @@ func doGUI() error {
 	}
 
 	// Now start the frontend
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	// Now start the frontend services
@@ -223,7 +231,18 @@ func doGUI() error {
 	// Just try to open the browser in the background.
 	if !*gui_command_no_browser {
 		go func() {
-			url := fmt.Sprintf("https://admin:password@%v:%v/",
+			// Recent chrome browsers do not forward the auth dialog
+			// when the URL contains passwords. Therefore we can only
+			// add the hard coded passwords if the actual password is
+			// set to that.
+			user_manager := services.GetUserManager()
+			creds := ""
+			ok, _ := user_manager.VerifyPassword(sm.Ctx, "admin", "admin", "password")
+			if ok {
+				creds = "admin:password"
+			}
+
+			url := fmt.Sprintf("https://%v@%v:%v/", creds,
 				config_obj.GUI.BindAddress,
 				config_obj.GUI.BindPort)
 			res := OpenBrowser(url)
@@ -253,8 +272,12 @@ func doGUI() error {
 
 		sm.Wg.Add(1)
 		go func() {
-			RunClient(ctx, config_obj)
-			sm.Wg.Done()
+			defer sm.Wg.Done()
+
+			err := RunClient(ctx, config_obj)
+			if err != nil {
+				logger.Error("<red>RunClient</>: %v", err)
+			}
 		}()
 
 		org_manager, err := services.GetOrgManager()
@@ -273,12 +296,16 @@ func doGUI() error {
 
 			// Make sure the client writeback is initialized
 			writeback_service := writeback.GetWritebackService()
-			writeback_service.LoadWriteback(org_config_obj)
+			_ = writeback_service.LoadWriteback(org_config_obj)
 
 			sm.Wg.Add(1)
 			go func() {
-				RunClient(ctx, org_client_config)
-				sm.Wg.Done()
+				defer sm.Wg.Done()
+
+				err := RunClient(ctx, org_client_config)
+				if err != nil {
+					logger.Error("<red>RunClient</>: %v", err)
+				}
 			}()
 		}
 	}

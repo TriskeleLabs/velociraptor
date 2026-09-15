@@ -18,7 +18,8 @@ package services
   artifact needs API credentials to push to elastic and these need to
   be provided in the GUI as an artifact parameter. This means that:
 
-  1. The user managing the server needs to now have access to Elastic credentials.
+  1. The user managing the server needs to now have access to Elastic
+     credentials.
 
   2. If we are not careful, anyone viewing the artifact in the GUI can
      just read the credentials as parameters (It is possible to set
@@ -52,14 +53,44 @@ package services
   This allows more careful management of secrets and reduces
   opportunity for credential leaks.
 
+  # Secret inheritance
+
+  In many multi-tenanted deployments it is convenient to have secrets
+  set at the root org level, and have all child orgs inherit the
+  secrets. This allows the root org admin to manage access to shared
+  resources securely.
+
+  It is possible to control visibility of secrets at the root org
+  using the secret_modify() VQL function. The secret may be added to
+  specific orgs or made visible to all orgs.
+
+  NOTE: Making a secret visible to another org allows the secret
+  manager in that org to **copy** the secret to their org. By
+  modifying the secret in the child org (i.e. adding or removing
+  users) the secret is copied into the child org. This means that if
+  the root org administrator removes access to the org after that
+  fact, the child org can continue working on the copy of the secret
+  in their org.
+
+  If the root org admin wants to remove access to the secret from all
+  child orgs they need to use the VQL function
+  secret_modify(delete=TRUE) to truly delete the secret in the child
+  org context (see the query() plugin to switch org contexts).
+
 */
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/Velocidex/ordereddict"
+	"github.com/Velocidex/yaml/v2"
+
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -70,13 +101,6 @@ type Secret struct {
 }
 
 type SecretsService interface {
-	// Allows the user to define a new type of secret and attach a VQL
-	// lambda to allow verification of new secrets.
-	DefineSecret(ctx context.Context, definition *api_proto.SecretDefinition) error
-
-	DeleteSecretDefinition(
-		ctx context.Context, definition *api_proto.SecretDefinition) error
-
 	GetSecretDefinitions(ctx context.Context) []*api_proto.SecretDefinition
 
 	// Add a new managed secret. This function applies any verifiers
@@ -106,4 +130,97 @@ func GetSecretsService(config_obj *config_proto.Config) (SecretsService, error) 
 		return nil, err
 	}
 	return org_manager.Services(config_obj.OrgId).SecretsService()
+}
+
+// Utilities to extract secrets
+
+// Update the string field from the secret if it is set.
+func (self *Secret) UpdateString(field string, target *string) {
+	res, pres := self.Data.GetString(field)
+	if pres && res != "" {
+		*target = res
+	}
+}
+
+// Get the string from the secret or return an empty field..
+func (self *Secret) GetString(field string) string {
+	var res string
+	self.UpdateString(field, &res)
+	return res
+}
+
+// Update the strings field from the secret if it is set.
+func (self *Secret) UpdateStrings(field string, target *[]string) {
+	res, pres := self.Data.GetString(field)
+	if pres && res != "" {
+		*target = []string{}
+		for _, line := range strings.Split(res, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "#") {
+				continue
+			}
+			*target = append(*target, line)
+		}
+	}
+}
+
+func (self *Secret) GetStrings(field string) []string {
+	var res []string
+	self.UpdateStrings(field, &res)
+	return res
+}
+
+// Update the bool field from the secret if it is set.
+func (self *Secret) UpdateBool(field string, target *bool) {
+	res, pres := self.Data.GetString(field)
+	if pres && res != "" {
+		*target = vql_subsystem.GetBoolFromString(res)
+	}
+}
+
+func (self *Secret) GetBool(field string) bool {
+	var res bool
+	self.UpdateBool(field, &res)
+	return res
+}
+
+// Update the uint64 field from the secret if it is set.
+func (self *Secret) UpdateUint64(field string, target *uint64) {
+	res, pres := self.Data.GetString(field)
+	if pres && res != "" {
+		res_int, _ := strconv.ParseInt(res, 0, 64)
+		*target = uint64(res_int)
+	}
+}
+
+func (self *Secret) GetUint64(field string) uint64 {
+	var res uint64
+	self.UpdateUint64(field, &res)
+	return res
+}
+
+// Update the dict field from the secret if it is set.
+func (self *Secret) UpdateDict(field string, target *ordereddict.Dict) error {
+	res, pres := self.Data.GetString(field)
+	if pres && res != "" {
+		tmp := make(map[string]string)
+		err := yaml.Unmarshal([]byte(res), tmp)
+		if err != nil {
+			return fmt.Errorf("Secret: parsing field %v invalid yaml: %v",
+				field, err)
+		}
+		for k, v := range tmp {
+			if v != "" {
+				target.Set(k, v)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (self *Secret) GetDict(field string) (*ordereddict.Dict, error) {
+	res := ordereddict.NewDict()
+	err := self.UpdateDict(field, res)
+	return res, err
 }

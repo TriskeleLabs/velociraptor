@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -22,21 +22,21 @@ import (
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
-	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
-// Filter will be applied on flows to remove those we dont care about.
+// Filter will be applied on flows to remove those we don't care about.
 func (self *Launcher) GetFlows(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	client_id string,
 	options result_sets.ResultSetOptions,
+	flow_options services.GetFlowOptions,
 	offset, length int64) (*api_proto.ApiFlowResponse, error) {
 
 	result := &api_proto.ApiFlowResponse{}
@@ -60,8 +60,12 @@ func (self *Launcher) GetFlows(
 	for _, flow_summary := range flow_summaries {
 		collection_context, err := self.Storage().
 			LoadCollectionContext(ctx, config_obj,
-				client_id, flow_summary.FlowId)
+				client_id, flow_summary.FlowId, flow_options)
 		if err == nil {
+			// Remove certain fields that are not necessary.
+			if collection_context.Request != nil {
+				collection_context.Request.CompiledCollectorArgs = nil
+			}
 			items = append(items, collection_context)
 		}
 	}
@@ -76,33 +80,47 @@ func (self *Launcher) GetFlows(
 func (self *Launcher) GetFlowDetails(
 	ctx context.Context,
 	config_obj *config_proto.Config,
+	opts services.GetFlowOptions,
 	client_id string, flow_id string) (*api_proto.FlowDetails, error) {
 	if flow_id == "" || client_id == "" {
 		return &api_proto.FlowDetails{}, nil
 	}
 
 	collection_context, err := self.Storage().LoadCollectionContext(
-		ctx, config_obj, client_id, flow_id)
+		ctx, config_obj, client_id, flow_id, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	availableDownloads, _ := availableDownloadFiles(config_obj, client_id, flow_id)
-	return &api_proto.FlowDetails{
-		Context:            collection_context,
-		AvailableDownloads: availableDownloads,
-	}, nil
+	res := &api_proto.FlowDetails{
+		Context: collection_context,
+	}
+
+	// Include the AvailableDownloads
+	if opts.Downloads {
+		res.AvailableDownloads, _ = availableDownloadFiles(ctx, config_obj, client_id, flow_id)
+	}
+	return res, nil
 }
 
 // availableDownloads returns the prepared zip downloads available to
 // be fetched by the user at this moment.
-func availableDownloadFiles(config_obj *config_proto.Config,
+func availableDownloadFiles(
+	ctx context.Context,
+	config_obj *config_proto.Config,
 	client_id string, flow_id string) (*api_proto.AvailableDownloads, error) {
 
-	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
-	download_dir := flow_path_manager.GetDownloadsDirectory()
+	export_manager, err := services.GetExportManager(config_obj)
+	if err != nil {
+		return nil, err
+	}
 
-	return reporting.GetAvailableDownloadFiles(config_obj, download_dir)
+	return export_manager.GetAvailableDownloadFiles(ctx,
+		config_obj, services.ContainerOptions{
+			Type:     services.FlowExport,
+			ClientId: client_id,
+			FlowId:   flow_id,
+		})
 }
 
 func (self *Launcher) CancelFlow(
@@ -116,7 +134,7 @@ func (self *Launcher) CancelFlow(
 
 	// Handle server collections especially via the server artifact
 	// runner.
-	if client_id == "server" {
+	if client_id == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		server_artifacts_service, err := services.GetServerArtifactRunner(
 			config_obj)
 		if err != nil {
@@ -130,7 +148,12 @@ func (self *Launcher) CancelFlow(
 	}
 
 	collection_context, err := self.Storage().LoadCollectionContext(
-		ctx, config_obj, client_id, flow_id)
+		ctx, config_obj, client_id, flow_id,
+		services.GetFlowOptions{
+			// Need to send a cancel message for all the child flows.
+			Request: true,
+		})
+
 	if err == nil {
 		switch collection_context.State {
 		case flows_proto.ArtifactCollectorContext_RUNNING,
@@ -144,11 +167,25 @@ func (self *Launcher) CancelFlow(
 		}
 
 		collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
-		collection_context.Status = "Cancelled by " + username
-		collection_context.Backtrace = ""
+		old_status := collection_context.Status
+		new_status := "Cancelled by " + username
+		if old_status != "" {
+			collection_context.Status = new_status + ": " + old_status
+		} else {
+			collection_context.Status = new_status
+			collection_context.Backtrace = ""
+		}
 
-		self.Storage().WriteFlow(
-			ctx, config_obj, collection_context, utils.BackgroundWriter)
+		err := self.Storage().WriteFlow(
+			ctx, config_obj, collection_context,
+			services.GetFlowOptions{
+				// Do not update the request - we did not modify it.
+				Request: false,
+			},
+			utils.BackgroundWriter)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Get all queued tasks for the client and delete only those in this flow.
@@ -177,21 +214,32 @@ func (self *Launcher) CancelFlow(
 	// Queue a cancellation message to the client for this flow
 	// id.
 	cancel_msg := &crypto_proto.Cancel{}
-	if client_id == "server" {
+	if client_id == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		// Only include the principal on server messages so the
 		// server_artifacts service can log the principal. No need to
 		// forward to the client.
 		cancel_msg.Principal = username
 	}
 
-	err = client_manager.QueueMessageForClient(ctx, client_id,
-		&crypto_proto.VeloMessage{
-			Urgent:    true,
-			Cancel:    cancel_msg,
-			SessionId: flow_id,
-		}, services.NOTIFY_CLIENT, nil)
-	if err != nil {
-		return nil, err
+	// Gather all the flows to cancel - including any child flows.
+	flows := map[string]bool{flow_id: true}
+	if collection_context != nil {
+		flows[collection_context.Request.FlowId] = true
+		for _, previous := range collection_context.PreviousFlows {
+			if previous.Request == nil || previous.Request.FlowId == "" {
+				continue
+			}
+			flows[previous.Request.FlowId] = true
+		}
+	}
+
+	for flow_id := range flows {
+		_ = client_manager.QueueMessageForClient(ctx, client_id,
+			&crypto_proto.VeloMessage{
+				Urgent:    true,
+				Cancel:    cancel_msg,
+				SessionId: flow_id,
+			}, services.NOTIFY_CLIENT, nil)
 	}
 
 	return &api_proto.StartFlowResponse{
@@ -199,20 +247,10 @@ func (self *Launcher) CancelFlow(
 	}, nil
 }
 
-// The collection_context contains high level stats that summarise the
-// colletion. We derive this information from the specific results of
+// The collection_context contains high level stats that summarize the
+// collection. We derive this information from the specific results of
 // each query.
 func UpdateFlowStats(collection_context *flows_proto.ArtifactCollectorContext) {
-	if collection_context.InflightTime > 0 {
-		utils.DlvBreak()
-	}
-
-	// Support older colletions which do not have this info
-	if len(collection_context.QueryStats) == 0 &&
-		collection_context.InflightTime == 0 {
-		return
-	}
-
 	// Now update the overall collection statuses based on all the
 	// individual query status. The collection status is a high level
 	// overview of the entire collection.
@@ -255,12 +293,25 @@ func UpdateFlowStats(collection_context *flows_proto.ArtifactCollectorContext) {
 			collection_context.StartTime = s.FirstActive
 		}
 
+		// If the Query stats represents an unknown flow, we mark the
+		// flow as errored.
+		if s.Status == crypto_proto.VeloStatus_UNKNOWN_FLOW {
+			collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
+			collection_context.Status = s.ErrorMessage
+			collection_context.Backtrace = s.Backtrace
+			break
+		}
+
 		// Get the first errored query and mark the entire collection_context with it.
 		if collection_context.State == flows_proto.ArtifactCollectorContext_RUNNING &&
 			s.Status == crypto_proto.VeloStatus_GENERIC_ERROR {
 			collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
 			collection_context.Status = s.ErrorMessage
 			collection_context.Backtrace = s.Backtrace
+		}
+
+		if s.ErrorMessage != "" && collection_context.Status == "" {
+			collection_context.Status = s.ErrorMessage
 		}
 
 		// Query is considered complete if it is in the ERROR or OK state
@@ -293,7 +344,8 @@ func UpdateFlowStats(collection_context *flows_proto.ArtifactCollectorContext) {
 
 	// The flow has been scheduled - either indicate it as waiting, in
 	// progress or unresponsive.
-	if collection_context.State == flows_proto.ArtifactCollectorContext_RUNNING &&
+	if (collection_context.State == flows_proto.ArtifactCollectorContext_RUNNING ||
+		collection_context.State == flows_proto.ArtifactCollectorContext_IN_PROGRESS) &&
 		collection_context.InflightTime > 0 {
 
 		// If the client did not send any status updates yet the query

@@ -4,9 +4,9 @@
   interrogation collection on an endpoint when it first appears.
 
   Velociraptor is a zero registration system - this means when a
-  client appears, it provisions its own private key and registeres its
+  client appears, it provisions its own private key and registers its
   public key with the server. This enables secure communication with
-  the endpoint but we still dont know anything about it!
+  the endpoint but we still don't know anything about it!
 
   The EnrollmentService watches for new clients and schedules the
   Generic.Client.Info artifact on the endpoint. Note that this
@@ -32,6 +32,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"golang.org/x/time/rate"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
@@ -67,7 +68,7 @@ func (self *EnrollmentService) Start(
 	// Also watch for customized interrogation artifacts.
 	err := journal.WatchForCollectionWithCB(ctx, config_obj, wg,
 		"Generic.Client.Info/BasicInformation",
-		"InterrogationService",
+		"InterrogationService for Generic.Client.Info/BasicInformation",
 		func(ctx context.Context,
 			config_obj *config_proto.Config,
 			client_id, flow_id string) error {
@@ -82,7 +83,7 @@ func (self *EnrollmentService) Start(
 	// Also watch for customized interrogation artifacts.
 	err = journal.WatchForCollectionWithCB(ctx, config_obj, wg,
 		"Custom.Generic.Client.Info/BasicInformation",
-		"InterrogationService",
+		"InterrogationService for Custom.Generic.Client.Info/BasicInformation",
 		func(ctx context.Context,
 			config_obj *config_proto.Config,
 			client_id, flow_id string) error {
@@ -95,7 +96,7 @@ func (self *EnrollmentService) Start(
 	}
 
 	return journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"Server.Internal.Enrollment", "InterrogationService",
+		artifacts.ENROLLMENT_QUEUE, "InterrogationService",
 		self.ProcessEnrollment)
 }
 
@@ -121,14 +122,17 @@ func (self *EnrollmentService) ProcessEnrollment(
 	client_info, err := client_info_manager.Get(ctx, client_id)
 
 	// If we have a valid client record we do not need to
-	// interrogate. Interrogation happens automatically only once
-	// - the first time a client appears.
+	// interrogate. Interrogation happens automatically only once -
+	// the first time a client appears.
 	if err == nil && client_info.LastInterrogateFlowId != "" {
 		return nil
 	}
 
 	// Wait for rate token
-	self.limiter.Wait(ctx)
+	err = self.limiter.Wait(ctx)
+	if err != nil {
+		return err
+	}
 
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -149,6 +153,15 @@ func (self *EnrollmentService) ProcessEnrollment(
 		return nil
 	}
 
+	// Create a placeholder client record for interrogation.
+	err = client_info_manager.Set(ctx, &services.ClientInfo{
+		&actions_proto.ClientInfo{
+			ClientId: client_id,
+		}})
+	if err != nil {
+		return err
+	}
+
 	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return err
@@ -163,7 +176,8 @@ func (self *EnrollmentService) ProcessEnrollment(
 
 	// Allow the user to override the basic interrogation
 	// functionality.  Check for any customized versions
-	definition, pres := repository.Get(ctx, config_obj, "Custom.Generic.Client.Info")
+	definition, pres := repository.Get(ctx, config_obj,
+		"Custom.Generic.Client.Info")
 	if pres {
 		interrogation_artifact = definition.Name
 	}
@@ -185,8 +199,12 @@ func (self *EnrollmentService) ProcessEnrollment(
 			// Notify the client
 			notifier, err := services.GetNotifier(config_obj)
 			if err == nil {
-				notifier.NotifyListener(ctx,
+				err := notifier.NotifyListener(ctx,
 					config_obj, client_id, "Interrogate")
+				if err != nil {
+					logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+					logger.Error("NotifyListener: %v", err)
+				}
 			}
 		})
 	if err != nil {
@@ -206,7 +224,7 @@ func (self *EnrollmentService) ProcessEnrollment(
 	err = client_info_manager.Modify(ctx, client_id,
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 			if client_info == nil {
-				client_info = &services.ClientInfo{}
+				client_info = &services.ClientInfo{ClientInfo: &actions_proto.ClientInfo{}}
 			}
 
 			client_info.ClientId = client_id
@@ -259,7 +277,7 @@ func modifyRecord(ctx context.Context,
 
 	// Client Id is not known make new record
 	if client_info == nil {
-		client_info = &services.ClientInfo{}
+		client_info = &services.ClientInfo{ClientInfo: &actions_proto.ClientInfo{}}
 	}
 
 	client_info.ClientId = client_id
@@ -414,7 +432,7 @@ func (self *EnrollmentService) ProcessInterrogateResults(
 	journal.PushRowsToArtifactAsync(ctx, config_obj,
 		ordereddict.NewDict().
 			Set("ClientId", client_id),
-		"Server.Internal.Interrogation")
+		artifacts.INTERROGATION_QUEUE)
 
 	return nil
 }
@@ -424,9 +442,10 @@ func NewInterrogationService(
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config) error {
 
-	limit_rate := config_obj.Frontend.Resources.EnrollmentsPerSecond
-	if limit_rate == 0 {
-		limit_rate = 100
+	limit_rate := int64(100)
+	if config_obj.Frontend != nil &&
+		config_obj.Frontend.Resources.EnrollmentsPerSecond > 0 {
+		limit_rate = config_obj.Frontend.Resources.EnrollmentsPerSecond
 	}
 
 	// Negative enrollment rate means to disable enrollment service.

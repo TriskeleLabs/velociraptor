@@ -35,13 +35,10 @@ var (
 	defaultHttpClientTimeoutDuration = time.Duration(10) * time.Second
 	defaultNWorkers                  = 1
 	defaultMaxRetries                = 7200 // ~2h more or less
-	defaultStatsInterval             = time.Duration(30) * time.Second
 
 	gMaxPoll          = time.Duration(60) * time.Second
-	gMaxPollDev       = 30
 	gNextId     int64 = 0
-
-	apiEndpoint = "/v1/ingest/humio-structured"
+	apiEndpoint       = "/v1/ingest/humio-structured"
 )
 
 type errInvalidArgument struct {
@@ -78,7 +75,6 @@ func (err errMaxRetriesExceeded) Timeout() bool {
 var errQueueOpened = errors.New("Cannot modify parameters of open queue")
 
 type LogScaleQueue struct {
-	scope  vfilter.Scope
 	config *config_proto.Config
 	lock   sync.Mutex
 	cancel func()
@@ -97,7 +93,6 @@ type LogScaleQueue struct {
 	batchingTimeoutDuration   time.Duration
 	httpClientTimeoutDuration time.Duration
 	eventBatchSize            int
-	httpTimeout               int
 	debug                     bool
 	debugEventsEnabled        bool
 	debugEventsMap            map[int][]func(int)
@@ -374,29 +369,6 @@ func (self *LogScaleQueue) Open(parentCtx context.Context, scope vfilter.Scope,
 	return nil
 }
 
-func (self *LogScaleQueue) addDebugCallback(count int, callback func(int)) error {
-	self.lock.Lock()
-	defer self.lock.Unlock()
-
-	if self.opened {
-		return errQueueOpened
-	}
-
-	if !self.debugEventsEnabled {
-		self.debugEventsMap = map[int][]func(int){}
-		self.debugEventsEnabled = true
-	}
-
-	_, ok := self.debugEventsMap[count]
-	if ok {
-		self.debugEventsMap[count] = append(self.debugEventsMap[count], callback)
-	} else {
-		self.debugEventsMap[count] = []func(int){callback}
-	}
-
-	return nil
-}
-
 // Provide the hostname for the client host if it's a client query
 // since an external system will not have a way to map it to a hostname.
 func (self *LogScaleQueue) addClientInfo(ctx context.Context, row *ordereddict.Dict,
@@ -524,6 +496,9 @@ func (self *LogScaleQueue) postEvents(ctx context.Context, scope vfilter.Scope,
 			atomic.AddInt64(&self.postedEvents, int64(nRows))
 			atomic.AddInt64(&self.postedBytes, int64(len(data)))
 
+			if resp != nil {
+				resp.Body.Close()
+			}
 			return nil
 		}
 
@@ -534,6 +509,7 @@ func (self *LogScaleQueue) postEvents(ctx context.Context, scope vfilter.Scope,
 			_, err = io.Copy(body, resp.Body)
 			if err != nil {
 				resp.Body.Close()
+
 				self.Log(scope, "copy of response failed: %v, %v", resp.Status, err)
 				return err
 			}
@@ -558,12 +534,19 @@ func (self *LogScaleQueue) postEvents(ctx context.Context, scope vfilter.Scope,
 				retries, wait)
 
 			clock.Sleep(wait)
+			if resp != nil {
+				resp.Body.Close()
+			}
 			continue
 		}
 
 		atomic.AddInt64(&self.failedEvents, int64(nRows))
 		if errors.Is(err, context.Canceled) {
 			self.Log(scope, "Failed to POST %v events while queue is closing.  Dropping remaining events.", nRows)
+			if resp != nil {
+				resp.Body.Close()
+			}
+
 			return err
 		}
 
@@ -572,6 +555,10 @@ func (self *LogScaleQueue) postEvents(ctx context.Context, scope vfilter.Scope,
 		}
 
 		self.Log(scope, "Failed to post events, lost %v events: %v", nRows, err)
+		if resp != nil {
+			resp.Body.Close()
+		}
+
 		return err
 	}
 }
@@ -594,7 +581,9 @@ func (self *LogScaleQueue) processEvents(ctx context.Context, scope vfilter.Scop
 
 	defer self.workerWg.Done()
 	defer self.Debug(scope, "worker exited")
-	defer func() { self.postEvents(ctx, scope, postData) }()
+	defer func() {
+		_ = self.postEvents(ctx, scope, postData)
+	}()
 
 	self.Debug(scope, "worker started")
 
@@ -604,7 +593,7 @@ func (self *LogScaleQueue) processEvents(ctx context.Context, scope vfilter.Scop
 		postEvents := false
 
 		// We don't watch the context because we need to clear the queue first.
-		// The context cancelation will close the listener, which will close
+		// The context cancellation will close the listener, which will close
 		// the output channel once the queue is flushed.
 		select {
 		case <-clock.After(self.batchingTimeoutDuration):

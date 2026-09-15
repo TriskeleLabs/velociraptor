@@ -15,6 +15,12 @@ message Strings {
     repeated string strings = 1;
 }
 
+message UserStats {
+    // Last time the user's record was fetched from the cache.
+    int64 last_active_time = 1;
+    string last_ip_address = 2;
+}
+
 message VelociraptorUser {
     string name = 1 [(sem_type) = {
             description: "The username"
@@ -28,6 +34,12 @@ message VelociraptorUser {
     string email = 4;
     string picture = 5;
     bool verified_email = 6;
+
+    // Many IdP use a unique ID for the user - we track it with the
+    // username as we can verify against the oid. For example,
+    // changing the user's email will retain the original OID so we
+    // wont be confused.
+    string oid = 14;
 
     bool read_only = 7 [(sem_type) = {
             description: "A read only user can use the GUI but is not allowed to launch flows or hunts.",
@@ -45,6 +57,8 @@ message VelociraptorUser {
     // Only used by the GUI/API to determine the currently selected
     // org the user wants to see.
     string current_org = 12;
+
+    UserStats stats = 13;
 }
 
 message UpdateUserRequest {
@@ -109,6 +123,11 @@ message ApiUserInterfaceTraits {
 
     // Current selected Org.
     string org = 24;
+    string org_name = 30;
+
+    // The user's specific base path - only used for crazy reverse
+    // proxy configurations.
+    string base_path = 29;
 
     // Optional features of the UI to disable.
     bool disable_server_events = 26;
@@ -139,6 +158,9 @@ message ApiUser {
     bool org_admin = 12 [(sem_type) = {
         description: "Whether this user is an OrgAdmin"
     }];
+
+    // Messages for the user are available.
+    int64 messages = 14;
 }
 
 // Contol the GUI per user.
@@ -149,6 +171,8 @@ message GUICustomizations {
 
     // Updated from config_obj.Defaults.HuntExpiryHours
     int64 hunt_expiry_hours = 4;
+
+    repeated string indexed_client_metadata = 5;
 }
 
 message SetGUIOptionsRequest {
@@ -178,6 +202,9 @@ message SetGUIOptionsRequest {
     bool disable_server_events = 26;
     string auth_redirect_template = 27;
     bool disable_quarantine_button = 28;
+
+    // How many notifications are currently outstanding for the user.
+    int64 messages = 29;
 }
 
 message SetGUIOptionsResponse {

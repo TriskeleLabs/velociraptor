@@ -1,3 +1,5 @@
+import _ from 'lodash';
+
 import React from 'react';
 import PropTypes from 'prop-types';
 
@@ -10,10 +12,10 @@ import {CancelToken} from 'axios';
 import api from '../core/api-service.jsx';
 import Spinner from '../utils/spinner.jsx';
 import { withRouter }  from "react-router-dom";
+import {setItem, schema} from '../core/storage.jsx';
 
 // Poll for new notebooks list.
 const POLL_TIME = 5000;
-const PAGE_SIZE = 100;
 
 
 class Notebooks extends React.Component {
@@ -24,96 +26,92 @@ class Notebooks extends React.Component {
     };
 
     state = {
-        notebooks: [],
         selected_notebook: {},
-
-        // Only show the spinner the first time the component is
-        // mounted.
-        loading: true,
-
+        version: 0,
+        loading: false,
         refreshed_from_router: false,
     }
 
     componentDidMount = () => {
         this.source = CancelToken.source();
-        this.interval = setInterval(this.fetchNotebooks, POLL_TIME);
-        this.fetchNotebooks();
+        this.interval = setInterval(this.updateVersion, POLL_TIME);
+        this.updateVersion();
     }
 
     componentWillUnmount() {
         this.source.cancel();
         clearInterval(this.interval);
+        this.unmounted = true;
     }
 
-    fetchNotebooks = () => {
-        // Cancel any in flight calls.
-        this.source.cancel();
-        this.source = CancelToken.source();
+    updateVersion = ()=>{
+        if(this.unmounted) {
+            return;
+        }
+        this.setState({version: this.state.version+1});
+        let notebook_id = this.state.selected_notebook &&
+            this.state.selected_notebook.notebook_id;
 
-        api.get("v1/GetNotebooks", {
-            count: PAGE_SIZE,
-            offset: 0,
-        }, this.source.token).then(response=>{
-            if (response.cancel) return;
-
-            let notebooks = response.data.items || [];
-
-            this.setState({notebooks: notebooks, loading: false});
-
-            let selected_notebook_id = this.state.selected_notebook &&
-                this.state.selected_notebook.notebook_id;
-
-            // Check the router for a notebook id
-            if (!this.state.refreshed_from_router) {
-                let router_notebook_id = this.props.match && this.props.match.params &&
-                    this.props.match.params.notebook_id;
-                if (router_notebook_id) {
-                    selected_notebook_id = router_notebook_id;
-                }
-                this.setState({refreshed_from_router: true});
+        if(!_.isEmpty(notebook_id)) {
+            this.setSelectedNotebook(notebook_id);
+        } else {
+            let match_notebook_id = this.props.match &&
+                this.props.match.params &&
+                this.props.match.params.notebook_id;
+            if (match_notebook_id) {
+                this.setSelectedNotebook(match_notebook_id);
             }
-
-            // Now search the notebooks records to find the selected
-            // notebook record. We need to get its last modified time to figure
-            // out if it needs reloading.
-            let selected_brief_record = {};
-            for(let i = 0; i < notebooks.length; i++) {
-                if (notebooks[i].notebook_id === selected_notebook_id) {
-                    selected_brief_record = notebooks[i];
-                    break;
-                }
-            }
-
-            // Only reload the full version if the notebook is modified.
-            if (this.state.selected_notebook.modified_time !==
-                selected_brief_record.modified_time) {
-                this.setSelectedNotebook({notebook_id: selected_notebook_id});
-            };
-        });
+        }
     }
 
-    setSelectedNotebook = (notebook) => {
+    setSelectedNotebook = (notebook_id) => {
+        if(notebook_id === "new") {
+            return;
+        }
+
         // Fetch the data again with more details this time
         this.source.cancel();
         this.source = CancelToken.source();
 
+        // Only show the loading sign when we load a new notebook not
+        // for periodic refresh.
+        let old_notebook_id = this.state.selected_notebook &&
+            this.state.selected_notebook.notebook_id;
+        if (notebook_id !== old_notebook_id) {
+            this.setState({loading: true});
+        }
+
         api.get("v1/GetNotebooks", {
-            notebook_id: notebook.notebook_id,
-            include_uploads: false,
+            notebook_id: notebook_id,
         }, this.source.token).then(response=>{
+            this.setState({loading: false});
+
             if (response.cancel) return;
 
             let notebooks = response.data.items || [];
 
             if (notebooks.length > 0) {
                 let selected_notebook = notebooks[0];
+                let selected_notebook_id = selected_notebook.notebook_id;
+
                 let current_selected_notebook = this.state.selected_notebook || {};
-                // Only modify the notebook if it has changed
-                if (selected_notebook.modified_time != current_selected_notebook.modified_time) {
-                    this.setState({selected_notebook: notebooks[0], loading: false});
-                    this.props.history.push("/notebooks/" + notebooks[0].notebook_id);
+                if (selected_notebook.version != current_selected_notebook.version) {
+                    this.setState({
+                        selected_notebook: selected_notebook,
+                        loading: false});
+                    this.props.history.push("/notebooks/" +
+                                            selected_notebook_id);
+                    setItem(schema.CurrentNotebookIdKey, selected_notebook_id);
                 }
             }
+
+        }).catch(response=>{
+            let status = response.response && response.response.status;
+            if(status === 404) {
+                setItem(schema.CurrentNotebookIdKey, "");
+                this.props.history.push("/notebooks");
+            };
+
         });
     };
 
@@ -123,13 +121,13 @@ class Notebooks extends React.Component {
               <Spinner loading={this.state.loading} />
               <SplitPane split="horizontal" defaultSize="30%">
                 <NotebooksList
-                  fetchNotebooks={this.fetchNotebooks}
+                  updateVersion={this.updateVersion}
+                  version={this.state.version}
                   selected_notebook={this.state.selected_notebook}
                   setSelectedNotebook={this.setSelectedNotebook}
-                  notebooks={this.state.notebooks}
                 />
                 <NotebookRenderer
-                  fetchNotebooks={this.fetchNotebooks}
+                  updateVersion={this.updateVersion}
                   notebook={this.state.selected_notebook}
                 />
               </SplitPane>

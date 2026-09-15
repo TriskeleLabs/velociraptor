@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	"www.velocidex.com/golang/velociraptor/http_comms"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -31,7 +33,7 @@ var (
 	conflictError     = errors.New("Another Client connection exists. " +
 		"Only a single instance of the client is " +
 		"allowed to connect at the same time.")
-	notConnectedError = errors.New("WS Socket is not conencted")
+	notConnectedError = errors.New("WS Socket is not connected")
 
 	currentWSConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "client_comms_current_ws_connections",
@@ -57,7 +59,9 @@ func ws_server_pem(
 	}
 	defer ws_.Close()
 
-	ws := &http_comms.Conn{Conn: ws_}
+	key := fmt.Sprintf("server_pem->%v", req.RemoteAddr)
+	ws := http_comms.NewWS(key, ws_)
+	defer ws.Close()
 
 	for {
 		// Just read a message and ignore it.
@@ -86,14 +90,12 @@ func ws_receive_client_messages(
 	}
 	defer ws_.Close()
 
-	ws := &http_comms.Conn{Conn: ws_}
+	// We are receiving messages from the endpoint
+	key := fmt.Sprintf("<-%v", req.RemoteAddr)
+	ws := http_comms.NewWS(key, ws_)
+	defer ws.Close()
 
-	ws.SetPongHandler(func(string) error {
-		deadline := utils.Now().Add(
-			http_comms.PongPeriod(config_obj))
-		ws.SetReadDeadline(deadline)
-		return nil
-	})
+	ws.SetPongHandler(config_obj)
 
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
@@ -114,7 +116,7 @@ func ws_receive_client_messages(
 	// them.
 	for {
 		ws.SetReadLimit(maxMessageSize)
-		ws.SetReadDeadline(utils.Now().Add(
+		_ = ws.SetReadDeadline(utils.Now().Add(
 			http_comms.PongPeriod(config_obj)))
 		_, message, err := ws.ReadMessage()
 		if err != nil {
@@ -147,7 +149,7 @@ func ws_receive_client_messages(
 			}
 
 			// We need to indicate to the client to start the
-			// enrolment process. Since the client can not read
+			// enrollment process. Since the client can not read
 			// anything from us (because we can not encrypt for
 			// it), we indicate this by providing it with an HTTP
 			// error code.
@@ -161,8 +163,9 @@ func ws_receive_client_messages(
 		// client disconnects quickly the request context will be
 		// cancelled and aborted, but we do not want this to
 		// interrupt actually processing the message.
-		subctx, cancel := context.WithTimeout(context.Background(),
-			60*time.Second)
+		subctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 60*time.Second,
+			errors.New("Websocket: deadline reached processing message"))
 
 		_, _, err = server_obj.Process(subctx, message_info,
 			DoNotDrainRequestsForClient)
@@ -170,13 +173,13 @@ func ws_receive_client_messages(
 			// Send the client an error that indicates the request was
 			// incorrect but the client should not retry to send the
 			// data.
-			send_error(ws, err, http.StatusBadRequest)
+			_ = send_error(ws, err, http.StatusBadRequest)
 			cancel()
 
 		} else {
 			// Send an ack to the client that we received this
 			// message.
-			send_error(ws, nil, http.StatusOK)
+			_ = send_error(ws, nil, http.StatusOK)
 			cancel()
 		}
 	}
@@ -204,12 +207,12 @@ func send_error(ws *http_comms.Conn, err error, code int) error {
 	serialized, _ := json.Marshal(msg)
 
 	deadline := utils.Now().Add(writeWait)
-	ws.WriteMessageWithDeadline(websocket.BinaryMessage, serialized, deadline)
+	err = ws.WriteMessageWithDeadline(websocket.BinaryMessage, serialized, deadline)
 
 	// Wait for the message to be sent to the client side
 	// time.Sleep(time.Second)
 
-	return nil
+	return err
 }
 
 func send_ping(
@@ -229,24 +232,28 @@ func ws_send_client_messages(
 	}
 	defer ws_.Close()
 
-	ws := &http_comms.Conn{Conn: ws_}
+	// Sending messages to the client
+	key := fmt.Sprintf("->%v", req.RemoteAddr)
+	ws := http_comms.NewWS(key, ws_)
+	defer ws.Close()
 
 	// Keep track of currently connected clients.
 	currentWSConnections.Inc()
 	defer currentWSConnections.Dec()
 
-	ws.SetPongHandler(func(string) error {
-		deadline := utils.Now().Add(http_comms.PongPeriod(config_obj))
-		ws.SetReadDeadline(deadline)
-		return nil
-	})
+	ws.SetPongHandler(config_obj)
 
 	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
 
 	for {
 		// Read the first message to authenticate the client's connection
 		ws.SetReadLimit(maxMessageSize)
-		ws.SetReadDeadline(utils.Now().Add(http_comms.PongPeriod(config_obj)))
+		err := ws.SetReadDeadline(utils.Now().Add(http_comms.PongPeriod(config_obj)))
+		if err != nil {
+			return err
+		}
+
 		_, message, err := http_comms.ReadMessageWithCtx(
 			ws, ctx, config_obj)
 		if err != nil {
@@ -287,7 +294,7 @@ func ws_send_client_messages(
 			return send_error(ws, err, http.StatusServiceUnavailable)
 		}
 
-		// If client is not known, make it enrol. This can happen for
+		// If client is not known, make it enroll. This can happen for
 		// example, when the client was just deleted, but we still
 		// have ciphers cached to it - the client is not known but we
 		// can still verify the comms as authenticated. NOTE: this
@@ -311,7 +318,7 @@ func ws_send_client_messages(
 				[]*ordereddict.Dict{
 					ordereddict.NewDict().
 						Set("ClientId", source)},
-				"Server.Internal.Enrollment", source, "")
+				artifacts.ENROLLMENT_QUEUE)
 			if err != nil {
 				return send_error(ws, err, http.StatusServiceUnavailable)
 			}
@@ -329,7 +336,6 @@ func ws_send_client_messages(
 
 		// Check for conflicting clients
 		if notifier.IsClientDirectlyConnected(source) {
-
 			// Send a message that there is a client conflict.
 			journal, err := services.GetJournal(org_config_obj)
 			if err == nil {
@@ -338,8 +344,7 @@ func ws_send_client_messages(
 					Set("RemoteAddr", message_info.RemoteAddr).
 					Set("UserAgent", req.UserAgent())
 				journal.PushRowsToArtifactAsync(ctx, org_config_obj,
-					info,
-					"Server.Internal.ClientConflict")
+					info, artifacts.CLIENT_CONFLICT)
 			}
 			return send_error(ws, conflictError, http.StatusConflict)
 		}
@@ -350,23 +355,29 @@ func ws_send_client_messages(
 		// drop any further client messages. (see
 		// https://github.com/gorilla/websocket/issues/633)
 		go func() {
+			defer cancel()
+			defer ws.Close()
+
 			for {
 				deadline := utils.Now().Add(http_comms.PongPeriod(config_obj))
-				ws.SetReadDeadline(deadline)
-				_, _, err := ws.NextReader()
+				_, _, err = ws.NextReaderWithDeadline(deadline)
 				if err != nil {
-					cancel()
 					return
 				}
 			}
 		}()
 
 		for {
+			// Process the first time around, then just keep feeding
+			// an empty message_info to drain our client queue.
 			err := send_one_message(ctx, ws, server_obj,
 				org_config_obj, message_info)
 			if err != nil {
 				return err
 			}
+
+			// This ensures the messages are processed only once.
+			message_info.RawCompressed = nil
 		}
 	}
 }

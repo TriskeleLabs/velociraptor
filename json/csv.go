@@ -30,16 +30,12 @@ func ConvertJSONL(
 	var extra_value [][]byte
 
 	if extra_data != nil {
-		for _, k := range extra_data.Keys() {
-			value, pres := extra_data.Get(k)
-			if !pres {
-				continue
-			}
-			v, err := json.Marshal(value)
+		for _, i := range extra_data.Items() {
+			v, err := json.Marshal(i.Value)
 			if err != nil {
 				continue
 			}
-			extra_keys = append(extra_keys, k)
+			extra_keys = append(extra_keys, i.Key)
 			extra_value = append(extra_value, v)
 		}
 	}
@@ -58,9 +54,9 @@ func ConvertJSONL(
 
 		// In the special case where we do not need to modify the json
 		// or convert it to csv then we can skip parsing it
-		// alltogether.
+		// altogether.
 		if extra_data == nil && jsonl_out != nil && csv_out == nil {
-			jsonl_out.Write(serialized)
+			_, _ = jsonl_out.Write(serialized)
 			continue
 		}
 
@@ -75,18 +71,18 @@ func ConvertJSONL(
 		}
 
 		if jsonl_out != nil {
-			// If we dont need to add any columns we just copy the
+			// If we don't need to add any columns we just copy the
 			// original JSONL without needing to encode it.
 			if extra_data == nil {
-				jsonl_out.Write(serialized)
+				_, _ = jsonl_out.Write(serialized)
 			} else {
-				jsonl_out.Write(
+				_, _ = jsonl_out.Write(
 					writeJsonObject(arena, obj, extra_keys, extra_value))
 			}
 		}
 
 		if csv_out != nil {
-			csv_out.Write(csv_encoder.Encode(obj))
+			_, _ = csv_out.Write(csv_encoder.Encode(obj))
 		}
 	}
 }
@@ -110,13 +106,10 @@ func NewCSVEncoder(extra_data *ordereddict.Dict) *CSVEncoder {
 	self.writer = csv.NewWriter(&self.buf)
 
 	if extra_data != nil {
-		for _, k := range extra_data.Keys() {
-			v, pres := extra_data.Get(k)
-			if pres {
-				self.extra_keys = append(self.extra_keys, k)
-				self.extra_values = append(self.extra_values,
-					AnyToString(v, DefaultEncOpts()))
-			}
+		for _, i := range extra_data.Items() {
+			self.extra_keys = append(self.extra_keys, i.Key)
+			self.extra_values = append(self.extra_values,
+				AnyToString(i.Value, DefaultEncOpts()))
 		}
 	}
 
@@ -139,7 +132,7 @@ func (self *CSVEncoder) Encode(obj *fastjson.Object) []byte {
 		}
 
 		// Encode the headers
-		self.writer.Write(self.columns)
+		_ = self.writer.Write(self.columns)
 	}
 
 	if len(self.columns) == 0 {
@@ -168,7 +161,7 @@ func (self *CSVEncoder) Encode(obj *fastjson.Object) []byte {
 			// It is already a string
 			b, err := v.StringBytes()
 			if err == nil {
-				self.row[idx] = string(b)
+				self.row[idx] = sanitizeExcelFormulas(string(b))
 			}
 
 			// Nulls should be written as a empty strings
@@ -177,7 +170,7 @@ func (self *CSVEncoder) Encode(obj *fastjson.Object) []byte {
 
 			// Everything else will be JSON encoded.
 		default:
-			self.row[idx] = string(v.MarshalTo(nil))
+			self.row[idx] = sanitizeExcelFormulas(string(v.MarshalTo(nil)))
 		}
 
 	})
@@ -188,10 +181,10 @@ func (self *CSVEncoder) Encode(obj *fastjson.Object) []byte {
 			continue
 		}
 
-		self.row[idx] = self.extra_values[i]
+		self.row[idx] = sanitizeExcelFormulas(self.extra_values[i])
 	}
 
-	self.writer.Write(self.row)
+	_ = self.writer.Write(self.row)
 	self.writer.Flush()
 
 	result := self.buf.Bytes()
@@ -227,8 +220,11 @@ func writeJsonObject(
 		}
 	}
 
-	if len(buf) == 0 {
-		buf = append(buf, '{', '}')
+	// Only the opening brace was written (no object keys and no extra
+	// keys), so close it as an empty object rather than clobbering the
+	// opening brace.
+	if len(buf) == 1 {
+		buf = append(buf, '}', '\n')
 		return buf
 	}
 
@@ -236,4 +232,15 @@ func writeJsonObject(
 	buf = append(buf, '\n')
 
 	return buf
+}
+
+// https://owasp.org/www-community/attacks/CSV_Injection
+func sanitizeExcelFormulas(in string) string {
+	if len(in) > 0 {
+		switch in[0] {
+		case '=', '+', '@', '\x09', '\x0d', '\x0a':
+			return "\t" + in
+		}
+	}
+	return in
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -8,14 +9,15 @@ import (
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
 
-	context "golang.org/x/net/context"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/api/tables"
+	"www.velocidex.com/golang/velociraptor/constants"
+	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
-	vjson "www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/hunt_dispatcher"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -26,6 +28,8 @@ import (
 func (self *ApiServer) GetHuntFlows(
 	ctx context.Context,
 	in *api_proto.GetTableRequest) (*api_proto.GetTableResponse, error) {
+
+	defer Instrument("GetHuntFlows")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -74,18 +78,26 @@ func (self *ApiServer) GetHuntFlows(
 			continue
 		}
 
-		row_data := []string{
+		row_data := []interface{}{
 			flow.Context.ClientId,
 			services.GetHostname(ctx, org_config_obj, flow.Context.ClientId),
 			flow.Context.SessionId,
-			json.AnyToString(flow.Context.StartTime/1000, vjson.DefaultEncOpts()),
+			flow.Context.StartTime / 1000,
 			flow.Context.State.String(),
-			json.AnyToString(flow.Context.ExecutionDuration/1000000000,
-				vjson.DefaultEncOpts()),
-			json.AnyToString(flow.Context.TotalUploadedBytes, vjson.DefaultEncOpts()),
-			json.AnyToString(flow.Context.TotalCollectedRows, vjson.DefaultEncOpts())}
+			flow.Context.ExecutionDuration / 1000000000,
+			flow.Context.TotalUploadedBytes,
+			flow.Context.TotalCollectedRows,
+		}
 
-		result.Rows = append(result.Rows, &api_proto.Row{Cell: row_data})
+		opts := json.DefaultEncOpts()
+		serialized, err := json.MarshalWithOptions(row_data, opts)
+		if err != nil {
+			continue
+		}
+
+		result.Rows = append(result.Rows, &api_proto.Row{
+			Json: string(serialized),
+		})
 
 		if uint64(len(result.Rows)) > in.Rows {
 			break
@@ -97,6 +109,8 @@ func (self *ApiServer) GetHuntFlows(
 func (self *ApiServer) GetHuntTable(
 	ctx context.Context,
 	in *api_proto.GetTableRequest) (*api_proto.GetTableResponse, error) {
+
+	defer Instrument("GetHuntTable")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -122,7 +136,9 @@ func (self *ApiServer) GetHuntTable(
 		return nil, Status(self.verbose, err)
 	}
 
-	hunts, total, err := hunt_dispatcher.GetHunts(ctx, org_config_obj, options,
+	hunts, total, err := hunt_dispatcher.GetHunts(
+		ctx, org_config_obj, options,
+		services.GetHuntOptions{Request: false},
 		int64(in.StartRow), int64(in.Rows))
 	if err != nil {
 		return nil, Status(self.verbose, err)
@@ -142,19 +158,25 @@ func (self *ApiServer) GetHuntTable(
 			total_clients_scheduled = hunt.Stats.TotalClientsScheduled
 		}
 
-		row_data := []string{
+		row_data := []interface{}{
 			fmt.Sprintf("%v", hunt.State),
-			json.AnyToString(hunt.Tags, vjson.DefaultEncOpts()),
+			hunt.Tags,
 			hunt.HuntId,
 			hunt.HuntDescription,
-			json.AnyToString(hunt.CreateTime, vjson.DefaultEncOpts()),
-			json.AnyToString(hunt.StartTime, vjson.DefaultEncOpts()),
-			json.AnyToString(hunt.Expires, vjson.DefaultEncOpts()),
-			fmt.Sprintf("%v", total_clients_scheduled),
+			hunt.CreateTime,
+			hunt.StartTime,
+			hunt.Expires,
+			total_clients_scheduled,
 			hunt.Creator,
 		}
-
-		result.Rows = append(result.Rows, &api_proto.Row{Cell: row_data})
+		opts := json.DefaultEncOpts()
+		serialized, err := json.MarshalWithOptions(row_data, opts)
+		if err != nil {
+			continue
+		}
+		result.Rows = append(result.Rows, &api_proto.Row{
+			Json: string(serialized),
+		})
 
 		if uint64(len(result.Rows)) > in.Rows {
 			break
@@ -199,7 +221,7 @@ func (self *ApiServer) CreateHunt(
 			"User is not allowed to launch hunts.")
 	}
 
-	// Require the Org Admin permission to launch hunts in a differen
+	// Require the Org Admin permission to launch hunts in a different
 	// org.
 	orgs := in.OrgIds
 	if len(orgs) > 0 {
@@ -281,19 +303,23 @@ func (self *ApiServer) CreateHunt(
 	result.FlowId = in.HuntId
 
 	// Audit message for GUI access
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		org_config_obj, principal, "CreateHunt",
 		ordereddict.NewDict().
 			Set("hunt_id", result.FlowId).
 			Set("details", in).
 			Set("orgs", orgs_we_scheduled))
+	if err != nil {
+		logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+		logger.Error("<red>CreateHunt</> %v %v", principal, result.FlowId)
+	}
 
 	return result, nil
 }
 
 func (self *ApiServer) ModifyHunt(
 	ctx context.Context,
-	in *api_proto.Hunt) (*emptypb.Empty, error) {
+	in *api_proto.HuntMutation) (*emptypb.Empty, error) {
 
 	defer Instrument("ModifyHunt")()
 
@@ -305,31 +331,49 @@ func (self *ApiServer) ModifyHunt(
 	}
 	principal := user_record.Name
 
-	in.Creator = principal
-
 	permissions := acls.COLLECT_CLIENT
-	if in.State == api_proto.Hunt_RUNNING {
+	switch in.State {
+	case api_proto.Hunt_RUNNING:
 		permissions = acls.START_HUNT
+
+	case api_proto.Hunt_DELETED:
+		permissions = acls.DELETE_RESULTS
 	}
 
-	perm, err := services.CheckAccess(org_config_obj, in.Creator, permissions)
+	perm, err := services.CheckAccess(org_config_obj, principal, permissions)
 	if !perm || err != nil {
 		return nil, PermissionDenied(err,
 			"User is not allowed to modify hunts.")
 	}
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		org_config_obj, principal, "ModifyHunt",
 		ordereddict.NewDict().
 			Set("hunt_id", in.HuntId).
 			Set("details", in))
+	if err != nil {
+		logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+		logger.Error("<red>ModifyHunt</> %v %v", principal, in.HuntId)
+	}
 
 	hunt_dispatcher, err := services.GetHuntDispatcher(org_config_obj)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
 
-	err = hunt_dispatcher.ModifyHunt(ctx, org_config_obj, in, in.Creator)
+	// Only allow some fields to be set by the GUI
+	mutation := &api_proto.HuntMutation{
+		HuntId:      in.HuntId,
+		State:       in.State,
+		Description: in.Description,
+		Stats:       in.Stats,
+		Expires:     in.Expires,
+		Tags:        in.Tags,
+		User:        principal,
+		Recalculate: in.Recalculate,
+	}
+
+	err = hunt_dispatcher.MutateHunt(ctx, org_config_obj, mutation)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
@@ -364,7 +408,9 @@ func (self *ApiServer) ListHunts(
 	}
 
 	result, err := hunt_dispatcher.ListHunts(
-		ctx, org_config_obj, in)
+		ctx, org_config_obj,
+		services.GetHuntOptions{Request: false},
+		in)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
@@ -419,10 +465,19 @@ func (self *ApiServer) GetHunt(
 		return nil, Status(self.verbose, err)
 	}
 
-	result, pres := hunt_dispatcher.GetHunt(ctx, in.HuntId)
+	result, pres := hunt_dispatcher.GetHunt(ctx,
+		services.GetHuntOptions{
+			Request: in.IncludeRequest || in.IncludeTruncatedRequest,
+		},
+		in.HuntId)
 	if !pres {
 		return nil, Status(self.verbose,
 			fmt.Errorf("%w: %v", services.HuntNotFoundError, in.HuntId))
+	}
+
+	if in.IncludeTruncatedRequest && result.StartRequest != nil {
+		result.StartRequest.CompiledCollectorArgs = nil
+		truncateHuntRequest(result.StartRequest)
 	}
 
 	return result, nil
@@ -526,7 +581,7 @@ func (self *ApiServer) EstimateHunt(
 	now := uint64(time.Now().UnixNano() / 1000)
 
 	is_client_recent := func(client_id string, seen map[string]bool) {
-		// We dont care about last active status
+		// We don't care about last active status
 		if in.LastActive == 0 {
 			seen[client_id] = true
 			return
@@ -641,4 +696,21 @@ func (self *ApiServer) EstimateHunt(
 	return &api_proto.HuntStats{
 		TotalClientsScheduled: uint64(len(seen)),
 	}, nil
+}
+
+func truncateHuntRequest(req *flows_proto.ArtifactCollectorArgs) {
+	if req == nil {
+		return
+	}
+
+	for _, spec := range req.Specs {
+		if spec.Parameters == nil {
+			continue
+		}
+		for _, env := range spec.Parameters.Env {
+			if len(env.Value) > constants.MAX_ENV_TRUNCATE_LIMIT {
+				env.Value = env.Value[:constants.MAX_ENV_TRUNCATE_LIMIT] + " ..."
+			}
+		}
+	}
 }

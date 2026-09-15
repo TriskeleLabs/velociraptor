@@ -28,8 +28,7 @@ type FlowReader struct {
 	In chan<- string
 
 	// Read records from here
-	Out <-chan *flows_proto.ArtifactCollectorContext
-	out chan *flows_proto.ArtifactCollectorContext
+	Out chan *flows_proto.ArtifactCollectorContext
 }
 
 // Wait for all in flight requests to finish.
@@ -43,14 +42,15 @@ func (self *FlowReader) Close() {
 	self.wg.Wait()
 
 	// Close the output channel to signal to listeners they are done.
-	close(self.out)
+	close(self.Out)
 }
 
 func NewFlowReader(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	storage_manager services.FlowStorer,
-	client_id string) *FlowReader {
+	client_id string,
+	options services.GetFlowOptions) *FlowReader {
 
 	in := make(chan string)
 	out := make(chan *flows_proto.ArtifactCollectorContext)
@@ -66,7 +66,6 @@ func NewFlowReader(
 		wg:         wg,
 		In:         in,
 		Out:        out,
-		out:        out,
 	}
 
 	for i := 0; i < WORKERS; i++ {
@@ -77,8 +76,11 @@ func NewFlowReader(
 
 			for session_id := range in {
 				collection_context, err := storage_manager.
-					LoadCollectionContext(ctx, config_obj, client_id, session_id)
-				if err == nil {
+					LoadCollectionContext(ctx, config_obj,
+						client_id, session_id, options)
+				if err == nil &&
+					collection_context != nil &&
+					collection_context.Request != nil {
 					select {
 					case <-ctx.Done():
 						return

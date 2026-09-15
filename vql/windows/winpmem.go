@@ -5,14 +5,15 @@ package windows
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"time"
 
 	"github.com/Velocidex/WinPmem/go-winpmem"
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	winpmem_accessor "www.velocidex.com/golang/velociraptor/accessors/winpmem"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -30,6 +31,7 @@ type WinpmemArgs struct {
 	ServiceName string `vfilter:"optional,field=service,doc=The name of the driver service to install."`
 	ImagePath   string `vfilter:"optional,field=image_path,doc=If specified we write a physical memory image on this path."`
 	Compression string `vfilter:"optional,field=compression,doc=When writing a memory image use this compression (default none) can be none, s2, snappy, gzip."`
+	DriverPath  string `vfilter:"optional,field=driver_path,doc=Specify where to extract the driver - by default we use the temp folder"`
 }
 
 type WinpmemFunction struct{}
@@ -39,7 +41,7 @@ func (self WinpmemFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("winpmem", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "winpmem", args)()
 
 	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
 	if err != nil {
@@ -76,13 +78,31 @@ func (self WinpmemFunction) Call(
 			return vfilter.Null{}
 		}
 
-		// The driver is not installed, lets install the driver to a
-		// tempfile.
-		tmpfile, err := ioutil.TempFile("", "*.sys")
-		if err != nil {
-			scope.Log("winpmem: %v", err)
-			return vfilter.Null{}
+		var tmpfile *os.File
+
+		if arg.DriverPath == "" {
+			// The driver is not installed, lets install the driver to a
+			// tempfile.
+			tmpfile, err = tempfile.TempFile("*.sys")
+			if err != nil {
+				scope.Log("winpmem: %v", err)
+				return vfilter.Null{}
+			}
+		} else {
+			err = file.CheckPath(arg.DriverPath)
+			if err != nil {
+				scope.Log("ERROR:winpmem: %v", err)
+				return vfilter.Null{}
+			}
+
+			tmpfile, err = os.OpenFile(arg.DriverPath,
+				os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
+			if err != nil {
+				scope.Log("winpmem: %v", err)
+				return vfilter.Null{}
+			}
 		}
+
 		utils_tempfile.AddTmpFile(tmpfile.Name())
 
 		tmpfile.Write([]byte(driver))
@@ -98,10 +118,11 @@ func (self WinpmemFunction) Call(
 		// Driver will only be uninstalled when then root scope is destroyed.
 		root_scope := vql_subsystem.GetRootScope(scope)
 		root_scope.AddDestructor(func() {
-			err := winpmem.UninstallDriver(tmpfile.Name(), arg.ServiceName, logger)
-			if err == nil {
-				filesystem.RemoveFile(0, tmpfile.Name(), root_scope)
-			}
+			winpmem.UninstallDriver(tmpfile.Name(), arg.ServiceName, logger)
+
+			// Always try to remove the temp file.
+			filesystem.RemoveTmpFile(0, tmpfile.Name(), root_scope)
+			utils_tempfile.RemoveTmpFile(tmpfile.Name(), nil)
 		})
 
 		imager, err = winpmem.NewImager(DeviceName, logger)
@@ -119,6 +140,12 @@ func (self WinpmemFunction) Call(
 
 	// The user asked for a memory image.
 	if arg.ImagePath != "" {
+		err = file.CheckPath(arg.ImagePath)
+		if err != nil {
+			scope.Log("ERROR:winpmem: %v", err)
+			return vfilter.Null{}
+		}
+
 		out_fd, err := os.OpenFile(arg.ImagePath,
 			os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
 		if err != nil {
@@ -163,6 +190,7 @@ func (self WinpmemFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Doc:      "Uses the winpmem driver to take a memory image. This plugin is also needed to facilitate the winpmem accessor.",
 		ArgType:  type_map.AddType(scope, &WinpmemArgs{}),
 		Metadata: vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+		Version:  2,
 	}
 }
 

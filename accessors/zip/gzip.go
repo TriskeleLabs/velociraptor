@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -37,7 +37,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"time"
 
@@ -58,7 +57,7 @@ func (self *GzipFileInfo) IsDir() bool {
 }
 
 func (self *GzipFileInfo) Size() int64 {
-	// We dont really know the size.
+	// We don't really know the size.
 	return -1
 }
 
@@ -177,6 +176,13 @@ func (self GzipFileSystemAccessor) ParsePath(path string) (
 	return self.root.Parse(path)
 }
 
+func (self GzipFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "gzip",
+		Description: `Access the content of gzip files. The filename is a pathspec with a delegate accessor opening the actual gzip file.`,
+	}
+}
+
 func (self GzipFileSystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 	return &GzipFileSystemAccessor{
@@ -261,7 +267,7 @@ func GetBzip2File(full_path *accessors.OSPath, scope vfilter.Scope) (
 
 	zr := bzip2.NewReader(fd)
 	return &SeekableGzip{reader: fd,
-		gz: ioutil.NopCloser(zr),
+		gz: io.NopCloser(zr),
 		info: &GzipFileInfo{
 			_modtime:   stat.ModTime(),
 			_name:      stat.Name(),
@@ -330,13 +336,17 @@ func GetGzipFile(full_path *accessors.OSPath, scope vfilter.Scope) (ReaderStat, 
 }
 
 func init() {
-	accessors.Register("gzip", NewGzipFileSystemAccessor(
+	accessors.Register(NewGzipFileSystemAccessor(
 		accessors.MustNewLinuxOSPath(""), GetGzipFile),
-		`Access the content of gzip files. The filename is a pathspec with a delegate accessor opening the actual gzip file.`)
+	)
 
-	accessors.Register("bzip2", NewGzipFileSystemAccessor(
-		accessors.MustNewLinuxOSPath(""), GetBzip2File),
-		`Access the content of gzip files. The filename is a pathspec with a delegate accessor opening the actual gzip file.`)
+	accessors.Register(accessors.DescribeAccessor(
+		NewGzipFileSystemAccessor(
+			accessors.MustNewLinuxOSPath(""), GetBzip2File),
+		accessors.AccessorDescriptor{
+			Name:        "bzip2",
+			Description: `Access the content of gzip files. The filename is a pathspec with a delegate accessor opening the actual gzip file.`,
+		}))
 
 	json.RegisterCustomEncoder(&GzipFileInfo{}, accessors.MarshalGlobFileInfo)
 }

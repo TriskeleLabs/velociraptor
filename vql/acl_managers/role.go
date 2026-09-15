@@ -43,6 +43,10 @@ func (self *RoleACLManager) CheckAccessInOrg(
 	return self.CheckAccess(permission...)
 }
 
+// NOOP because we always use the same token for all comparisons.
+func (self *RoleACLManager) SwitchDefaultOrg(config_obj *config_proto.Config) {
+}
+
 func (self *RoleACLManager) CheckAccessWithArgs(
 	permission acls.ACL_PERMISSION, args ...string) (bool, error) {
 

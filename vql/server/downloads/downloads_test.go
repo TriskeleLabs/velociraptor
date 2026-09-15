@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
@@ -32,6 +33,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/vql/tools/collector"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
@@ -78,21 +80,19 @@ sources:
 	Clock = utils.NewMockClock(time.Unix(1602103388, 0))
 	reporting.Clock = Clock
 
-	launcher, err := services.GetLauncher(self.ConfigObj)
-	assert.NoError(self.T(), err)
-	launcher.SetFlowIdForTests("F.1234")
-
 	// Create an administrator user
-	err = services.GrantRoles(self.ConfigObj, "admin", []string{"administrator"})
+	err := services.GrantRoles(self.ConfigObj, "admin", []string{"administrator"})
 	assert.NoError(self.T(), err)
 
 	self.acl_manager = acl_managers.NewServerACLManager(
 		self.ConfigObj, "admin")
+
+	self.CreateClient(self.client_id)
 }
 
 func (self *TestSuite) TestExportCollectionServerArtifact() {
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
+	defer utils.SetFlowIdForTests("F.1234")()
 
 	manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository, err := manager.GetGlobalRepository(self.ConfigObj)
@@ -106,13 +106,15 @@ func (self *TestSuite) TestExportCollectionServerArtifact() {
 		repository, &flows_proto.ArtifactCollectorArgs{
 			Artifacts: []string{"TestArtifact"},
 			Creator:   utils.GetSuperuserName(self.ConfigObj),
-			ClientId:  "server",
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 		}, utils.SyncCompleter)
 	assert.NoError(self.T(), err)
 
 	// Wait here until the collection is completed.
 	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
-		flow, err := launcher.GetFlowDetails(self.Ctx, self.ConfigObj, "server", flow_id)
+		flow, err := launcher.GetFlowDetails(
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, flow_id)
 		assert.NoError(self.T(), err)
 
 		return flow.Context.State == flows_proto.ArtifactCollectorContext_FINISHED
@@ -133,7 +135,7 @@ func (self *TestSuite) TestExportCollectionServerArtifact() {
 	// pathspec to the created download file.
 	result := (&CreateFlowDownload{}).Call(ctx, scope,
 		ordereddict.NewDict().
-			Set("client_id", "server").
+			Set("client_id", constants.VELOCIRAPTOR_SERVER_CLIENT_ID).
 			Set("flow_id", flow_id).
 			Set("wait", true).
 			Set("format", "csv").
@@ -141,7 +143,7 @@ func (self *TestSuite) TestExportCollectionServerArtifact() {
 			Set("name", "Test"))
 
 	// A zip file was created
-	path_spec, ok := result.(path_specs.FSPathSpec)
+	path_spec, ok := result.(*path_specs.FSPathSpec)
 	assert.True(self.T(), ok)
 
 	file_details, err := openZipFile(self.ConfigObj, scope, path_spec)
@@ -192,7 +194,7 @@ func (self *TestSuite) TestExportCollection1() {
 			Set("name", "Test"))
 
 	// A zip file was created
-	path_spec, ok := result.(path_specs.FSPathSpec)
+	path_spec, ok := result.(*path_specs.FSPathSpec)
 	assert.True(self.T(), ok)
 
 	assert.Equal(self.T(),
@@ -226,7 +228,7 @@ func (self *TestSuite) TestExportCollection1() {
 			Set("name", "TestExpanded"))
 
 	// A zip file was created
-	path_spec, ok = result.(path_specs.FSPathSpec)
+	path_spec, ok = result.(*path_specs.FSPathSpec)
 	assert.True(self.T(), ok)
 
 	assert.Equal(self.T(),
@@ -250,6 +252,56 @@ func (self *TestSuite) TestExportCollection1() {
 
 	goldie.Assert(self.T(), "TestExportCollectionUploads",
 		json.MustMarshalIndent(uploads_json))
+}
+
+func (self *TestSuite) TestExportCollectionWithPassword() {
+	manager, _ := services.GetRepositoryManager(self.ConfigObj)
+
+	builder := services.ScopeBuilder{
+		Config:     self.ConfigObj,
+		ACLManager: self.acl_manager,
+		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
+		Env:        ordereddict.NewDict(),
+	}
+
+	ctx := self.Ctx
+	scope := manager.BuildScope(builder)
+
+	import_file_path, err := filepath.Abs("fixtures/export.zip")
+	assert.NoError(self.T(), err)
+
+	result := collector.ImportCollectionFunction{}.Call(ctx, scope,
+		ordereddict.NewDict().
+			// Set a fixed client id to keep it predictable
+			Set("client_id", self.client_id).
+			Set("hostname", "MyNewHost").
+			Set("filename", import_file_path))
+	context, ok := result.(*flows_proto.ArtifactCollectorContext)
+	assert.True(self.T(), ok)
+	assert.Equal(self.T(), uint64(11), context.TotalUploadedBytes)
+
+	// Now create the download export. The plugin returns a filestore
+	// pathspec to the created download file.
+	result = (&CreateFlowDownload{}).Call(ctx, scope,
+		ordereddict.NewDict().
+			Set("client_id", context.ClientId).
+			Set("flow_id", context.SessionId).
+			Set("wait", true).
+			Set("password", "password").
+			Set("expand_sparse", false).
+			Set("name", "Test"))
+
+	// A zip file was created
+	path_spec, ok := result.(*path_specs.FSPathSpec)
+	assert.True(self.T(), ok)
+
+	assert.Equal(self.T(),
+		"fs:/downloads/"+self.client_id+"/F.1234/Test.zip", path_spec.String())
+
+	// Now inspect the zip file
+	_, err = openZipFile(self.ConfigObj, scope, path_spec)
+	assert.Error(self.T(), err)
+	assert.ErrorContains(self.T(), err, "zip: invalid password")
 }
 
 func (self *TestSuite) TestExportHunt() {
@@ -316,6 +368,24 @@ func (self *TestSuite) TestExportHunt() {
 
 	assert.Equal(self.T(), self.client_id, result.(string))
 
+	disp, err := services.GetHuntDispatcher(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Wait some time for the hunt to be added.
+	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
+		_, total_rows, _ := disp.GetFlows(
+			ctx, self.ConfigObj,
+			services.FlowSearchOptions{BasicInformation: true}, scope,
+			hunt_id, 0)
+		return total_rows == 1
+	})
+
+	err = disp.Refresh(ctx, self.ConfigObj, hunt_dispatcher.FORCE_REFRESH)
+	assert.NoError(self.T(), err)
+
+	err = datastore.FlushDatastore(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
 	time.Sleep(500 * time.Millisecond)
 
 	// Now create a hunt download export.
@@ -327,7 +397,7 @@ func (self *TestSuite) TestExportHunt() {
 			Set("format", "csv").
 			Set("wait", true))
 
-	download_pathspec := result.(path_specs.FSPathSpec)
+	download_pathspec := result.(*path_specs.FSPathSpec)
 	assert.Equal(self.T(), "/downloads/hunts/H.123/HuntExportH.123.zip",
 		download_pathspec.AsClientPath())
 

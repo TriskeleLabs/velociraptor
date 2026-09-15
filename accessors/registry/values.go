@@ -4,8 +4,10 @@
 package registry
 
 import (
+	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows/registry"
@@ -75,9 +77,24 @@ func getValue(key registry.Key, value_name string) (
 
 		// We deliberately do not expand this because it depends on
 		// the process env.
-	case registry.MULTI_SZ, registry.SZ, registry.EXPAND_SZ:
+	case registry.SZ, registry.EXPAND_SZ:
 		u := (*[1 << 29]uint16)(unsafe.Pointer(&data[0]))[: len(data)/2 : len(data)/2]
 		return buf_size, value_type, syscall.UTF16ToString(u), nil
+
+	case registry.MULTI_SZ:
+		if buf_size == 0 {
+			return 0, value_type, nil, nil
+		}
+
+		u := (*[1 << 29]uint16)(unsafe.Pointer(&data[0]))[: buf_size/2 : buf_size/2]
+		parts := strings.Split(string(utf16.Decode(u)), "\x00")
+		res := []string{}
+		for _, p := range parts {
+			if p != "" {
+				res = append(res, p)
+			}
+		}
+		return buf_size, value_type, res, nil
 
 	default:
 	}

@@ -1,8 +1,9 @@
+//go:build freebsd
 // +build freebsd
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -25,24 +26,24 @@ import (
 	"time"
 )
 
-// On Linux we need xstat() support to get birth time.
 func (self *OSFileInfo) Btime() time.Time {
-	return time.Time{}
+	ts := self._Sys().Birthtimespec
+	return time.Unix(ts.Sec, ts.Nsec)
 }
 
 func (self *OSFileInfo) Mtime() time.Time {
-	ts := int64(self._Sys().Mtimespec.Sec)
-	return time.Unix(ts, 0)
+	ts := self._Sys().Mtimespec
+	return time.Unix(ts.Sec, ts.Nsec)
 }
 
 func (self *OSFileInfo) Ctime() time.Time {
-	ts := int64(self._Sys().Ctimespec.Sec)
-	return time.Unix(ts, 0)
+	ts := self._Sys().Ctimespec
+	return time.Unix(ts.Sec, ts.Nsec)
 }
 
 func (self *OSFileInfo) Atime() time.Time {
-	ts := int64(self._Sys().Atimespec.Sec)
-	return time.Unix(ts, 0)
+	ts := self._Sys().Atimespec
+	return time.Unix(ts.Sec, ts.Nsec)
 }
 
 func splitDevNumber(dev uint64) (major, minor uint64) {

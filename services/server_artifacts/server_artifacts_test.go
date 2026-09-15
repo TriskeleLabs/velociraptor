@@ -9,23 +9,26 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
@@ -37,12 +40,16 @@ type ServerArtifactsTestSuite struct {
 	test_utils.TestSuite
 }
 
-func (self *ServerArtifactsTestSuite) SetupSuite() {
+func (self *ServerArtifactsTestSuite) SetupTest() {
 	self.ConfigObj = self.TestSuite.LoadConfig()
 	self.ConfigObj.Services.ServerArtifacts = true
-}
+	self.ConfigObj.Services.ClientMonitoring = true
 
-func (self *ServerArtifactsTestSuite) SetupTest() {
+	self.LoadArtifactsIntoConfig([]string{`
+name: System.Flow.Completion
+type: CLIENT_EVENT
+`})
+
 	self.TestSuite.SetupTest()
 
 	// Create an administrator user
@@ -64,7 +71,7 @@ func (self *ServerArtifactsTestSuite) ScheduleAndWait(
 	complete_flow_id := ""
 
 	err := journal.WatchQueueWithCB(self.Sm.Ctx, self.ConfigObj, self.Sm.Wg,
-		"System.Flow.Completion", "ServerArtifactsTestSuite", func(
+		artifacts.FLOW_COMPLETION, "ServerArtifactsTestSuite", func(
 			ctx context.Context,
 			ConfigObj *config_proto.Config,
 			row *ordereddict.Dict) error {
@@ -83,21 +90,22 @@ func (self *ServerArtifactsTestSuite) ScheduleAndWait(
 
 	acl_manager := acl_managers.NewServerACLManager(self.ConfigObj, user)
 
-	launcher.SetFlowIdForTests(flow_id)
+	defer utils.SetFlowIdForTests(flow_id)()
 
 	// Schedule a job for the server runner.
 	flow_id, err = launcher.ScheduleArtifactCollection(
 		self.Sm.Ctx, self.ConfigObj, acl_manager,
 		repository, &flows_proto.ArtifactCollectorArgs{
 			Creator:   user,
-			ClientId:  "server",
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 			Artifacts: []string{name},
 		}, func() {
 			// Notify it about the new job
 			notifier, err := services.GetNotifier(self.ConfigObj)
 			assert.NoError(self.T(), err)
 
-			err = notifier.NotifyListener(ctx, self.ConfigObj, "server", "")
+			err = notifier.NotifyListener(ctx, self.ConfigObj,
+				constants.VELOCIRAPTOR_SERVER_CLIENT_ID, "")
 			assert.NoError(self.T(), err)
 		})
 	if err != nil {
@@ -115,7 +123,8 @@ func (self *ServerArtifactsTestSuite) ScheduleAndWait(
 		defer mu.Unlock()
 
 		details, err = launcher.GetFlowDetails(
-			self.Ctx, self.ConfigObj, "server", flow_id)
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, flow_id)
 		assert.NoError(self.T(), err)
 
 		return details.Context.State != flows_proto.ArtifactCollectorContext_RUNNING
@@ -182,13 +191,15 @@ sources:
 	// Wait for the flow to be created
 	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
 		_, err := launcher.GetFlowDetails(
-			self.Ctx, self.ConfigObj, "server", "F.1234")
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, "F.1234")
 		return err == nil
 	})
 
 	// cancel the flow
 	resp, err := launcher.CancelFlow(
-		self.Ctx, self.ConfigObj, "server", "F.1234", "admin")
+		self.Ctx, self.ConfigObj, constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+		"F.1234", "admin")
 	assert.NoError(self.T(), err)
 	assert.Equal(self.T(), resp.FlowId, "F.1234")
 
@@ -250,7 +261,7 @@ sources:
 	assert.True(self.T(), run_time < 2)
 
 	flow_path_manager := paths.NewFlowPathManager(
-		"server", details.Context.SessionId)
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, details.Context.SessionId)
 	log_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
 		flow_path_manager.Log())
 	assert.Contains(self.T(), log_data,
@@ -293,7 +304,7 @@ sources:
 
 	// Make sure the upload data is stored in the upload file.
 	flow_path_manager := paths.NewFlowPathManager(
-		"server", details.Context.SessionId)
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, details.Context.SessionId)
 	uploads_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
 		flow_path_manager.UploadMetadata())
 
@@ -443,7 +454,7 @@ sources:
 	assert.True(self.T(), run_time >= 1)
 
 	flow_path_manager := paths.NewFlowPathManager(
-		"server", details.Context.SessionId)
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, details.Context.SessionId)
 	log_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
 		flow_path_manager.Log())
 	assert.Contains(self.T(), log_data, "Query timed out after ")
@@ -475,7 +486,7 @@ sources:
 	assert.NoError(self.T(), err)
 
 	// Can not launch collection.
-	details, err = self.ScheduleAndWait("Test", "gumby", "F.1234", nil)
+	_, err = self.ScheduleAndWait("Test", "gumby", "F.1234", nil)
 	assert.Error(self.T(), err)
 	assert.Contains(self.T(), err.Error(), "COLLECT_SERVER")
 
@@ -496,10 +507,117 @@ sources:
 	assert.Equal(self.T(), uint64(0), details.Context.TotalCollectedRows)
 
 	flow_path_manager := paths.NewFlowPathManager(
-		"server", details.Context.SessionId)
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, details.Context.SessionId)
 	log_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
 		flow_path_manager.Log())
 	assert.Contains(self.T(), log_data, "Permission denied: [MACHINE_STATE]")
+}
+
+/*
+Impersonation allows an artifact to run as another user similar to
+SUID binary. This allows an administrator to create a set of "meta"
+artifacts that can in turn launch other powerful artifacts in a
+controlled way, while providing access to these artifacts to
+unprivileged users.
+
+In this test a user with the reader role receives the COLLECT_BASIC
+permission allowing them to only collect basic artifacts. We then
+create a basic artifact with impersonation to "admin". This allows the
+reader role to launch this artifact as an admin and allows them to run
+VQL plugins that require the "MACHINE_STATE" permission.
+*/
+func (self *ServerArtifactsTestSuite) TestImpersonation() {
+	self.LoadArtifacts(`
+name: TestFilesystemAccess
+type: SERVER
+sources:
+- query: SELECT * FROM info()
+`, `
+name: TestFilesystemAccessWithImpersonation
+type: SERVER
+impersonate: admin
+sources:
+- query: SELECT * FROM info()
+`)
+
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Mark the TestFilesystemAccessWithImpersonation artifact as
+	// basic - this allows users to collect it with COLLECT_BASIC
+	// permission.
+	err = manager.SetArtifactMetadata(self.Ctx, self.ConfigObj, "admin",
+		"TestFilesystemAccessWithImpersonation",
+		&artifacts_proto.ArtifactMetadata{
+			Basic: true,
+		})
+	assert.NoError(self.T(), err)
+
+	acl_manager, err := services.GetACLManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// The reader user has no permission but can collect basic artifacts.
+	policy := &acl_proto.ApiClientACL{
+		Roles: []string{"reader"},
+
+		// Allowed to launch basic artifacts only.
+		CollectBasic: true,
+	}
+	err = acl_manager.SetPolicy(self.ConfigObj, "reader", policy)
+	assert.NoError(self.T(), err)
+
+	{
+		_, err := self.ScheduleAndWait("TestFilesystemAccess",
+			"reader", "F.1235", nil)
+		assert.Error(self.T(), err)
+		assert.Contains(self.T(), err.Error(),
+			"User reader is not allowed to launch flows COLLECT_SERVER")
+	}
+
+	// Lets make that artifact basic so our user can collect it
+	err = manager.SetArtifactMetadata(self.Ctx, self.ConfigObj, "admin",
+		"TestFilesystemAccess",
+		&artifacts_proto.ArtifactMetadata{
+			Basic: true,
+		})
+	assert.NoError(self.T(), err)
+
+	// Try again. This time collection succeeds but the actual
+	// artifact fails due to insufficient permissions.
+	{
+		details, err := self.ScheduleAndWait("TestFilesystemAccess",
+			"reader", "F.1236", nil)
+		assert.NoError(self.T(), err)
+
+		assert.Equal(self.T(), uint64(0), details.Context.TotalCollectedRows)
+
+		flow_path_manager := paths.NewFlowPathManager(
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			details.Context.SessionId)
+		log_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
+			flow_path_manager.Log())
+		assert.Contains(self.T(), log_data, "Permission denied: [MACHINE_STATE]")
+	}
+
+	// Run the collection again but this time with the Impersonated
+	// artifact
+	{
+		details, err := self.ScheduleAndWait(
+			"TestFilesystemAccessWithImpersonation",
+			"reader", "F.1237", nil)
+		assert.NoError(self.T(), err)
+
+		// This should have worked
+		assert.Equal(self.T(), uint64(1), details.Context.TotalCollectedRows)
+
+		flow_path_manager := paths.NewFlowPathManager(
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			details.Context.SessionId)
+		log_data := test_utils.FileReadAll(self.T(), self.ConfigObj,
+			flow_path_manager.Log())
+		assert.Contains(self.T(), log_data,
+			"Running query TestFilesystemAccessWithImpersonation on behalf of user reader with effective permissions for admin")
+	}
 }
 
 func TestServerArtifacts(t *testing.T) {

@@ -12,6 +12,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"io/fs"
 	"net/http"
@@ -24,7 +25,6 @@ import (
 	errors "github.com/go-errors/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	context "golang.org/x/net/context"
 	"www.velocidex.com/golang/velociraptor/services"
 )
 
@@ -124,13 +124,13 @@ func (self *CachedFilesystem) Open(name string) (http.File, error) {
 			brotliDecompressionCounter.Inc()
 
 			// Cache for next time.
-			self.lru.Set(name, out_fd.Bytes())
+			err = self.lru.Set(name, out_fd.Bytes())
 
 			return &brotliBuffer{
 				Reader: bytes.NewReader(out_fd.Bytes()),
 				name:   name,
 				size:   n,
-			}, nil
+			}, err
 		}
 	}
 	return fd, err
@@ -152,7 +152,7 @@ func NewCachedFilesystem(
 		lru:        ttlcache.NewCache(),
 	}
 
-	result.lru.SetTTL(10 * time.Minute)
+	_ = result.lru.SetTTL(10 * time.Minute)
 	result.lru.SkipTTLExtensionOnHit(true)
 
 	go func() {

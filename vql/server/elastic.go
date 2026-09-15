@@ -4,17 +4,17 @@
 // $ goweight ./bin/
 //    15 MB github.com/elastic/go-elasticsearch/v7/esapi
 
-// We observe a 6mb increase in the binary for this dependency which
+// We observe a 16mb increase in the binary for this dependency which
 // was deemed unacceptable. Further investigation revealed the size
 // was because the API Surface is huge and the client library supports
 // it all. Since we only actually bulk upload data to elastic we do
 // not need the entire API anyway. We therefore maintain a fork of the
-// client library for now. This allows us to include it in all builds
-// with a very minimal footprint.
+// client library. This allows us to include it in all builds with a
+// very minimal footprint (approximately 200kb vs 16Mb).
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -40,14 +40,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	elasticsearch "github.com/Velocidex/go-elasticsearch/v7"
+	elasticsearch "github.com/Velocidex/go-elasticsearch/v9"
 	"github.com/Velocidex/ordereddict"
 	"github.com/go-errors/errors"
 	"www.velocidex.com/golang/velociraptor/acls"
@@ -57,7 +55,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/networking"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -73,7 +70,7 @@ type _ElasticPluginArgs struct {
 	Addresses          []string            `vfilter:"optional,field=addresses,doc=A list of Elasticsearch nodes to use."`
 	Username           string              `vfilter:"optional,field=username,doc=Username for HTTP Basic Authentication."`
 	Password           string              `vfilter:"optional,field=password,doc=Password for HTTP Basic Authentication."`
-	CloudID            string              `vfilter:"optional,field=cloud_id,doc=Endpoint for the Elastic Service (https://elastic.co/cloud)."`
+	CloudID            string              `vfilter:"optional,field=cloud_id,doc=Endpoint for the [Elastic Cloud Service](https://elastic.co/cloud)."`
 	APIKey             string              `vfilter:"optional,field=api_key,doc=Base64-encoded token for authorization; if set, overrides username and password."`
 	WaitTime           int64               `vfilter:"optional,field=wait_time,doc=Batch elastic upload this long (2 sec)."`
 	PipeLine           string              `vfilter:"optional,field=pipeline,doc=Pipeline for uploads"`
@@ -94,8 +91,9 @@ func (self _ElasticPlugin) Call(ctx context.Context,
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "elastic", args)()
 
-		err := vql_subsystem.CheckAccess(scope, acls.COLLECT_SERVER)
+		err := vql_subsystem.CheckAccess(scope, acls.NETWORK)
 		if err != nil {
 			scope.Log("elastic: %v", err)
 			return
@@ -103,6 +101,12 @@ func (self _ElasticPlugin) Call(ctx context.Context,
 
 		arg := &_ElasticPluginArgs{}
 		err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
+		if err != nil {
+			scope.Log("elastic: %v", err)
+			return
+		}
+
+		err = self.maybeForceSecrets(ctx, scope, arg)
 		if err != nil {
 			scope.Log("elastic: %v", err)
 			return
@@ -224,8 +228,8 @@ func upload_rows(
 	count := int64(0)
 
 	// Batch sending to elastic: Either
-	// when we get to chuncksize or wait
-	// time whichever comes first.
+	// when we get to chunksize or wait
+	// time - whichever comes first.
 	for {
 		select {
 		case row, ok := <-row_chan:
@@ -233,8 +237,9 @@ func upload_rows(
 				return
 			}
 
-			id = int64(utils.GetId())
-			err := append_row_to_buffer(ctx, scope, action, row, id, &buf, arg, opts)
+			id += int64(utils.GetId())
+			err := append_row_to_buffer(ctx, scope, action, row,
+				id, &buf, arg, opts)
 			if err != nil {
 				scope.Log("elastic: %v", err)
 				continue
@@ -273,14 +278,23 @@ func append_row_to_buffer(
 		row_dict.Delete("_index")
 	}
 
+	// Allow the user to specify the elastic document ID as the _id
+	// column.
+	_id, pres := row_dict.GetString("_id")
+	if pres {
+		row_dict.Delete("_id")
+	} else {
+		_id = fmt.Sprintf("%v", id)
+	}
+
 	var meta []byte
 	pipeline := arg.PipeLine
 	if pipeline != "" {
-		meta = []byte(fmt.Sprintf(`{ %q : {"_id" : "%d", "_index": %q, "pipeline": %q } }%s`,
-			action, id, index, pipeline, "\n"))
+		meta = []byte(fmt.Sprintf(`{ %q : {"_id" : "%s", "_index": %q, "pipeline": %q } }%s`,
+			action, _id, index, pipeline, "\n"))
 	} else {
-		meta = []byte(fmt.Sprintf(`{ %q : {"_id" : "%d", "_index": %q} }%s`,
-			action, id, index, "\n"))
+		meta = []byte(fmt.Sprintf(`{ %q : {"_id" : "%s", "_index": %q} }%s`,
+			action, _id, index, "\n"))
 	}
 
 	data, err := json.MarshalWithOptions(row_dict, opts)
@@ -319,9 +333,12 @@ func send_to_elastic(
 	}
 
 	var response *ordereddict.Dict
-	b1, err := ioutil.ReadAll(res.Body)
+	b1, err := utils.ReadAllWithLimit(res.Body, constants.MAX_MEMORY)
 	if err == nil {
 		response, err = utils.ParseJsonToObject(b1)
+		if err != nil {
+			return
+		}
 	}
 
 	select {
@@ -337,11 +354,63 @@ func send_to_elastic(
 
 }
 
-var sanitize_index_re = regexp.MustCompile("[^a-zA-Z0-9]")
+// Valid Elastic index names
 
+// https://github.com/elastic/elasticsearch/blob/f6a05c6a7c15deaa583b2054175f81cfa8dca7ac/server/src/main/java/org/elasticsearch/common/Strings.java#L287
 func sanitize_index(name string) string {
-	return sanitize_index_re.ReplaceAllLiteralString(
-		strings.ToLower(name), "_")
+
+	// must not be '.' or '..'
+	switch name {
+	case ".", "..":
+		return "invalid"
+	}
+
+	res := []rune{}
+
+	// https://github.com/elastic/elasticsearch/blob/608a61ab85e82f8f6e88002ba7d8458411e7da62/core/src/test/java/org/elasticsearch/cluster/metadata/MetaDataCreateIndexServiceTests.java#L188-L202
+	for i, c := range name {
+		switch c {
+		//  must not contain the following characters
+		case '\\', '/', '*', '?', '"', '<', '>', '|', ' ', ',', '#':
+			res = append(res, '_')
+			continue
+
+			// must not start with '_', '-', or '+'
+		case '-', '+', '_':
+			if i == 0 {
+				continue
+			}
+		}
+
+		res = append(res, c)
+	}
+
+	return strings.ToLower(string(res))
+}
+
+func (self _ElasticPlugin) maybeForceSecrets(
+	ctx context.Context, scope vfilter.Scope, arg *_ElasticPluginArgs) error {
+
+	// Not running on the server, secrets don't work.
+	config_obj, ok := vql_subsystem.GetServerConfig(scope)
+	if !ok {
+		return nil
+	}
+
+	if config_obj.Security == nil {
+		return nil
+	}
+
+	if !config_obj.Security.VqlMustUseSecrets {
+		return nil
+	}
+
+	// If an explicit secret is defined let it filter the URLs.
+	if arg.Secret != "" {
+		return nil
+	}
+
+	return utils.SecretsEnforced
 }
 
 func mergeSecretElastic(ctx context.Context, scope vfilter.Scope, arg *_ElasticPluginArgs) error {
@@ -357,47 +426,30 @@ func mergeSecretElastic(ctx context.Context, scope vfilter.Scope, arg *_ElasticP
 
 	principal := vql_subsystem.GetPrincipal(scope)
 
-	secret_record, err := secrets_service.GetSecret(ctx, principal,
+	s, err := secrets_service.GetSecret(ctx, principal,
 		constants.ELASTIC_CREDS, arg.Secret)
 	if err != nil {
 		return err
 	}
 
-	get := func(field string) string {
-		return vql_subsystem.GetStringFromRow(
-			scope, secret_record.Data, field)
-	}
-
-	get_bool := func(field string) bool {
-		return vql_subsystem.GetBoolFromString(vql_subsystem.GetStringFromRow(
-			scope, secret_record.Data, field))
-	}
-
-	addresses := vql_subsystem.GetStringFromRow(
-		scope, secret_record.Data, "addresses")
-	arg.Addresses = nil
-	for _, line := range strings.Split(addresses, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		arg.Addresses = append(arg.Addresses, line)
-	}
+	arg.Addresses = s.GetStrings("addresses")
 
 	if arg.Addresses == nil {
 		return errors.New("No addresses present in elastic secret!")
 	}
 
-	arg.Index = get("index")
-	arg.Type = get("type")
-	arg.Username = get("username")
-	arg.Password = get("password")
-	arg.CloudID = get("cloud_id")
-	arg.APIKey = get("api_key")
-	arg.PipeLine = get("pipeline")
-	arg.SkipVerify = get_bool("skip_verify")
-	arg.RootCerts = get("root_ca")
-	arg.Action = get("action")
+	// Allow the user to override the index
+	s.UpdateString("index", &arg.Index)
+	s.UpdateString("type", &arg.Type)
+	s.UpdateString("pipeline", &arg.PipeLine)
+	s.UpdateString("action", &arg.Action)
+
+	arg.Username = s.GetString("username")
+	arg.Password = s.GetString("password")
+	arg.CloudID = s.GetString("cloud_id")
+	arg.APIKey = s.GetString("api_key")
+	arg.SkipVerify = s.GetBool("skip_verify")
+	arg.RootCerts = s.GetString("root_ca")
 
 	return nil
 }
@@ -408,8 +460,9 @@ func (self _ElasticPlugin) Info(
 	return &vfilter.PluginInfo{
 		Name:     "elastic_upload",
 		Doc:      "Upload rows to elastic.",
-		Metadata: vql.VQLMetadata().Permissions(acls.COLLECT_SERVER).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.NETWORK).Build(),
 		ArgType:  type_map.AddType(scope, &_ElasticPluginArgs{}),
+		Version:  2,
 	}
 }
 

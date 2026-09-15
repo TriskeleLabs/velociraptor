@@ -3,7 +3,6 @@ package sorter
 import (
 	"bufio"
 	"context"
-	"io/ioutil"
 	"os"
 	"sort"
 	"sync"
@@ -86,7 +85,6 @@ type MergeSorterCtx struct {
 
 	// Fallback size to files
 	ChunkSize int
-	idx       int
 }
 
 func (self *MergeSorterCtx) addProvider(p provider) {
@@ -201,7 +199,7 @@ func (self *MergeSorterCtx) Merge(ctx context.Context, output_chan chan types.Ro
 		}
 
 		// Consume the value from the provider with the
-		// smallers value.
+		// smallest value.
 		self.merge_files[smallest_idx].Consume()
 
 		// otherwise push the value on
@@ -299,7 +297,7 @@ func (self *dataFile) prepareFile(scope vfilter.Scope, items []vfilter.Row) {
 	go func() {
 		defer self.mu.Unlock()
 
-		tmpfile, err := ioutil.TempFile("", "vql")
+		tmpfile, err := utils_tempfile.TempFile("vql")
 		if err != nil {
 			scope.Log("Unable to create tempfile: %v", err)
 			return

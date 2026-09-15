@@ -3,13 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	kingpin "github.com/alecthomas/kingpin/v2"
 	"github.com/mitchellh/panicwrap"
 	"www.velocidex.com/golang/velociraptor/config"
+	"www.velocidex.com/golang/velociraptor/constants"
+	logging "www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 func writeLogOnPanic() error {
@@ -17,9 +19,11 @@ func writeLogOnPanic() error {
 	config_obj, err := new(config.Loader).
 		WithFileLoader(*config_path).
 		WithEmbedded(*embedded_config_path).
-		WithEnvLoader("VELOCIRAPTOR_CONFIG").
+		WithEnvLiteralLoader(constants.VELOCIRAPTOR_LITERAL_CONFIG).
+		WithEnvLoader(constants.VELOCIRAPTOR_CONFIG).
 		LoadAndValidate()
 	if err != nil {
+		logging.FlushPrelogs(config.GetDefaultConfig())
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
@@ -27,7 +31,7 @@ func writeLogOnPanic() error {
 		config_obj.Logging.OutputDirectory != "" {
 		exitStatus, err := panicwrap.BasicWrap(func(output string) {
 			// Create a special log file in the log directory.
-			filename := filepath.Join(
+			filename := utils.Join(
 				config_obj.Logging.OutputDirectory,
 				fmt.Sprintf("panic-%v.log", strings.Replace(
 					time.Now().Format(time.RFC3339), ":", "_", -1)))
@@ -37,7 +41,7 @@ func writeLogOnPanic() error {
 			if err != nil {
 				return
 			}
-			fd.Write([]byte(output))
+			_, _ = fd.Write([]byte(output))
 			fd.Close()
 		})
 		if err != nil {
@@ -61,5 +65,5 @@ func writeLogOnPanic() error {
 
 func FatalIfError(command *kingpin.CmdClause, cb func() error) {
 	err := cb()
-	kingpin.FatalIfError(err, command.FullCommand())
+	kingpin.FatalIfError(err, "%s", command.FullCommand())
 }

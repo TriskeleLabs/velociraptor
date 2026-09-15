@@ -1,19 +1,19 @@
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package server
 
@@ -24,9 +24,9 @@ import (
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -34,7 +34,7 @@ import (
 
 type CompressArgs struct {
 	Path   string `vfilter:"required,field=path,doc=A path to compress"`
-	Output string `vfilter:"optional,field=output,doc=A path to write the output - default is the path with a .gz extension"`
+	Output string `vfilter:"required,field=output,doc=A path to write the output - default is the path with a .gz extension"`
 }
 
 type Compress struct{}
@@ -51,6 +51,19 @@ func (self *Compress) Call(ctx context.Context,
 
 	arg := &CompressArgs{}
 	err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
+	if err != nil {
+		scope.Log("compress: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	// Are we allowed to write there?
+	err = file.CheckPath(arg.Path)
+	if err != nil {
+		scope.Log("compress: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	err = file.CheckPath(arg.Output)
 	if err != nil {
 		scope.Log("compress: %s", err.Error())
 		return vfilter.Null{}
@@ -94,7 +107,7 @@ func (self Compress) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilt
 		Name:     "compress",
 		Doc:      "Compress a file in the server's FileStore. ",
 		ArgType:  type_map.AddType(scope, &CompressArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE, acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE, acls.FILESYSTEM_READ).Build(),
 	}
 }
 

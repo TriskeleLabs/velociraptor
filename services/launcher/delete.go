@@ -9,25 +9,28 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alitto/pond"
+	"github.com/alitto/pond/v2"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/paths/artifacts"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/vfilter"
 )
 
 func (self *FlowStorageManager) DeleteFlow(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	client_id string, flow_id string, principal string,
-	really_do_it bool) ([]*services.DeleteFlowResponse, error) {
+	options services.DeleteFlowOptions) (
+	[]*services.DeleteFlowResponse, error) {
 
 	launcher, err := services.GetLauncher(config_obj)
 	if err != nil {
@@ -35,7 +38,11 @@ func (self *FlowStorageManager) DeleteFlow(
 	}
 
 	collection_details, err := launcher.GetFlowDetails(
-		ctx, config_obj, client_id, flow_id)
+		ctx, config_obj, services.GetFlowOptions{
+			// No need for the full request object
+			Request: false,
+		},
+		client_id, flow_id)
 	if err != nil {
 		return nil, err
 	}
@@ -45,47 +52,48 @@ func (self *FlowStorageManager) DeleteFlow(
 		return nil, nil
 	}
 
-	if really_do_it && principal != "" {
-		services.LogAudit(ctx,
+	if options.ReallyDoIt && principal != "" {
+		err := services.LogAudit(ctx,
 			config_obj, principal, "delete_flow",
 			ordereddict.NewDict().
 				Set("client_id", client_id).
 				Set("flow_id", flow_id).
 				Set("flow", collection_context))
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("<red>FlowStorageManager delete_flow</> %v %v %v",
+				principal, client_id, flow_id)
+		}
 	}
 
 	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
-
-	upload_metadata_path := flow_path_manager.UploadMetadata()
+	flow_base_path := flow_path_manager.Path().Components()
 
 	r := &reporter{
-		really_do_it: really_do_it,
+		really_do_it: options.ReallyDoIt,
 		ctx:          ctx,
 		config_obj:   config_obj,
 		seen:         make(map[string]bool),
-		pool:         pond.New(100, 1000),
+		pool:         pond.NewPool(100),
 	}
 	file_store_factory := file_store.GetFileStore(config_obj)
 	reader, err := result_sets.NewResultSetReader(
 		file_store_factory, flow_path_manager.UploadMetadata())
 	if err == nil {
 		for row := range reader.Rows(ctx) {
+			// Some uploads list components relative to the client.
 			components, pres := row.GetStrings("_Components")
-			if pres {
+			if pres && len(components) > 0 {
+
+				// Make sure the uploads exist within this flow.
+				if !utils.SlicePrefixMatch(components, flow_base_path) {
+					continue
+				}
+
 				pathspec := path_specs.NewUnsafeFilestorePath(
 					components...).SetType(api.PATH_TYPE_FILESTORE_ANY)
-				r.emit_fs("Upload", pathspec)
+				r.emit_bulk_file("Upload", pathspec)
 				continue
-			}
-
-			upload, pres := row.GetString("vfs_path")
-			if pres {
-				// Each row is the full filestore path of the upload.
-				pathspec := path_specs.NewUnsafeFilestorePath(
-					utils.SplitComponents(upload)...).
-					SetType(api.PATH_TYPE_FILESTORE_ANY)
-
-				r.emit_fs("Upload", pathspec)
 			}
 		}
 		reader.Close()
@@ -93,9 +101,9 @@ func (self *FlowStorageManager) DeleteFlow(
 
 	// Order results to facilitate deletion - container deletion
 	// happens after we read its contents.
-	r.emit_fs("UploadMetadata", upload_metadata_path)
-	r.emit_fs("UploadMetadataIndex", upload_metadata_path.
-		SetType(api.PATH_TYPE_FILESTORE_JSON_INDEX))
+	r.emit_result_set("UploadMetadata", flow_path_manager.UploadMetadata())
+	r.emit_result_set("UploadTransactions",
+		flow_path_manager.UploadTransactions())
 
 	// Remove all result sets from artifacts.
 	for _, artifact_name := range collection_context.ArtifactsWithResults {
@@ -109,54 +117,42 @@ func (self *FlowStorageManager) DeleteFlow(
 		if err != nil {
 			continue
 		}
-		r.emit_fs("Result", result_path)
-		r.emit_fs("ResultIndex",
-			result_path.SetType(api.PATH_TYPE_FILESTORE_JSON_INDEX))
-
+		r.emit_result_set("Result", result_path)
 	}
 
-	r.emit_fs("Log", flow_path_manager.Log())
-	r.emit_fs("LogIndex", flow_path_manager.Log().
-		SetType(api.PATH_TYPE_FILESTORE_JSON_INDEX))
+	r.emit_result_set("Log", flow_path_manager.Log())
+
 	r.emit_ds("CollectionContext", flow_path_manager.Path())
 	r.emit_ds("Task", flow_path_manager.Task())
 	r.emit_ds("Stats", flow_path_manager.Stats())
 
 	// Walk the flow's datastore and filestore
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		return nil, err
+	r.emit_notebook("Notebook", flow_path_manager.Notebook())
+
+	if options.ReallyDoIt {
+		// User specified the flow must be removed immediately.
+		if options.Sync {
+			err = self.RemoveClientFlowsFromIndex(
+				ctx, config_obj, client_id, map[string]bool{
+					flow_id: true,
+				})
+		} else {
+			// Otherwise we just mark the index as pending a rebuild
+			// and move on.
+			err = self.writeFlowJournal(config_obj, client_id, flow_id)
+		}
 	}
+	r.wait()
 
-	r.emit_ds("Notebook", flow_path_manager.Notebook().Path())
-	datastore.Walk(config_obj, db, flow_path_manager.Notebook().DSDirectory(),
-		datastore.WalkWithoutDirectories,
-		func(path api.DSPathSpec) error {
-			r.emit_ds("NotebookData", path)
-			return nil
-		})
-
-	// Clean the empty directories
-	datastore.Walk(config_obj, db, flow_path_manager.Notebook().DSDirectory(),
-		datastore.WalkWithDirectories,
-		func(path api.DSPathSpec) error {
-			_ = db.DeleteSubject(config_obj, path)
-			return nil
-		})
-
-	api.Walk(file_store_factory,
-		flow_path_manager.Notebook().Directory(),
-		func(path api.FSPathSpec, info os.FileInfo) error {
-			r.emit_fs("NotebookItem", path)
-			return nil
-		})
-	// Rebuild the flow index to ensure GUI paging works
-	// properly. This is pretty slow but we do not expect to delete
-	// flows that often.
-	if really_do_it {
-		err = self.buildFlowIndexFromLegacy(ctx, config_obj, client_id)
+	// Wait for all the deletions to finish then delete anything left
+	// over that we missed. This should help trap future missed items
+	if options.ReallyDoIt {
+		r.reset()
+		r.emit_walk_fs("Unknown",
+			flow_path_manager.Path().AsFilestorePath().
+				SetType(api.PATH_TYPE_FILESTORE_ANY))
+		r.wait()
 	}
-	r.pool.StopAndWait()
 
 	// Sort responses to keep output stable
 	sort.Slice(r.responses, func(i, j int) bool {
@@ -174,81 +170,177 @@ type reporter struct {
 	really_do_it bool
 	mu           sync.Mutex
 	id           int
-	pool         *pond.WorkerPool
+	pool         pond.Pool
+}
+
+func (self *reporter) reset() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.pool = pond.NewPool(10)
+}
+
+func (self *reporter) wait() {
+	self.mu.Lock()
+	pool := self.pool
+	self.mu.Unlock()
+
+	pool.StopAndWait()
 }
 
 func (self *reporter) emit_ds(
 	item_type string, target api.DSPathSpec) {
-
-	client_path := target.String()
-	var error_message string
-
-	self.mu.Lock()
-	defer self.mu.Unlock()
-
-	if self.seen[client_path] {
-		return
-	}
-	self.seen[client_path] = true
-
-	self.id++
-	id := self.id
-
-	self.pool.Submit(func() {
-		self.mu.Lock()
-		defer self.mu.Unlock()
-
-		if self.really_do_it {
-			db, err := datastore.GetDB(self.config_obj)
-			if err == nil {
-				err = db.DeleteSubject(self.config_obj, target)
-				if err != nil {
-					error_message = fmt.Sprintf(
-						"Error deleting %v: %v", client_path, err)
-				}
-			}
+	self.emit(item_type, target.String(), func() error {
+		db, err := datastore.GetDB(self.config_obj)
+		if err != nil {
+			return err
 		}
-
-		self.responses = append(self.responses, &services.DeleteFlowResponse{
-			Id:    id,
-			Type:  item_type,
-			Data:  ordereddict.NewDict().Set("VFSPath", client_path),
-			Error: error_message,
-		})
+		return db.DeleteSubject(self.config_obj, target)
 	})
-
 }
 
-func (self *reporter) emit_fs(
+func (self *reporter) emit_result_set(
 	item_type string, target api.FSPathSpec) {
-	client_path := target.String()
-	var error_message string
 
+	self.emit(item_type, target.String(), func() error {
+		file_store_factory := file_store.GetFileStore(self.config_obj)
+		return result_sets.DeleteResultSet(file_store_factory, target)
+	})
+}
+
+func (self *reporter) emit_notebook(
+	item_type string, notebook_path_manager *paths.NotebookPathManager) {
+
+	id := self.get_id()
+
+	self.pool.Submit(func() {
+		notebook_manager, err := services.GetNotebookManager(self.config_obj)
+		if err != nil {
+			return
+		}
+		output_chan := make(chan vfilter.Row)
+
+		go func() {
+			defer close(output_chan)
+
+			err = notebook_manager.DeleteNotebook(
+				self.ctx, notebook_path_manager.NotebookId(), output_chan,
+				self.really_do_it)
+			if err != nil {
+				self.add_response(&services.DeleteFlowResponse{
+					Type: "Notebook",
+					Id:   id,
+					Data: ordereddict.NewDict().Set("VFSPath",
+						notebook_path_manager.Path()),
+					Error: err.Error(),
+				})
+
+			}
+		}()
+
+		for row := range output_chan {
+			row_dict, ok := row.(*ordereddict.Dict)
+			if !ok {
+				continue
+			}
+			self.add_response(&services.DeleteFlowResponse{
+				Id:   self.get_id(),
+				Type: "NotebookData",
+				Data: row_dict,
+			})
+		}
+	})
+}
+
+func (self *reporter) emit_walk_fs(
+	item_type string, target api.FSPathSpec) {
+
+	self.pool.Submit(func() {
+		file_store_factory := file_store.GetFileStore(self.config_obj)
+		_ = api.Walk(file_store_factory, target,
+			func(urn api.FSPathSpec, info os.FileInfo) error {
+				error_message := ""
+				if !self.should_do_it() {
+					err := file_store_factory.Delete(urn)
+					if err != nil {
+						error_message = err.Error()
+					}
+				}
+
+				self.add_response(&services.DeleteFlowResponse{
+					Id:   self.get_id(),
+					Type: item_type,
+					Data: ordereddict.NewDict().
+						Set("VFSPath", urn.String()).
+						Set("Size", info.Size()),
+					Error: error_message,
+				})
+				return nil
+			})
+	})
+}
+
+func (self *reporter) emit_bulk_file(
+	item_type string, target api.FSPathSpec) {
+
+	self.emit(item_type, target.String(), func() error {
+		file_store_factory := file_store.GetFileStore(self.config_obj)
+		return file_store.DeleteBulkFile(file_store_factory, target)
+	})
+}
+
+func (self *reporter) should_do_it() bool {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	return self.really_do_it
+}
+
+func (self *reporter) deduplicate(client_path string) bool {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
 	if self.seen[client_path] {
-		return
+		return true
 	}
 	self.seen[client_path] = true
+	return false
+}
 
+func (self *reporter) get_id() int {
+	self.mu.Lock()
+	defer self.mu.Unlock()
 	self.id++
-	id := self.id
+	return self.id
+}
+func (self *reporter) add_response(response *services.DeleteFlowResponse) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.responses = append(self.responses, response)
+}
+
+func (self *reporter) emit(
+	item_type string, client_path string,
+	deleter func() error) {
+
+	if self.deduplicate(client_path) {
+		return
+	}
+
+	id := self.get_id()
 
 	self.pool.Submit(func() {
-		self.mu.Lock()
-		defer self.mu.Unlock()
+		var error_message string
 
-		if self.really_do_it {
-			file_store_factory := file_store.GetFileStore(self.config_obj)
-			err := file_store_factory.Delete(target)
+		if self.should_do_it() {
+			err := deleter()
 			if err != nil {
 				error_message = fmt.Sprintf(
 					"Error deleting %v: %v", client_path, err)
 			}
 		}
 
-		self.responses = append(self.responses, &services.DeleteFlowResponse{
+		self.add_response(&services.DeleteFlowResponse{
 			Id:    id,
 			Type:  item_type,
 			Data:  ordereddict.NewDict().Set("VFSPath", client_path),
@@ -267,17 +359,19 @@ func (self *Launcher) DeleteEvents(
 	config_obj *config_proto.Config,
 	principal, artifact, client_id string,
 	start_time, end_time time.Time,
-	really_do_it bool) ([]*services.DeleteFlowResponse, error) {
+	options services.DeleteFlowOptions) (
+	[]*services.DeleteFlowResponse, error) {
 
-	path_manager, err := artifacts.NewArtifactPathManager(ctx,
-		config_obj, client_id, "", artifact)
+	mode, err := artifact_paths.GetArtifactMode(ctx, config_obj, artifact)
 	if err != nil {
 		return nil, err
 	}
-	if !path_manager.IsEvent() {
+	if !artifact_modes.IsEvent(mode) {
 		return nil, fmt.Errorf("Artifact %v is not an event artifact", artifact)
 	}
 
+	path_manager := artifact_paths.NewArtifactPathManagerWithMode(
+		config_obj, client_id, "", artifact, mode)
 	file_store_factory := file_store.GetFileStore(config_obj)
 
 	result := []*services.DeleteFlowResponse{}
@@ -286,7 +380,7 @@ func (self *Launcher) DeleteEvents(
 			f.StartTime.Before(end_time) {
 			var error_message string
 
-			if really_do_it {
+			if options.ReallyDoIt {
 				err := file_store_factory.Delete(f.Path)
 				if err != nil {
 					error_message = fmt.Sprintf(
@@ -312,7 +406,7 @@ func (self *Launcher) DeleteEvents(
 		}
 	}
 
-	log_path_manager, err := artifacts.NewArtifactLogPathManager(ctx,
+	log_path_manager, err := artifact_paths.NewArtifactLogPathManager(ctx,
 		config_obj, client_id, "", artifact)
 	if err != nil {
 		return nil, err
@@ -322,7 +416,7 @@ func (self *Launcher) DeleteEvents(
 			f.StartTime.Before(end_time) {
 			var error_message string
 
-			if really_do_it {
+			if options.ReallyDoIt {
 				err := file_store_factory.Delete(f.Path)
 				if err != nil {
 					error_message = fmt.Sprintf(
@@ -349,7 +443,7 @@ func (self *Launcher) DeleteEvents(
 	}
 
 	// Log into the audit log
-	if really_do_it {
+	if options.ReallyDoIt {
 		return result, services.LogAudit(ctx, config_obj, principal, "DeleteEvents",
 			ordereddict.NewDict().
 				Set("artifact", artifact).

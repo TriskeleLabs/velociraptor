@@ -3,7 +3,7 @@
 
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -28,6 +28,7 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/vql/server"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/clients"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/crypto"
+	_ "www.velocidex.com/golang/velociraptor/vql/server/debuggig"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/downloads"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/favorites"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/flows"
@@ -35,6 +36,7 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/vql/server/monitoring"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/notebooks"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/orgs"
+	_ "www.velocidex.com/golang/velociraptor/vql/server/secrets"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/timelines"
 	_ "www.velocidex.com/golang/velociraptor/vql/server/users"
 )

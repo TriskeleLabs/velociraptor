@@ -8,6 +8,7 @@ import (
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
@@ -47,10 +48,18 @@ func listAvailableEventTimestamps(
 	}
 
 	timestamps, err := listAvailableEventTimestampFiles(ctx, config_obj, path_manager)
+	if err != nil {
+		return nil, err
+	}
+
 	result.Logs[0].RowTimestamps = timestamps
 
 	timestamps, err = listAvailableEventTimestampFiles(
 		ctx, config_obj, path_manager.Logs())
+	if err != nil {
+		return nil, err
+	}
+
 	result.Logs[0].LogTimestamps = timestamps
 
 	return result, nil
@@ -62,9 +71,8 @@ func listAvailableEventTimestampFiles(
 	path_manager api.PathManager) ([]int32, error) {
 	result := []int32{}
 
-	file_store_factory := file_store.GetFileStore(config_obj)
 	reader, err := result_sets.NewTimedResultSetReader(
-		ctx, file_store_factory, path_manager)
+		ctx, config_obj, path_manager)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +91,8 @@ func listAvailableEventArtifacts(
 	// Figure out where all the monitoring artifacts logs are
 	// stored by looking at some examples.
 	exemplar := "Generic.Client.Stats"
-	if in.ClientId == "" || in.ClientId == "server" {
+	if in.ClientId == "" ||
+		in.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		exemplar = "Server.Monitor.Health"
 	}
 
@@ -139,11 +148,10 @@ func getAllArtifacts(
 
 	return api.Walk(file_store_factory, log_path,
 		func(full_path api.FSPathSpec, info os.FileInfo) error {
-			// Walking the events directory will give us
-			// all the day json files. Each day json file
-			// is contained in a directory structure which
-			// reflects the name of the artifact, for
-			// example:
+			// Walking the events directory will give us all the day
+			// json files. Each day json file is contained in a
+			// directory structure which reflects the name of the
+			// artifact, for example:
 
 			// <log_path>/Server.Monitor.Health/Prometheus/2021-08-01.json
 			// Corresponds to the artifact Server.Monitor.Health/Prometheus
@@ -162,12 +170,11 @@ func getAllArtifacts(
 				}
 
 				artifact_name := strings.Join(relative_path, "/")
-				event, pres := seen[artifact_name]
+				_, pres = seen[artifact_name]
 				if !pres {
-					event = &api_proto.AvailableEvent{
+					seen[artifact_name] = &api_proto.AvailableEvent{
 						Artifact: artifact_name,
 					}
-					seen[artifact_name] = event
 				}
 			}
 			return nil

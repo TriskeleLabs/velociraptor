@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -31,10 +30,10 @@ import (
 // containers.
 
 // This accessor wraps the zip accessor to provide access to these
-// specially formated conatiners. In particular the collector accessor
+// specially formatted containers. In particular the collector accessor
 // handles the following two properties transparently:
 
-// 1. Zip encryption: Velociraptor uses an ecnryption scheme to work
+// 1. Zip encryption: Velociraptor uses an encryption scheme to work
 // around Zip encryption limitations. All data is stored in an
 // encrypted file called "data.zip" inside the main zip archive. This
 // is because Zip encryption does not protect the central directory or
@@ -96,7 +95,10 @@ type CollectorAccessor struct {
 }
 
 func (self *CollectorAccessor) New(scope vfilter.Scope) (accessors.FileSystemAccessor, error) {
-	delegate, err := (&zip.ZipFileSystemAccessor{}).New(scope)
+	delegate, err := accessors.GetAccessor("zip_nocase", scope)
+	if err != nil {
+		return nil, err
+	}
 	return &CollectorAccessor{
 		expandSparse:          self.expandSparse,
 		ZipFileSystemAccessor: delegate.(*zip.ZipFileSystemAccessor),
@@ -140,7 +142,7 @@ func collectorPathToDelegatePath(full_path *accessors.OSPath) *accessors.OSPath 
 	collector_pathspec := full_path.PathSpec()
 
 	res := full_path.Copy()
-	res.SetPathSpec(&accessors.PathSpec{
+	_ = res.SetPathSpec(&accessors.PathSpec{
 		Path:             collector_pathspec.Path,
 		DelegateAccessor: "collector",
 		DelegatePath: accessors.PathSpec{
@@ -154,54 +156,41 @@ func collectorPathToDelegatePath(full_path *accessors.OSPath) *accessors.OSPath 
 	return res
 }
 
-// Try to set a password if it exists in metadata
-func (self *CollectorAccessor) maybeSetZipPassword(
-	full_path *accessors.OSPath) (*accessors.OSPath, error) {
-
-	// Password is already cached in the context - just return it as is.
-	_, pres := self.scope.GetContext(constants.ZIP_PASSWORDS)
-	if pres {
-
-		// Transform the path so it is ready to be used by the zip
-		// accessor.
-		return collectorPathToDelegatePath(full_path), nil
-	}
-
-	// If password is already set in the scope, just use it as it is.
-	pass, pres := self.scope.Resolve(constants.ZIP_PASSWORDS)
-	if pres && !utils.IsNil(pass) {
-		return collectorPathToDelegatePath(full_path), nil
-	}
+// Attempt to extract the password from the container.
+func ExtractPassword(
+	scope vfilter.Scope,
+	accessor accessors.FileSystemAccessor,
+	full_path *accessors.OSPath) (string, error) {
 
 	// Check if data.zip exists at the top level.
 	root := full_path.Copy()
 	root.Components = nil
 
 	datazip := root.Append("data.zip")
-	_, err := self.ZipFileSystemAccessor.LstatWithOSPath(datazip)
+	_, err := accessor.LstatWithOSPath(datazip)
 	if err != nil {
 		// Nope - no data.zip so do not transform the pathspec.
-		return full_path, nil
+		return "", err
 	}
 
 	// Check if metadata.json exists. If so, try to extract password
 	meta := root.Append("metadata.json")
-	mhandle, err := self.ZipFileSystemAccessor.OpenWithOSPath(meta)
+	mhandle, err := accessor.OpenWithOSPath(meta)
 	if err != nil {
 		// No metadata file is found - this might be a plain
 		// collection zip.
-		return full_path, nil
+		return "", err
 	}
 
-	buf, err := ioutil.ReadAll(mhandle)
+	buf, err := utils.ReadAllWithLimit(mhandle, constants.MAX_MEMORY)
 	if err != nil {
-		return nil, fmt.Errorf("Decoding metadata.json: %w", err)
+		return "", fmt.Errorf("Decoding metadata.json: %w", err)
 	}
 
 	rows := []*ordereddict.Dict{}
 	err = json.Unmarshal(buf, &rows)
 	if err != nil {
-		return nil, fmt.Errorf("Decoding metadata.json: %w", err)
+		return "", fmt.Errorf("Decoding metadata.json: %w", err)
 	}
 
 	// metadata.json can be multiple rows
@@ -215,36 +204,76 @@ func (self *CollectorAccessor) maybeSetZipPassword(
 		if strings.ToLower(scheme) == "x509" {
 			ep, ok := row.GetString("EncryptedPass")
 			if !ok {
-				return nil, errors.New(
+				return "", errors.New(
 					"EncryptedPass must be given and be of type string!")
 			}
 
-			err = vql_subsystem.CheckAccess(self.scope, acls.SERVER_ADMIN)
+			err = vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
 			if err != nil {
-				return nil, errors.New(
+				return "", errors.New(
 					"Must be server admin to use private key")
 			}
 
-			key, err := crypto_utils.GetPrivateKeyFromScope(self.scope)
+			key, err := crypto_utils.GetPrivateKeyFromScope(scope)
 			if err != nil {
-				return nil, fmt.Errorf("GetPrivateKeyFromScope: %w", err)
+				return "", fmt.Errorf("GetPrivateKeyFromScope: %w", err)
 			}
 
 			zip_pass, err := crypto_utils.Base64DecryptRSAOAEP(key, ep)
 			if err != nil {
-				return nil, fmt.Errorf("Unable to extract zip password: %w", err)
+				return "", fmt.Errorf("Unable to extract zip password: %w", err)
 			}
 
-			self.scope.SetContext(constants.ZIP_PASSWORDS, string(zip_pass))
-			value, pres := self.scope.Resolve(constants.REPORT_ZIP_PASSWORD)
-			if pres && self.scope.Bool(value) {
-				self.scope.Log("CollectorAccessor: X509 Decrypted password is %q",
-					string(zip_pass))
-			}
 			// Transform the path so it can be used by the zip
 			// collector.
+			return string(zip_pass), nil
+		}
+	}
+
+	return "", utils.NotFoundError
+}
+
+// Try to set a password if it exists in metadata
+func (self *CollectorAccessor) maybeSetZipPassword(
+	full_path *accessors.OSPath) (*accessors.OSPath, error) {
+
+	// If password is already set in the scope, just use it as it is.
+	pass, pres := self.scope.Resolve(constants.ZIP_PASSWORDS)
+	if pres && !utils.IsNil(pass) {
+		if utils.ToString(pass) != "" {
 			return collectorPathToDelegatePath(full_path), nil
 		}
+	} else {
+		// Password is already cached in the context - just return it as is.
+		pass, pres = self.scope.GetContext(constants.ZIP_PASSWORDS)
+		if pres && !utils.IsNil(pass) {
+
+			// Transform the path so it is ready to be used by the zip
+			// accessor.
+			return collectorPathToDelegatePath(full_path), nil
+		}
+	}
+
+	zip_pass, err := ExtractPassword(self.scope,
+		self.ZipFileSystemAccessor, full_path)
+	if err == nil {
+		// Record the password in the scope so next time we can
+		// automatically use it.
+		self.scope.SetContext(constants.ZIP_PASSWORDS, string(zip_pass))
+
+		value, pres := self.scope.Resolve(constants.REPORT_ZIP_PASSWORD)
+		if pres && self.scope.Bool(value) {
+			self.scope.Log(
+				"CollectorAccessor: X509 Decrypted password is %q",
+				string(zip_pass))
+		}
+
+		return collectorPathToDelegatePath(full_path), nil
+	}
+
+	// Report serious errors
+	if !utils.IsNotFound(err) {
+		return nil, err
 	}
 
 	// No metadata found - this might be a plain unencrypted
@@ -279,7 +308,8 @@ func (self *CollectorAccessor) getIndex(
 		return nil, err
 	}
 
-	serialized, err := ioutil.ReadAll(idx_reader)
+	serialized, err := utils.ReadAllWithLimit(idx_reader,
+		constants.MAX_MEMORY)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +391,9 @@ func (self *CollectorAccessor) LstatWithOSPath(
 	updated_full_path, err := self.maybeSetZipPassword(full_path)
 	if err != nil {
 		self.scope.Log(err.Error())
+		updated_full_path = full_path
 	}
+
 	stat, err := self.ZipFileSystemAccessor.LstatWithOSPath(updated_full_path)
 	if err != nil {
 		return nil, err
@@ -418,12 +450,23 @@ func (self *CollectorAccessor) ReadDirWithOSPath(
 	return res, nil
 }
 
-func init() {
-	accessors.Register("collector", &CollectorAccessor{
-		expandSparse: true,
-	}, `Open a collector zip file as if it was a directory - automatically expand sparse files.`)
+func (self CollectorAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "collector",
+		Description: `Open a collector zip file as if it was a directory - automatically expand sparse files.`,
+	}
+}
 
-	accessors.Register("collector_sparse", &CollectorAccessor{
-		expandSparse: false,
-	}, `Open a collector zip file as if it was a directory - does not expand sparse files.`)
+func init() {
+	accessors.Register(&CollectorAccessor{
+		expandSparse: true,
+	})
+
+	accessors.Register(accessors.DescribeAccessor(
+		&CollectorAccessor{
+			expandSparse: false,
+		}, accessors.AccessorDescriptor{
+			Name:        "collector_sparse",
+			Description: `Open a collector zip file as if it was a directory - does not expand sparse files.`,
+		}))
 }

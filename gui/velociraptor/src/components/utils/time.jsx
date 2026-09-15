@@ -7,8 +7,13 @@ import 'moment-timezone';
 import T from '../i8n/i8n.jsx';
 import UserConfig from '../core/user.jsx';
 import ToolTip from '../widgets/tooltip.jsx';
+import ContextMenu from './context.jsx';
 
 const renderHumanTime = ts=> {
+    if (!_.isDate(ts)) {
+        return "";
+    }
+
     let now = new Date().getTime();
     let difference = (now-ts.getTime());
     return T("HumanizeDuration", difference);
@@ -51,7 +56,7 @@ export const ToStandardTime = value => {
         }
     }
 
-    // If the timestamp is anumber then it might be in sec, msec,
+    // If the timestamp is a number then it might be in sec, msec,
     // usec or nsec - we want to support all of those.
     if (!_.isNaN(value) &&  _.isNumber(value) && value > 0) {
         // Maybe nsec
@@ -78,6 +83,25 @@ export const ToStandardTime = value => {
     return value;
 };
 
+export const FormatRFC3339 = (ts, timezone) => {
+    let when = moment(ts);
+    let when_tz = moment.tz(when, timezone);
+    let formatted_ts = when_tz.format("YYYY-MM-DDTHH:mm:ss");
+
+    let fractional_part = when_tz.format(".SSS");
+    if (fractional_part === ".000") {
+        fractional_part = "";
+    }
+    formatted_ts += fractional_part;
+    if (when_tz.isUtc()) {
+        formatted_ts += "Z";
+    } else {
+        formatted_ts += when_tz.format("Z");
+    }
+
+    return formatted_ts;
+};
+
 class VeloTimestamp extends Component {
     static contextType = UserConfig;
 
@@ -89,7 +113,6 @@ class VeloTimestamp extends Component {
     render() {
         let value = this.props.iso || this.props.usec;
         let ts = ToStandardTime(value);
-
         if (_.isNaN(ts)) {
             return <></>;
         }
@@ -100,27 +123,36 @@ class VeloTimestamp extends Component {
         }
 
         let timezone = this.context.traits.timezone || "UTC";
-        let when = moment(ts);
-        let when_tz = moment.tz(when, timezone);
-        let formatted_ts = when_tz.format("YYYY-MM-DDTHH:mm:ss");
-
-        let fractional_part = when_tz.format(".SSS");
-        if (fractional_part === ".000") {
-            fractional_part = "";
-        }
-        formatted_ts += fractional_part;
-        if (when_tz.isUtc()) {
-            formatted_ts += "Z";
-        } else {
-            formatted_ts += when_tz.format("Z");
+        let formatted_ts = FormatRFC3339(ts, timezone);
+        if (formatted_ts.match("Invalid date")) {
+            return <></>;
         }
 
-        return <ToolTip tooltip={renderHumanTime(ts)}>
-                 <div className="timestamp">
-                   {formatted_ts}
-                 </div>
-               </ToolTip>;
+        return <>
+                 <ContextMenu value={formatted_ts}>
+                   <ToolTip tooltip={renderHumanTime(ts)}>
+                     <div className="timestamp">
+                       {formatted_ts}
+                     </div>
+                   </ToolTip>
+                 </ContextMenu>
+               </>;
     };
 }
 
 export default VeloTimestamp;
+
+// Returns a date object in local timestamp which represents the UTC
+// date. This is needed because the date selector widget expects to
+// work in local time.
+export function localTimeFromUTCTime(date) {
+    let msSinceEpoch = date.getTime();
+    let tzoffset = (new Date()).getTimezoneOffset();
+    return new Date(msSinceEpoch + tzoffset * 60000);
+}
+
+export function utcTimeFromLocalTime(date) {
+    let msSinceEpoch = date.getTime();
+    let tzoffset = (new Date()).getTimezoneOffset();
+    return new Date(msSinceEpoch - tzoffset * 60000);
+}

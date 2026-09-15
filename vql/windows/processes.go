@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -32,7 +32,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"golang.org/x/sys/windows"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/allocs"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -121,7 +121,7 @@ func (self *Win32_Process) getTimes(handle syscall.Handle) {
 }
 
 func (self *Win32_Process) getCmdLine(handle syscall.Handle) {
-	buffer := utils.AllocateBuff(1024 * 2)
+	buffer := allocs.AllocateAlignedBuff(1024 * 2)
 	length := uint32(0)
 	status := NtQueryInformationProcess(handle, ProcessCommandLineInformation,
 		(*byte)(unsafe.Pointer(&buffer[0])), uint32(len(buffer)), &length)
@@ -194,7 +194,7 @@ func (self PslistPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("pslist", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "pslist", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
 		if err != nil {

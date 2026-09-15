@@ -1,6 +1,7 @@
 package accessors
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
@@ -22,7 +24,7 @@ import (
 // methods to arrive at the same OS Path.
 
 // For example, on Windows components are separated by the backslash
-// characted and the first component can be a device name (which may
+// character and the first component can be a device name (which may
 // contain path separators):
 
 // \\.\C:\Windows\System32 -> ["\\.\C:", "Windows", "System32"]
@@ -39,6 +41,7 @@ type PathManipulator interface {
 	PathParse(path string, result *OSPath) error
 	PathJoin(path *OSPath) string
 	AsPathSpec(path *OSPath) *PathSpec
+	ComponentEqual(a, b string) bool
 }
 
 type OSPath struct {
@@ -51,6 +54,11 @@ type OSPath struct {
 	pathspec    *PathSpec
 	serialized  *string
 	Manipulator PathManipulator
+
+	// Opaque data that can be stored in the OSPath. This provides a
+	// mechanism to transport additional data in the OSPath and avoid
+	// having to convert back and forth.
+	Data interface{}
 }
 
 func (self *OSPath) Equal(other *OSPath) bool {
@@ -104,12 +112,16 @@ func (self *OSPath) Copy() *OSPath {
 	}
 }
 
-func (self *OSPath) SetPathSpec(pathspec *PathSpec) {
+func (self *OSPath) SetPathSpec(pathspec *PathSpec) error {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	self.Manipulator.PathParse(pathspec.Path, self)
+	err := self.Manipulator.PathParse(pathspec.Path, self)
+	if err != nil {
+		return err
+	}
 	self.pathspec = pathspec
+	return nil
 }
 
 func (self *OSPath) PathSpec() *PathSpec {
@@ -200,7 +212,8 @@ func (self *OSPath) TrimComponents(components ...string) *OSPath {
 
 	result := self.Copy()
 	for idx, c := range result.Components {
-		if idx >= len(components) || c != components[idx] {
+		if idx >= len(components) ||
+			!self.Manipulator.ComponentEqual(c, components[idx]) {
 			result := &OSPath{
 				Components:  utils.CopySlice(self.Components[idx:]),
 				pathspec:    self.pathspec,
@@ -211,6 +224,21 @@ func (self *OSPath) TrimComponents(components ...string) *OSPath {
 	}
 	result.Components = nil
 	return result
+}
+
+// Does the path has the required prefix?
+func (self *OSPath) HasPrefix(components ...string) bool {
+	if len(self.Components) > len(components) {
+		return false
+	}
+
+	for idx, c := range components {
+		if !self.Manipulator.ComponentEqual(c, self.Components[idx]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Produce a human readable string - this is a one way conversion: It
@@ -265,6 +293,23 @@ func (self *OSPath) Delegate(scope vfilter.Scope) (*OSPath, error) {
 
 func (self *OSPath) MarshalJSON() ([]byte, error) {
 	return json.Marshal(self.String())
+}
+
+func (self *OSPath) MarshalYAML() (interface{}, error) {
+	json_string := []byte(self.String())
+	buf := bytes.Buffer{}
+	err := json.Indent(&buf, json_string, " ", "  ")
+	return buf.String(), err
+}
+
+// MarshalText is used by the YAML marshaller. We indent the text to
+// make sure it uses multi line yaml which is more readable for
+// complex pathspecs.
+func (self *OSPath) MarshalText() ([]byte, error) {
+	json_string := []byte(self.String())
+	buf := bytes.Buffer{}
+	err := json.Indent(&buf, json_string, " ", "  ")
+	return buf.Bytes(), err
 }
 
 // A FileInfo represents information about a file. It is similar to
@@ -346,6 +391,8 @@ type FileSystemAccessor interface {
 	OpenWithOSPath(path *OSPath) (ReadSeekCloser, error)
 	LstatWithOSPath(path *OSPath) (FileInfo, error)
 	New(scope vfilter.Scope) (FileSystemAccessor, error)
+
+	Describe() *AccessorDescriptor
 }
 
 // Some filesystems can attempt to retrieve the underlying file. If
@@ -374,4 +421,75 @@ func GetUnderlyingAPIFilename(accessor string,
 	}
 
 	return raw_accessor.GetUnderlyingAPIFilename(path)
+}
+
+// For case insensitive filesystems, the canonical filename (used in
+// comparisons) can be different from the actual filename.
+type CanonicalFilenameAccessor interface {
+	GetCanonicalFilename(path *OSPath) string
+}
+
+func GetCanonicalFilename(accessor string,
+	scope vfilter.Scope, path *OSPath) string {
+	accessor_obj, err := GetAccessor(accessor, scope)
+	if err != nil {
+		return path.String()
+	}
+
+	raw_accessor, ok := accessor_obj.(CanonicalFilenameAccessor)
+	if !ok {
+		return path.String()
+	}
+
+	return raw_accessor.GetCanonicalFilename(path)
+}
+
+type AccessorDescriptor struct {
+	Name        string
+	Description string
+
+	// The required permissions for using this accessor
+	Permissions []acls.ACL_PERMISSION
+
+	// The name of the scope parameter that configures this accessor
+	// if needed.
+	ScopeVar string
+
+	// The type description for the ScopeVar if present.
+	ArgType vfilter.Any
+}
+
+func (self AccessorDescriptor) Metadata() *ordereddict.Dict {
+	var permissions []string
+	for _, p := range self.Permissions {
+		permissions = append(permissions, p.String())
+	}
+
+	res := ordereddict.NewDict()
+	if len(permissions) > 0 {
+		res.Set("permissions", strings.Join(permissions, ","))
+	}
+
+	if self.ScopeVar != "" {
+		res.Set("ScopeVar", self.ScopeVar)
+	}
+
+	return res
+}
+
+type DescriptorWrapper struct {
+	FileSystemAccessor
+	descriptor AccessorDescriptor
+}
+
+func (self DescriptorWrapper) Describe() *AccessorDescriptor {
+	return &self.descriptor
+}
+
+func DescribeAccessor(target FileSystemAccessor,
+	desc AccessorDescriptor) FileSystemAccessor {
+	return DescriptorWrapper{
+		FileSystemAccessor: target,
+		descriptor:         desc,
+	}
 }

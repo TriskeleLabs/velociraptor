@@ -19,11 +19,18 @@ const (
 type ResultSetWriter interface {
 	// Write an already serialized batch of rows. This basically just
 	// appends the data to the output JSONL file so it is very cheap.
-	WriteJSONL(serialized []byte, total_rows uint64)
+	WriteJSONL(serialized []byte, total_rows uint64) error
+
+	// Alternative writing method
+	WriteCompressedJSONL(
+		serialized []byte, byte_offset uint64, uncompressed_size int,
+		total_rows uint64) error
 
 	// Provide a hint as to the next row id we are writing. This is
 	// only useful for some implementations of result set writers.
-	SetStartRow(start_row int64)
+	SetStartRow(start_row int64) error
+	TotalRows() int64
+	TotalBytes() int64
 
 	// Result sets may be updated in place.
 	Update(index uint64, row *ordereddict.Dict) error
@@ -57,6 +64,7 @@ type ResultSetReader interface {
 	TotalRows() int64
 	MTime() time.Time
 	Stacker() api.FSPathSpec
+	SetStacker(stacker api.FSPathSpec)
 }
 
 type TimedResultSetReader interface {

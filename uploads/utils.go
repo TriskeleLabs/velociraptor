@@ -14,7 +14,7 @@ func ShouldPadFile(
 
 	// Figure out how sparse the file is - some sparse files are
 	// incredibly large and we should not expand them. Specifically
-	// the $J file is is incredibly sparse and can be very large.
+	// the $J file is incredibly sparse and can be very large.
 	var data_size, total_size int64
 
 	for _, i := range index.Ranges {
@@ -36,7 +36,7 @@ func ShouldPadFile(
 
 	// The total size is within a small factor of the actual data
 	// size, we should expand it.
-	if total_size/data_size <= 2 {
+	if data_size > 0 && total_size/data_size <= 2 {
 		return true
 	}
 

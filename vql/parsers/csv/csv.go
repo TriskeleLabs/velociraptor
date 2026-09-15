@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,11 +26,11 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/config"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -55,18 +55,12 @@ func (self ParseCSVPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("parse_csv", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_csv", args)()
 
 		arg := &ParseCSVPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("parse_csv: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("parse_csv: %s", err)
 			return
 		}
 
@@ -85,7 +79,11 @@ func (self ParseCSVPlugin) Call(
 				}
 				defer fd.Close()
 
-				csv_reader := csv.NewReader(fd)
+				csv_reader, err := csv.NewReader(fd)
+				if err != nil {
+					scope.Log("parse_csv: %v", err)
+					return
+				}
 				csv_reader.TrimLeadingSpace = true
 				csv_reader.LazyQuotes = true
 
@@ -170,7 +168,7 @@ func (self ParseCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Name:     "parse_csv",
 		Doc:      "Parses events from a CSV file.",
 		ArgType:  type_map.AddType(scope, &ParseCSVPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -184,18 +182,12 @@ func (self _WatchCSVPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("watch_csv", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_csv", args)()
 
 		arg := &ParseCSVPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("watch_csv: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("watch_csv: %s", err)
 			return
 		}
 
@@ -235,7 +227,7 @@ func (self _WatchCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Doc: "Watch a CSV file and stream events from it. " +
 			"Note: This is an event plugin which does not complete.",
 		ArgType:  type_map.AddType(scope, &ParseCSVPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -255,7 +247,7 @@ func (self WriteCSVPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("write_csv", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "write_csv", args)()
 
 		arg := &WriteCSVPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -271,6 +263,13 @@ func (self WriteCSVPlugin) Call(
 			err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
 			if err != nil {
 				scope.Log("write_csv: %s", err)
+				return
+			}
+
+			// Make sure we are allowed to write there.
+			err = file.CheckPrefix(arg.Filename)
+			if err != nil {
+				scope.Log("write_csv: %v", err)
 				return
 			}
 
@@ -319,7 +318,7 @@ func (self WriteCSVPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Name:     "write_csv",
 		Doc:      "Write a query into a CSV file.",
 		ArgType:  type_map.AddType(scope, &WriteCSVPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
 	}
 }
 

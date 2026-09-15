@@ -14,13 +14,16 @@ type LZXpressFunctionArgs struct {
 	Data string `vfilter:"required,field=data,doc=The lzxpress stream (bytes)"`
 }
 
-// The hash fuction calculates a hash of a file. It may be expensive
-// so we make it cancelllable.
+// The hash function calculates a hash of a file. It may be expensive
+// so we make it cancellable.
 type LZXpressFunction struct{}
 
 func (self *LZXpressFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
+
+	defer vql_subsystem.CheckForPanic(scope, "lzxpress_decompress")
+
 	arg := &LZXpressFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {

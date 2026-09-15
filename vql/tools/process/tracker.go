@@ -7,7 +7,7 @@
   1. It is very fast and does not need make API calls.
   2. It keeps track of deleted processes so it can resolve process
      parent/child relationships even when the parent processes exit.
-  3. It can build it's internal model based on a number of different
+  3. It can build its internal model based on a number of different
      sources, such as ETW, Sysmon or plain API calls.
 */
 
@@ -20,28 +20,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Velocidex/disklru"
 	"github.com/Velocidex/ordereddict"
-	"github.com/Velocidex/ttlcache/v2"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/tools/lru"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 	"www.velocidex.com/golang/vfilter/types"
 )
 
 var (
-	clock_mu sync.Mutex
+	tracker_mu sync.Mutex
 
 	// A global tracker that can be registered with
 	// process_tracker_install() and retrieved with process_tracker().
 	g_tracker IProcessTracker = &DummyProcessTracker{}
-	clock     utils.Clock     = &utils.RealClock{}
 )
 
 func GetGlobalTracker() IProcessTracker {
-	clock_mu.Lock()
-	defer clock_mu.Unlock()
+	tracker_mu.Lock()
+	defer tracker_mu.Unlock()
 
 	if g_tracker == nil {
 		g_tracker = &DummyProcessTracker{}
@@ -50,39 +51,28 @@ func GetGlobalTracker() IProcessTracker {
 	return g_tracker
 }
 
-func GetClock() utils.Clock {
-	clock_mu.Lock()
-	defer clock_mu.Unlock()
-
-	return clock
-}
-
-func SetClock(c utils.Clock) {
-	clock_mu.Lock()
-	defer clock_mu.Unlock()
-
-	clock = c
-}
-
 type ProcessTracker struct {
-	mu     sync.Mutex
-	lookup *ttlcache.Cache // map[string]*ProcessEntry
+	mu sync.Mutex
+
+	lookup LRUCache
 
 	// Any interested parties will receive notifications of any state
 	// updates.
-	update_notifications chan *ProcessEntry
+	update_notifications chan *UpdateProcessEntry
+	enrichments          []*vfilter.Lambda
 
-	enrichments *ordereddict.Dict // map[string]*vfilter.Lambda
+	// The last time we did a full sync
+	last_full_sync time.Time
+
+	// The maximum number of children to allow under a single process.
+	max_children int
 }
 
+// Gets the process from cache - also update its TTL.
 func (self *ProcessTracker) Get(
 	ctx context.Context, scope vfilter.Scope, id string) (*ProcessEntry, bool) {
-	return self.get(id)
-}
-
-func (self *ProcessTracker) get(id string) (*ProcessEntry, bool) {
-	any, err := self.lookup.Get(id)
-	if err != nil {
+	any, pres := self.lookup.Get(id)
+	if !pres {
 		return nil, false
 	}
 
@@ -90,109 +80,80 @@ func (self *ProcessTracker) get(id string) (*ProcessEntry, bool) {
 	if !ok {
 		return nil, false
 	}
+
+	// If we look up by Pid this might be a link to the real id so get that.
+	if pe.RealId != "" {
+		res_any, pres := self.lookup.Get(pe.RealId)
+		if !pres {
+			return nil, false
+		}
+
+		res := res_any.(*ProcessEntry)
+		self.maybeUpdateEndTime(res)
+		return res, true
+	}
+
+	self.maybeUpdateEndTime(pe)
+
 	return pe, true
 }
 
-func (self *ProcessTracker) SetEntry(id string, entry *ProcessEntry) (old_id string, pres bool) {
-	self.mu.Lock()
-	defer self.mu.Unlock()
-
-	// Get the existing entry for this id if it exists
-	item, pres := self.get(id)
-
-	// No existing entry - just set it
-	if !pres || item == nil {
-		self.lookup.Set(id, entry)
-		return id, false
-	}
-
-	// Use the start time to identify the same process entry. If the
-	// start times are identical (within one second) then it is the
-	// same record.
-	time_diff := item.StartTime.Unix() - entry.StartTime.Unix()
-	if item.Id == entry.Id && time_diff < 2 && time_diff > -2 {
-		entry.ParentId = item.ParentId
-		self.lookup.Set(id, entry)
-		return id, false
-	}
-
-	// We are here when the records have the same pid and different
-	// create times. This means they are not the same process and pid
-	// is reused. In this case we change the id of the old process
-	// record and set the new record. The new id is a combination of
-	// pid and start time.
-
-	// Once the old ID is migrated, lookups for the pid will not fetch
-	// the old entry, but will get the new entry instead. However any
-	// parent/child relations will still refer to the old ID by its
-	// unique ID.
-	new_id := fmt.Sprintf("%v-%v", id, item.StartTime.Unix())
-	self.moveId(id, new_id)
-
-	// Set the new entry as the same id
-	self.lookup.Set(id, entry)
-
-	// Indicate the old record's ID to our caller
-	return new_id, true
-}
-
-// Sweep through the entire tracker and replace all referencee from
-// the old id to the new id.
-func (self *ProcessTracker) moveId(old_id, new_id string) {
-	for _, k := range self.lookup.GetKeys() {
-		any, err := self.lookup.Get(k)
-		if err != nil || any == nil {
-			continue
-		}
-
-		pe, ok := any.(*ProcessEntry)
-		if !ok {
-			continue
-		}
-
-		// Update the IDs as needed.
-		if pe.Id == old_id {
-			pe.Id = new_id
-
-			// Set the entry under the new key in the LRU
-			self.lookup.Remove(old_id)
-			self.lookup.Set(new_id, pe)
-		}
-
-		if pe.ParentId == old_id {
-			pe.ParentId = new_id
-		}
+func (self *ProcessTracker) maybeUpdateEndTime(entry *ProcessEntry) {
+	// If the end time is not set and we have done a full sync since
+	// we saw this entry previously, it must have exited. We do not
+	// know exactly when so we just estimate the last sync time for
+	// the exit time.
+	if entry.EndTime.IsZero() && self.last_full_sync.After(entry.LastSyncTime) {
+		entry.EndTime = entry.LastSyncTime
 	}
 }
 
-func (self *ProcessTracker) Stats() ttlcache.Metrics {
-	return self.lookup.GetMetrics()
+func (self *ProcessTracker) Peek(
+	ctx context.Context, scope vfilter.Scope, id string) (*ProcessEntry, bool) {
+	any, pres := self.lookup.Peek(id)
+	if !pres {
+		return nil, false
+	}
+
+	pe, ok := any.(*ProcessEntry)
+	if !ok {
+		return nil, false
+	}
+
+	// If we look up by Pid this might be a link to the real id so get that.
+	if pe.RealId != "" {
+		res_any, pres := self.lookup.Peek(pe.RealId)
+		if !pres {
+			return nil, false
+		}
+
+		res := res_any.(*ProcessEntry)
+		self.maybeUpdateEndTime(res)
+		return res, true
+	}
+
+	self.maybeUpdateEndTime(pe)
+
+	return pe, true
+}
+
+func (self *ProcessTracker) Stats() Stats {
+	return Stats(self.lookup.Stats())
 }
 
 func (self *ProcessTracker) Enrich(
 	ctx context.Context, scope vfilter.Scope, id string) (*ProcessEntry, bool) {
-	any, err := self.lookup.Get(id)
-	if err != nil {
+	pe, pres := self.Get(ctx, scope, id)
+	if !pres {
 		return nil, false
 	}
 
-	pe, ok := any.(*ProcessEntry)
-	if !ok {
-		return nil, false
-	}
-
-	for _, k := range self.enrichments.Keys() {
-		enrichment_any, _ := self.enrichments.Get(k)
-		enrichment, ok := enrichment_any.(*vfilter.Lambda)
-		if !ok {
-			continue
-		}
+	for _, enrichment := range self.enrichments {
 		update := enrichment.Reduce(ctx, scope, []vfilter.Any{pe})
 		update_dict, ok := update.(*ordereddict.Dict)
 		if ok {
-			for _, k := range update_dict.Keys() {
-				v, _ := update_dict.Get(k)
-				pe.Data.Update(k, v)
+			for _, i := range update_dict.Items() {
+				pe.data.Update(i.Key, i.Value)
 			}
 		}
 	}
@@ -200,12 +161,12 @@ func (self *ProcessTracker) Enrich(
 	return pe, true
 }
 
-func (self *ProcessTracker) Updates() chan *ProcessEntry {
+func (self *ProcessTracker) Updates() chan *UpdateProcessEntry {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
 	if self.update_notifications == nil {
-		self.update_notifications = make(chan *ProcessEntry)
+		self.update_notifications = make(chan *UpdateProcessEntry)
 	}
 
 	return self.update_notifications
@@ -215,13 +176,13 @@ func (self *ProcessTracker) Processes(
 	ctx context.Context, scope vfilter.Scope) []*ProcessEntry {
 	res := []*ProcessEntry{}
 
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	self.lookup.HouseKeepOnce()
 
-	for _, id := range self.lookup.GetKeys() {
-		v, pres := self.Get(ctx, scope, id)
-		if pres {
-			res = append(res, v)
+	for _, item := range self.lookup.Items() {
+		pe, ok := item.Value.(*ProcessEntry)
+		// Real entries contain a data blob.
+		if ok && pe.JSONData != "" {
+			res = append(res, pe)
 		}
 	}
 
@@ -230,22 +191,45 @@ func (self *ProcessTracker) Processes(
 
 // Return all the processes that are children of this id
 func (self *ProcessTracker) Children(
-	ctx context.Context, scope vfilter.Scope, id string) []*ProcessEntry {
-	res := []*ProcessEntry{}
+	ctx context.Context, scope vfilter.Scope,
+	id string, max_items int64) (res []*ProcessEntry) {
 
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	entry, pres := self.Get(ctx, scope, id)
+	if !pres {
+		return nil
+	}
 
-	for _, item_id := range self.lookup.GetKeys() {
-		v, pres := self.Get(ctx, scope, item_id)
+	for _, child_id := range entry.Children {
+		child, pres := self.Get(ctx, scope, child_id)
 		if pres {
-			if v.ParentId == id {
-				res = append(res, v)
-			}
+			res = append(res, child)
+		}
+		if int64(len(res)) > max_items {
+			break
 		}
 	}
 
 	return res
+}
+
+// Get the link from the LRU to the real ID
+func (self *ProcessTracker) getRealIdForPid(pid string) (string, bool) {
+	link, pres := self.lookup.Peek(pid)
+	if !pres || link.(*ProcessEntry).RealId == "" {
+		return "", false
+	}
+
+	return link.(*ProcessEntry).RealId, true
+}
+
+func (self *ProcessTracker) addChildIdToParent(child_id, parent_id string) {
+	parent_any, pres := self.lookup.Get(parent_id)
+	if pres {
+		parent := parent_any.(*ProcessEntry)
+		if parent.AddChild(child_id, self.max_children) {
+			self.lookup.Set(parent.Id, parent)
+		}
+	}
 }
 
 func (self *ProcessTracker) doUpdateQuery(
@@ -263,7 +247,7 @@ func (self *ProcessTracker) doUpdateQuery(
 				return
 			}
 
-			update := &ProcessEntry{}
+			update := &UpdateProcessEntry{}
 			err := arg_parser.ExtractArgsWithContext(ctx, scope,
 				vfilter.RowToDict(ctx, scope, row),
 				update)
@@ -272,25 +256,47 @@ func (self *ProcessTracker) doUpdateQuery(
 				continue
 			}
 			switch update.UpdateType {
+
+			// Fired when a new process starts
 			case "start":
-				self.maybeSendUpdate(update)
-				self.SetEntry(update.Id, &ProcessEntry{
-					StartTime: update.StartTime,
-					Id:        update.Id,
-					ParentId:  update.ParentId,
-					Data:      update.Data,
+				record, err := NewProcessEntryFromUpdate(update)
+				if err != nil {
+					continue
+				}
+
+				// Try to resolve the real parent ID through a link
+				parent_id, pres := self.getRealIdForPid(record.ParentId)
+				if !pres {
+					if !strings.HasSuffix(update.ParentId, "?") {
+						record.ParentId = fmt.Sprintf("%v-?", record.ParentId)
+					}
+				} else {
+					record.ParentId = parent_id
+				}
+
+				// Add a new process entry
+				self.lookup.Set(record.Id, record)
+
+				// Add a link from the bare pid to the real record
+				self.lookup.Set(update.Id, &ProcessEntry{
+					RealId: record.Id,
 				})
 
-			case "exit":
+				// Now update the parent record in the LRU
+				self.addChildIdToParent(record.Id, record.ParentId)
+
 				self.maybeSendUpdate(update)
 
-				self.mu.Lock()
-				entry, pres := self.Get(ctx, scope, update.Id)
+				// Fired when a process exits - sets the exact time it
+				// exited.
+			case "exit":
+				entry, pres := self.Peek(ctx, scope, update.Id)
 				if pres {
 					entry.EndTime = update.EndTime
-					self.lookup.Set(update.Id, entry)
+					self.lookup.Set(entry.Id, entry)
 				}
-				self.mu.Unlock()
+
+				self.maybeSendUpdate(update)
 			}
 		}
 	}
@@ -302,60 +308,105 @@ func (self *ProcessTracker) doFullSync(
 	subctx, cancel := context.WithTimeout(ctx, sync_period)
 	defer cancel()
 
-	now := GetClock().Now().UTC()
-	all_updates := ordereddict.NewDict()
+	all_updates := make(map[string]*ProcessEntry)
+	all_updates_dict := ordereddict.NewDict()
+	all_links := make(map[string]string)
 
 	for row := range vql.Eval(subctx, scope) {
-		update := &ProcessEntry{}
+		update := &UpdateProcessEntry{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope,
-			vfilter.RowToDict(ctx, scope, row),
-			update)
+			vfilter.RowToDict(ctx, scope, row), update)
 		if err != nil {
 			return fmt.Errorf("SyncQuery does not return correct rows: %w", err)
 		}
 
-		self.SetEntry(update.Id, update)
-		all_updates.Set(update.Id, update)
-	}
-
-	// Now go over all the existing processes in the tracker and if we
-	// have not just updated them, then we assume they were exited so
-	// we update exit time if needed.
-	for _, id := range self.lookup.GetKeys() {
-		// Set the exit time if the process still exists.
-		item, pres := self.get(id)
-		if !pres || !item.EndTime.IsZero() {
+		// NOTE: We assume that processes can not be reparented at
+		// runtime. This may not be true on all OSs.
+		record, err := NewProcessEntryFromUpdate(update)
+		if err != nil {
 			continue
 		}
 
-		// Check if we just updated the entry.
-		_, pres = all_updates.Get(id)
-		if !pres {
-			// No we have not seen this entry and it has no end time
-			// set - update that now.
-			item.EndTime = now
-			self.lookup.Set(id, item)
-		}
+		all_updates[record.Id] = record
 
-		// If a process has no valid parent at this time we must mark
-		// its parent id so as to prevent a new process with the same
-		// pid being added in future and clashing with it.
-		if !strings.Contains(item.ParentId, "-") {
-			_, pres := self.get(item.ParentId)
-			if !pres {
-				item.ParentId = fmt.Sprintf("%s-?", item.ParentId)
-			}
-		}
+		// A link to the real ID
+		all_links[update.Id] = record.Id
 	}
 
-	self.maybeSendUpdate(&ProcessEntry{
+	// Second pass we need to resolve the parent pid into real ids.
+	for real_id, record := range all_updates {
+		// Is the parent in the current live set?
+		parent_id, pres := all_links[record.ParentId]
+		if pres {
+			record.ParentId = parent_id
+			continue
+		}
+
+		// Do we know about this process already? if so we can re-use
+		// the previously discovered parent id.
+		known, pres := self.lookup.Peek(real_id)
+		if pres {
+			// Resolve the real parent id that we already know from
+			// the previous record.
+			record.ParentId = known.(*ProcessEntry).ParentId
+			continue
+		}
+
+		// If we get here we do not have a lot of information about
+		// the parent process. We can look up the Pid in the LRU to
+		// get the real id of the parent, but we have no guarantees
+		// that the PID is not reused, which will lead us to associate
+		// the wrong parent.
+
+		// This is unfortunately the best we can do.
+		parent_link, pres := self.lookup.Peek(record.ParentId)
+		if pres {
+			record.ParentId = parent_link.(*ProcessEntry).RealId
+			continue
+		}
+
+		// Mark the parent id as unknown.
+		record.ParentId += "-?"
+	}
+
+	// In the third pass we update the parent entries with the new
+	// child Id
+	for real_id, record := range all_updates {
+		parent, pres := all_updates[record.ParentId]
+		if pres {
+			// TODO merge existing children from LRU entry
+			if !utils.InString(parent.Children, real_id) {
+				parent.Children = append(parent.Children, real_id)
+			}
+			continue
+		}
+
+		// If the parent is not know, try to add the child to the LRU
+		// set.
+		self.addChildIdToParent(real_id, record.ParentId)
+	}
+
+	// Now update the entries for all new full sync entries - these
+	// override the known set
+	for real_id, record := range all_updates {
+		self.lookup.Set(real_id, record)
+
+		// Set the links to the real entry
+		self.lookup.Set(record.pid, &ProcessEntry{
+			RealId: real_id,
+		})
+
+		all_updates_dict.Set(real_id, record)
+	}
+
+	self.maybeSendUpdate(&UpdateProcessEntry{
 		UpdateType: "sync",
-		Data:       all_updates,
+		Data:       all_updates_dict,
 	})
 	return nil
 }
 
-func (self *ProcessTracker) maybeSendUpdate(update *ProcessEntry) {
+func (self *ProcessTracker) maybeSendUpdate(update *UpdateProcessEntry) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
@@ -371,9 +422,12 @@ func (self *ProcessTracker) maybeSendUpdate(update *ProcessEntry) {
 }
 
 func (self *ProcessTracker) CallChain(
-	ctx context.Context, scope vfilter.Scope, id string) []*ProcessEntry {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	ctx context.Context, scope vfilter.Scope,
+	id string, max_items int64) []*ProcessEntry {
+
+	if max_items == 0 {
+		max_items = 10
+	}
 
 	result := []*ProcessEntry{}
 	for {
@@ -385,44 +439,48 @@ func (self *ProcessTracker) CallChain(
 		// Make a copy so the caller does not need to lock
 		proc_copy := *proc
 		result = append(result, &proc_copy)
-
-		id = proc.ParentId
-		if id_seen(id, result) || len(result) > 10 {
+		if int64(len(result)) > max_items {
 			return reverse(result)
 		}
+
+		if id_seen(proc.ParentId, result) || len(result) > 10 {
+			return reverse(result)
+		}
+
+		// Look for the parent next
+		id = proc.ParentId
 	}
 }
 
-func NewProcessTracker(scope vfilter.Scope, max_size int) *ProcessTracker {
+func NewProcessTracker(
+	ctx context.Context,
+	scope vfilter.Scope, opts Options) (res *ProcessTracker, err error) {
+
+	cache, err := NewLRUCache(ctx, lru.Options(opts))
+	if err != nil {
+		return nil, err
+	}
+
 	result := &ProcessTracker{
-		lookup:      ttlcache.NewCache(),
-		enrichments: ordereddict.NewDict(),
+		lookup:       cache,
+		max_children: opts.MaxChildren,
 	}
 
-	result.lookup.SetCacheSizeLimit(max_size)
-	scope.AddDestructor(func() {
-		result.lookup.Close()
-	})
+	if result.max_children == 0 {
+		result.max_children = 10
+	}
 
-	return result
-}
-
-type ProcessEntry struct {
-	Id           string            `vfilter:"required,field=id,doc=Process ID."`
-	ParentId     string            `vfilter:"optional,field=parent_id,doc=The parent's process ID."`
-	RealParentId string            `vfilter:"optional,field=real_parent_id,doc=The parent's real process ID."`
-	UpdateType   string            `vfilter:"optional,field=update_type,doc=What this row represents."`
-	StartTime    time.Time         `vfilter:"optional,field=start_time,doc=Timestamp for start,end updates"`
-	EndTime      time.Time         `vfilter:"optional,field=end_time,doc=Timestamp for start,end updates"`
-	Data         *ordereddict.Dict `vfilter:"optional,field=data,doc=Arbitrary key/value to associate with the process"`
+	return result, nil
 }
 
 type _InstallProcessTrackerArgs struct {
 	SyncQuery    vfilter.StoredQuery `vfilter:"optional,field=sync_query,doc=Source for full tracker updates. Query must emit rows with the ProcessTrackerUpdate shape - usually uses pslist() to form a full sync."`
 	SyncPeriodMs int64               `vfilter:"optional,field=sync_period,doc=How often to do a full sync (default 5000 msec)."`
 	UpdateQuery  vfilter.StoredQuery `vfilter:"optional,field=update_query,doc=An Event query that produces live updates of the tracker state."`
-	MaxSize      int64               `vfilter:"optional,field=max_size,doc=Maximum size of process tracker LRU."`
+	MaxSize      uint64              `vfilter:"optional,field=max_size,doc=Maximum size of process tracker LRU."`
+	MaxExpirySec uint64              `vfilter:"optional,field=max_expiry,doc=Expire process records older than this much."`
 	Enrichments  []string            `vfilter:"optional,field=enrichments,doc=One or more VQL lambda functions that can enrich the data for the process."`
+	CacheFile    string              `vfilter:"optional,field=cache,doc=The path to the cache file - if not set we use a memory based cache."`
 }
 
 type _InstallProcessTracker struct{}
@@ -431,10 +489,9 @@ func (self _InstallProcessTracker) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("process_tracker", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "process_tracker", args)()
 
 	arg := &_InstallProcessTrackerArgs{}
-
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("process_tracker: %v", err)
@@ -445,14 +502,42 @@ func (self _InstallProcessTracker) Call(ctx context.Context,
 		arg.SyncPeriodMs = 5000
 	}
 
-	max_size := arg.MaxSize
-	if max_size == 0 {
-		max_size = 10000
+	if arg.CacheFile == "" {
+		arg.CacheFile = utils.ExpandEnv(vql_subsystem.GetStringFromRow(
+			scope, scope, constants.PROCESS_TRACKER_CACHE))
 	}
 
-	tracker := NewProcessTracker(scope, int(max_size))
+	// The cache contains both process entries and links. The Size
+	// should be large enough to also contain live links to the
+	// entries.
+	opts := Options{
+		Options: disklru.Options{
+			Filename:             arg.CacheFile,
+			MaxSize:              int(arg.MaxSize),
+			MaxExpirySec:         int(arg.MaxExpirySec),
+			UpdateExpiryOnAccess: true,
+			Clock:                lru.LRUClock(0),
+			DEBUG: vql_subsystem.GetBoolFromRow(
+				scope, scope, constants.LRU_DEBUG),
+			ClearOnStart: true,
+		},
+		MaxChildren: 10}
 
-	// Any any enrichments to the tracker.
+	if opts.MaxSize == 0 {
+		opts.MaxSize = 10000
+	}
+
+	if opts.MaxExpirySec == 0 {
+		opts.MaxExpirySec = 24 * 60 * 60
+	}
+
+	tracker, err := NewProcessTracker(ctx, scope, opts)
+	if err != nil {
+		scope.Log("ERROR:process_tracker: %v", err)
+		return false
+	}
+
+	// Add any enrichments to the tracker.
 	for _, enrichment := range arg.Enrichments {
 		lambda, err := vfilter.ParseLambda(enrichment)
 		if err != nil {
@@ -461,7 +546,7 @@ func (self _InstallProcessTracker) Call(ctx context.Context,
 			return false
 		}
 
-		tracker.enrichments.Set(enrichment, lambda)
+		tracker.enrichments = append(tracker.enrichments, lambda)
 	}
 
 	sync_duration := time.Duration(arg.SyncPeriodMs) * time.Millisecond
@@ -481,8 +566,12 @@ func (self _InstallProcessTracker) Call(ctx context.Context,
 				case <-ctx.Done():
 					return
 
-				case <-GetClock().After(sync_duration):
-					tracker.doFullSync(ctx, scope, sync_duration, arg.SyncQuery)
+				case <-utils.GetTime().After(sync_duration):
+					err := tracker.doFullSync(ctx, scope, sync_duration, arg.SyncQuery)
+					if err != nil {
+						scope.Log("<red>Process_tracker doFullSync</> %v", err)
+					}
+
 				}
 			}
 		}()
@@ -493,20 +582,22 @@ func (self _InstallProcessTracker) Call(ctx context.Context,
 	}
 
 	// Register this tracker as a global tracker.
-	clock_mu.Lock()
+	tracker_mu.Lock()
 	g_tracker = tracker
-	clock_mu.Unlock()
+	tracker_mu.Unlock()
 
 	// When this query is done we remove the process tracker and use
 	// the dummy one. This restores the state to the initial state.
-	vql_subsystem.GetRootScope(scope).AddDestructor(func() {
-		clock_mu.Lock()
+	err = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+		tracker_mu.Lock()
 		g_tracker = &DummyProcessTracker{}
-		clock_mu.Unlock()
+		tracker_mu.Unlock()
 
 		scope.Log("Uninstalling process tracker.")
 	})
-
+	if err != nil {
+		scope.Log("InstallProcessTracker: %v", err)
+	}
 	return tracker
 }
 
@@ -515,6 +606,7 @@ func (self *_InstallProcessTracker) Info(scope vfilter.Scope, type_map *vfilter.
 		Name:    "process_tracker",
 		Doc:     "Install a global process tracker.",
 		ArgType: type_map.AddType(scope, &_InstallProcessTrackerArgs{}),
+		Version: 2,
 	}
 }
 
@@ -522,6 +614,7 @@ func init() {
 	vql_subsystem.RegisterFunction(&_InstallProcessTracker{})
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
 		Name:        "process_tracker",
+		Categories:  []string{"Global", "VQL", "Plugins"},
 		Description: "Report process tracker stats",
 		ProfileWriter: func(ctx context.Context,
 			scope vfilter.Scope, output_chan chan vfilter.Row) {

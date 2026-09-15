@@ -3,6 +3,7 @@ package accessors
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,11 +26,15 @@ var (
 
 // This is a generic Path manipulator that implements the escaping
 // standard as used by Velociraptor:
-// 1. Path separators are / but will be able to use \\ to parse.
-// 2. Each component is optionally quoted if it contains special
-//    characters (like path separators).
+//  1. Path separators are / but will be able to use \\ to parse.
+//  2. Each component is optionally quoted if it contains special
+//     characters (like path separators).
 type GenericPathManipulator struct {
 	Sep string
+}
+
+func (self GenericPathManipulator) ComponentEqual(a, b string) bool {
+	return a == b
 }
 
 func (self GenericPathManipulator) PathParse(path string, result *OSPath) error {
@@ -92,7 +97,7 @@ func MustNewGenericOSPathWithBackslashSeparator(path string) *OSPath {
 }
 
 func NewGenericOSPath(path string) (*OSPath, error) {
-	manipulator := GenericPathManipulator{}
+	manipulator := GenericPathManipulator{Sep: "/"}
 	result := &OSPath{
 		Manipulator: manipulator,
 	}
@@ -122,6 +127,16 @@ func (self LinuxPathManipulator) PathParse(path string, result *OSPath) error {
 		result.Components = append(result.Components, c)
 	}
 	return nil
+}
+
+func (self LinuxPathManipulator) PathJoin(path *OSPath) string {
+	osPathSerializations.Inc()
+
+	result := self.AsPathSpec(path)
+	if result.GetDelegateAccessor() == "" && result.GetDelegatePath() == "" {
+		return result.Path
+	}
+	return result.String()
 }
 
 func (self LinuxPathManipulator) AsPathSpec(path *OSPath) *PathSpec {
@@ -186,6 +201,10 @@ var (
 // "HKEY_LOCAL_MACHINE", "Software", "Microsoft", "http://www.google.com", "Foo"
 
 type WindowsPathManipulator struct{ GenericPathManipulator }
+
+func (self WindowsPathManipulator) ComponentEqual(a, b string) bool {
+	return strings.EqualFold(a, b)
+}
 
 func (self WindowsPathManipulator) PathParse(path string, result *OSPath) error {
 	osPathUnserializations.Inc()
@@ -525,6 +544,10 @@ func maybeParsePathSpec(path string, result *OSPath) error {
 // of abbreviations for the hive names and we want to standardize.
 type FileStorePathManipulator struct{}
 
+func (self FileStorePathManipulator) ComponentEqual(a, b string) bool {
+	return a == b
+}
+
 func (self FileStorePathManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	result := path.pathspec
 	if result == nil {
@@ -609,6 +632,10 @@ func NewFileStorePath(path string) (*OSPath, error) {
 // attempt to parse it - just forward to the API as is.
 type RawFileManipulator struct{}
 
+func (self RawFileManipulator) ComponentEqual(a, b string) bool {
+	return a == b
+}
+
 func (self RawFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	result := &PathSpec{}
 	if len(path.Components) == 0 {
@@ -645,6 +672,10 @@ func NewRawFilePath(path string) (*OSPath, error) {
 // to avoid more characters.
 type ZipFileManipulator struct{}
 
+func (self ZipFileManipulator) ComponentEqual(a, b string) bool {
+	return strings.EqualFold(a, b)
+}
+
 func (self ZipFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	result := path.pathspec
 	if result == nil {
@@ -654,7 +685,7 @@ func (self ZipFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
 	components := make([]string, 0, len(path.Components))
 	for _, c := range path.Components {
 		if c != "" {
-			components = append(components, utils.SanitizeString(c))
+			components = append(components, utils.SanitizeStringForZip(c))
 		}
 	}
 	result.Path = "/" + strings.Join(components, "/")
@@ -662,11 +693,13 @@ func (self ZipFileManipulator) AsPathSpec(path *OSPath) *PathSpec {
 }
 
 func (self ZipFileManipulator) PathJoin(path *OSPath) string {
-	components := []string{}
-	for _, c := range path.Components {
-		components = append(components, utils.SanitizeStringForZip(c))
+	osPathSerializations.Inc()
+
+	result := self.AsPathSpec(path)
+	if result.GetDelegateAccessor() == "" && result.GetDelegatePath() == "" {
+		return result.Path
 	}
-	return "/" + strings.Join(components, "/")
+	return result.String()
 }
 
 func (self ZipFileManipulator) PathParse(
@@ -706,4 +739,12 @@ func MustNewZipFilePath(path string) *OSPath {
 		panic(err)
 	}
 	return res
+}
+
+func NewNativePath(path string) (*OSPath, error) {
+	if runtime.GOOS == "windows" {
+		return NewLinuxOSPath(path)
+	} else {
+		return NewWindowsOSPath(path)
+	}
 }

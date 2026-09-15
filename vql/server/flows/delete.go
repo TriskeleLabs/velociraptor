@@ -6,7 +6,6 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -16,6 +15,7 @@ type DeleteFlowPluginArgs struct {
 	FlowId     string `vfilter:"required,field=flow_id"`
 	ClientId   string `vfilter:"required,field=client_id"`
 	ReallyDoIt bool   `vfilter:"optional,field=really_do_it"`
+	Sync       bool   `vfilter:"optional,field=sync,doc=If specified we ensure data is available immediately"`
 }
 
 type DeleteFlowPlugin struct{}
@@ -28,6 +28,7 @@ func (self DeleteFlowPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "delete_flow", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.DELETE_RESULTS)
 		if err != nil {
@@ -62,7 +63,10 @@ func (self DeleteFlowPlugin) Call(
 
 		principal := vql_subsystem.GetPrincipal(scope)
 		responses, err := launcher.Storage().DeleteFlow(ctx, config_obj,
-			arg.ClientId, arg.FlowId, principal, arg.ReallyDoIt)
+			arg.ClientId, arg.FlowId, principal, services.DeleteFlowOptions{
+				ReallyDoIt: arg.ReallyDoIt,
+				Sync:       arg.Sync,
+			})
 		if err != nil {
 			scope.Log("delete_flow: %v", err)
 			return
@@ -85,7 +89,8 @@ func (self DeleteFlowPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "delete_flow",
 		Doc:      "Delete all the files that make up a flow.",
 		ArgType:  type_map.AddType(scope, &DeleteFlowPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.DELETE_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.DELETE_RESULTS).Build(),
+		Version:  2,
 	}
 }
 

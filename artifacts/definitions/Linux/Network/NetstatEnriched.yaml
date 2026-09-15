@@ -1,6 +1,6 @@
 name: Linux.Network.NetstatEnriched
 description: |
-  Report network connections, and enrich with process information.
+  Reports network connections and enriches with process information.
 
 type: CLIENT
 
@@ -26,7 +26,7 @@ parameters:
     type: regex
   - name: ConnectionStatusRegex
     description: "regex search over connection status"
-    default: "LISTEN|ESTABLISHED"
+    default: "LISTEN|ESTAB"
     type: regex
   - name: ProcessPathRegex
     description: "regex search over source process path"

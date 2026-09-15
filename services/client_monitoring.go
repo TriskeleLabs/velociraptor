@@ -12,7 +12,7 @@ package services
    GetClientUpdateEventTableMessage().
 
    It is only necessary to update the client if its version is behind
-   what it should be. Callers can check if the cliet's event table is
+   what it should be. Callers can check if the client's event table is
    current by calling CheckClientEventsVersion(). This is a very fast
    option and so it is appropriate to call it from the critical path.
 
@@ -51,6 +51,11 @@ type ClientEventTable interface {
 		ctx context.Context,
 		config_obj *config_proto.Config,
 		client_id string) *crypto_proto.VeloMessage
+
+	// Get the specs that will be applied on a client depending on
+	// label membership
+	GetClientSpec(ctx context.Context, config_obj *config_proto.Config,
+		client_id string) []*flows_proto.ArtifactSpec
 
 	// Get the full client monitoring table.
 	GetClientMonitoringState() *flows_proto.ClientEventTable

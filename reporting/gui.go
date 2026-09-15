@@ -31,7 +31,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/timelines"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -66,7 +65,8 @@ type GuiTemplateEngine struct {
 // Go templates can call functions which take args. The pipeline is
 // always called last, so any options must come before it. This
 // function takes care of parsing the args in a consistent way -
-// keyword options are
+// keyword options are extracted first and argv contains non keyword
+// options.
 func parseOptions(values []interface{}) (*ordereddict.Dict, []interface{}) {
 	result := []interface{}{}
 	dict := ordereddict.NewDict()
@@ -134,6 +134,16 @@ func (self *GuiTemplateEngine) Expand(values ...interface{}) interface{} {
 	default:
 		return t
 
+		// Support lambda functions.
+	case string:
+		lambda, err := vfilter.ParseLambda(t)
+		if err != nil {
+			self.Scope.Log("Expand of lambda: %v", err)
+			return t
+		}
+
+		return lambda.Reduce(self.ctx, self.Scope, []vfilter.Any{self.Scope})
+
 	case []*paths.NotebookCellQuery:
 		if len(t) == 0 { // No rows returned.
 			self.Scope.Log("Query produced no rows.")
@@ -177,7 +187,7 @@ func (self *GuiTemplateEngine) Import(artifact, name string) interface{} {
 	for _, report := range definition.Reports {
 		if report.Name == name {
 			// We parse the template for new definitions,
-			// we dont actually care about the output.
+			// we don't actually care about the output.
 			_, err := self.tmpl.Parse(SanitizeGoTemplates(report.Template))
 			if err != nil {
 				self.Error("Template Erorr: %v", err)
@@ -222,28 +232,13 @@ func (self *GuiTemplateEngine) Table(values ...interface{}) interface{} {
 				utils.QueryEscape(options.String()))
 		}
 		return result
-
-	case []*ordereddict.Dict:
-		if len(t) == 0 { // No rows returned.
-			self.Scope.Log("Query produced no rows.")
-			return ""
-		}
-
-		opts := vql_subsystem.EncOptsFromScope(self.Scope)
-		encoded_rows, err := json.MarshalWithOptions(t, opts)
-		if err != nil {
-			return self.Error("Error: %v", err)
-		}
-
-		key := fmt.Sprintf("table%d", len(self.Data))
-		self.Data[key] = &actions_proto.VQLResponse{
-			Response: string(encoded_rows),
-			Columns:  self.Scope.GetMembers(t[0]),
-		}
-		return fmt.Sprintf(
-			`<div class="panel"><inline-table-viewer value="%s" /></div>`,
-			utils.QueryEscape(key))
 	}
+}
+
+func (self *GuiTemplateEngine) SigmaEditor(values ...interface{}) string {
+	options, _ := parseOptions(values)
+	return fmt.Sprintf(
+		`<velo-sigma-editor params="%s" />`, utils.QueryEscape(options.String()))
 }
 
 func (self *GuiTemplateEngine) LineChart(values ...interface{}) string {
@@ -329,19 +324,33 @@ func (self *GuiTemplateEngine) Timeline(values ...interface{}) string {
 		return ""
 
 	case string:
-		timeline_path_manager := self.path_manager.Notebook().
-			SuperTimeline(t)
-		parameters := "{}"
-		reader, err := timelines.NewSuperTimelineReader(
-			self.config_obj, timeline_path_manager, nil, nil)
-		if err == nil {
-			parameters = json.MustMarshalString(reader.Stat())
+		notebook_manager, err := services.GetNotebookManager(self.config_obj)
+		if err != nil {
+			return ""
 		}
 
+		timelines, err := notebook_manager.Timelines(self.ctx,
+			self.path_manager.NotebookId())
+		if err != nil {
+			return ""
+		}
+
+		for _, timeline := range timelines {
+			if timeline.Name == t {
+				parameters := json.MustMarshalString(timeline)
+				return fmt.Sprintf(
+					`<div class="panel"><velo-timeline name='%s' `+
+						`params='%s' /></div>`, utils.QueryEscape(t),
+					utils.QueryEscape(parameters))
+			}
+		}
+
+		// If we get here the timeline does not exist, we just make it
+		// up
 		return fmt.Sprintf(
 			`<div class="panel"><velo-timeline name='%s' `+
 				`params='%s' /></div>`, utils.QueryEscape(t),
-			utils.QueryEscape(parameters))
+			utils.QueryEscape("{}"))
 
 	case []*paths.NotebookCellQuery:
 		result := ""
@@ -437,6 +446,10 @@ func (self *GuiTemplateEngine) Execute(report *artifacts_proto.Report) (string, 
 }
 
 func (self *GuiTemplateEngine) getMultiLineQuery(query string) (string, error) {
+	if query == "" {
+		return "", nil
+	}
+
 	t := self.tmpl.Lookup(query)
 	if t == nil {
 		return query, nil
@@ -532,6 +545,18 @@ func (self *GuiTemplateEngine) queryRows(queries ...string) []*ordereddict.Dict 
 	return result
 }
 
+// Render the special GUI markup for given value.
+func (self *GuiTemplateEngine) renderFunction(a interface{}, opts ...interface{}) interface{} {
+	switch t := a.(type) {
+	case time.Time:
+		res := fmt.Sprintf(`<velo-value value="%v"></velo-value>`,
+			t.Format(time.RFC3339))
+		return res
+	}
+
+	return a
+}
+
 func (self *GuiTemplateEngine) Error(fmt_str string, argv ...interface{}) string {
 	self.Scope.Log(fmt_str, argv...)
 	return ""
@@ -577,7 +602,8 @@ func NewGuiTemplateEngine(
 
 	// Write logs to this result set.
 	log_writer, err := newNotebookCellLogger(ctx,
-		config_obj, notebook_cell_path_manager.Logs())
+		config_obj, notebook_cell_path_manager.Logs(),
+		base_engine.Scope)
 	if err != nil {
 		return nil, err
 	}
@@ -600,11 +626,36 @@ func NewGuiTemplateEngine(
 			"LineChart":    template_engine.LineChart,
 			"ScatterChart": template_engine.ScatterChart,
 			"TimeChart":    template_engine.TimeChart,
+			"SigmaEditor":  template_engine.SigmaEditor,
 			"Timeline":     template_engine.Timeline,
-			"Get":          template_engine.getFunction,
+			"Get":          template_engine.GetFunction,
+			"Render":       template_engine.renderFunction,
 			"Expand":       template_engine.Expand,
 			"import":       template_engine.Import,
-			"str":          strval,
+			"bool": func(value interface{}) bool {
+				return scope.Bool(value)
+			},
+			"lt": func(x, y interface{}) bool {
+				return scope.Lt(x, y)
+			},
+			"gt": func(x, y interface{}) bool {
+				return scope.Gt(x, y)
+			},
+			"eq": func(x, y interface{}) bool {
+				return scope.Eq(x, y)
+			},
+			"not": func(x interface{}) bool {
+				return !scope.Bool(x)
+			},
+			"str": utils.ToString,
+
+			// Remove sprig's functions
+			"env": func() string {
+				return ""
+			},
+			"expandenv": func() string {
+				return ""
+			},
 		})
 	return template_engine, nil
 }
@@ -616,22 +667,17 @@ func NewBlueMondayPolicy() *bluemonday.Policy {
 	// DATA urls are useful for markdown cells
 	p.AllowURLSchemes("http", "https", "data")
 
-	// Deprecated but may still appear in older notebooks.
-	p.AllowAttrs("value", "params").OnElements("grr-csv-viewer")
-	p.AllowAttrs("value", "params").OnElements("grr-line-chart")
-	p.AllowAttrs("name", "params").OnElements("grr-timeline")
-	p.AllowAttrs("name", "version").OnElements("grr-tool-viewer")
-
 	// Directives for the GUI.
 	p.AllowAttrs("value", "params").OnElements("velo-csv-viewer")
-	p.AllowAttrs("value", "params").OnElements("inline-table-viewer")
 	p.AllowAttrs("value", "params").OnElements("velo-line-chart")
+	p.AllowAttrs("value", "params").OnElements("velo-sigma-editor")
 	p.AllowAttrs("value", "params").OnElements("bar-chart")
 	p.AllowAttrs("value", "params").OnElements("scatter-chart")
 	p.AllowAttrs("value", "params").OnElements("time-chart")
 	p.AllowAttrs("value").OnElements("velo-value")
 
-	//p.AllowNoAttrs().OnElements("accordion")
+	p.AllowAttrs("href", "icon", "style",
+		"t1", "text", "class").OnElements("velo-button")
 	p.AllowAttrs("params").OnElements("notebook-bar-chart")
 	p.AllowAttrs("params").OnElements("notebook-line-chart")
 	p.AllowAttrs("params").OnElements("notebook-scatter-chart")

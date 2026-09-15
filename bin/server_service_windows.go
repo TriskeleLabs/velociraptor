@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -220,7 +220,7 @@ func installServiceServerService(
 		logger.Info("SetRecoveryActions() failed: %s", err)
 	}
 
-	// Try to create an event source but dont sweat it if it does
+	// Try to create an event source but don't sweat it if it does
 	// not work.
 	err = eventlog.InstallAsEventCreate(
 		"velociraptor", eventlog.Error|eventlog.Warning|eventlog.Info)
@@ -341,7 +341,7 @@ func loadServerConfig() (*config_proto.Config, error) {
 		WithRequiredLogging().LoadAndValidate()
 	if err != nil {
 		// Config obj is not valid here, we can not actually
-		// log anything since we dont know where to send it so
+		// log anything since we don't know where to send it so
 		// prelog instead.
 		Prelog("Failed to load %v will try again soon.\n", *config_path)
 
@@ -466,7 +466,7 @@ func NewVelociraptorServerService(name string) (
 				config_obj.Services = services.AllServerServicesSpec()
 			}
 
-			ctx, cancel := install_sig_handler()
+			ctx, cancel := Install_sig_handler()
 			defer cancel()
 
 			// Now start the frontend services

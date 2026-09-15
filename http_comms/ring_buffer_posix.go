@@ -12,7 +12,7 @@ import (
 // attacks by replacing any existing file with a new file. In this
 // case we do not want to use a random file name because the
 // Velociraptor client is often killed without warning and
-// restarted (e.g. system reboot). This means we dont always get a
+// restarted (e.g. system reboot). This means we don't always get a
 // chance to cleanup and after a lot of restarts random file names
 // will accumulate.
 
@@ -34,7 +34,7 @@ func createFile(filename string) (*os.File, error) {
 	// In tests the file has to be discoverable so we can read it -
 	// move to its known position.
 	if PREPARE_FOR_TESTS {
-		os.Rename(fd.Name(), filename)
+		err := os.Rename(fd.Name(), filename)
 		return fd, err
 	}
 
@@ -45,11 +45,11 @@ func createFile(filename string) (*os.File, error) {
 		return fd, err
 	}
 
-	// If we can not remove it, move it into position so we dont leave
+	// If we can not remove it, move it into position so we don't leave
 	// tempfiles behind.
 	err = os.Rename(fd.Name(), filename)
 	if err != nil {
-		// If that didnt work, we just give up. Close the file, then
+		// If that didn't work, we just give up. Close the file, then
 		// delete it.
 		fd.Close()
 		os.Remove(fd.Name())

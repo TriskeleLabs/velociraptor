@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -32,21 +33,23 @@ import (
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	context "golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/api/authenticators"
-	"www.velocidex.com/golang/velociraptor/api/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/api/tables"
+	api_utils "www.velocidex.com/golang/velociraptor/api/utils"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
@@ -62,57 +65,12 @@ import (
 )
 
 type ApiServer struct {
-	proto.UnimplementedAPIServer
+	api_proto.UnimplementedAPIServer
 	server_obj         *server.Server
 	ca_pool            *x509.CertPool
 	wg                 *sync.WaitGroup
 	verbose            bool
 	api_client_factory grpc_client.APIClientFactory
-}
-
-func (self *ApiServer) CancelFlow(
-	ctx context.Context,
-	in *api_proto.ApiFlowRequest) (*api_proto.StartFlowResponse, error) {
-
-	defer Instrument("CancelFlow")()
-
-	users := services.GetUserManager()
-	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
-	if err != nil {
-		return nil, Status(self.verbose, err)
-	}
-	principal := user_record.Name
-
-	permissions := acls.COLLECT_CLIENT
-	if in.ClientId == "server" {
-		permissions = acls.COLLECT_SERVER
-	}
-
-	perm, err := services.CheckAccess(org_config_obj, principal, permissions)
-	if !perm || err != nil {
-		return nil, PermissionDenied(err,
-			"User is not allowed to cancel flows.")
-	}
-
-	launcher, err := services.GetLauncher(org_config_obj)
-	if err != nil {
-		return nil, err
-	}
-	result, err := launcher.CancelFlow(
-		ctx, org_config_obj, in.ClientId, in.FlowId, principal)
-	if err != nil {
-		return nil, Status(self.verbose, err)
-	}
-
-	// Log this event as and Audit event.
-	services.LogAudit(ctx,
-		org_config_obj, principal, "CancelFlow",
-		ordereddict.NewDict().
-			Set("client", in.ClientId).
-			Set("flow_id", in.FlowId).
-			Set("details", in))
-
-	return result, nil
 }
 
 func (self *ApiServer) GetReport(
@@ -163,11 +121,29 @@ func (self *ApiServer) CollectArtifact(
 		return nil, Status(self.verbose, err)
 	}
 
-	// Ensure the request is marked with the real caller.
-	in.Creator = user_record.Name
+	// Build a request based on user input.
+	request := &flows_proto.ArtifactCollectorArgs{
+		ClientId: in.ClientId,
+
+		// Flow id may be specified to relaunch a collection.
+		FlowId:          in.FlowId,
+		Artifacts:       in.Artifacts,
+		Specs:           in.Specs,
+		Creator:         user_record.Name,
+		OpsPerSecond:    in.OpsPerSecond,
+		CpuLimit:        in.CpuLimit,
+		IopsLimit:       in.IopsLimit,
+		Timeout:         in.Timeout,
+		ProgressTimeout: in.ProgressTimeout,
+		MaxRows:         in.MaxRows,
+		MaxLogs:         in.MaxLogs,
+		MaxUploadBytes:  in.MaxUploadBytes,
+		Urgent:          in.Urgent,
+		TraceFreqSec:    in.TraceFreqSec,
+	}
 
 	acl_manager := acl_managers.NewServerACLManager(
-		org_config_obj, in.Creator)
+		org_config_obj, user_record.Name)
 
 	manager, err := services.GetRepositoryManager(org_config_obj)
 	if err != nil {
@@ -184,8 +160,14 @@ func (self *ApiServer) CollectArtifact(
 		return nil, Status(self.verbose, err)
 	}
 
+	// Allow a custom artifact to override the specified artifacts.
+	if in.AllowCustomOverrides {
+		ModifyRequestForCustomArtifacts(
+			ctx, org_config_obj, repository, request)
+	}
+
 	flow_id, err := launcher.ScheduleArtifactCollection(
-		ctx, org_config_obj, acl_manager, repository, in,
+		ctx, org_config_obj, acl_manager, repository, request,
 		utils.BackgroundWriter)
 	if err != nil {
 		return nil, Status(self.verbose, err)
@@ -194,14 +176,14 @@ func (self *ApiServer) CollectArtifact(
 	result.FlowId = flow_id
 
 	// Log this event as an Audit event.
-	services.LogAudit(ctx,
-		org_config_obj, in.Creator, "ScheduleFlow",
+	err = services.LogAudit(ctx,
+		org_config_obj, request.Creator, "ScheduleFlow",
 		ordereddict.NewDict().
-			Set("client", in.ClientId).
+			Set("client", request.ClientId).
 			Set("flow_id", flow_id).
-			Set("details", in))
+			Set("details", request))
 
-	return result, nil
+	return result, err
 }
 
 func (self *ApiServer) ListClients(
@@ -313,22 +295,28 @@ func (self *ApiServer) LabelClients(
 				err = labeler.SetClientLabel(ctx,
 					org_config_obj, client_id, label)
 				if err == nil {
-					services.LogAudit(ctx,
+					err := services.LogAudit(ctx,
 						org_config_obj, principal, "SetClientLabel",
 						ordereddict.NewDict().
 							Set("client_id", client_id).
 							Set("label", label))
+					if err != nil {
+						return nil, Status(self.verbose, err)
+					}
 				}
 
 			case "remove":
 				err = labeler.RemoveClientLabel(ctx,
 					org_config_obj, client_id, label)
 				if err == nil {
-					services.LogAudit(ctx,
+					err := services.LogAudit(ctx,
 						org_config_obj, principal, "RemoveClientLabel",
 						ordereddict.NewDict().
 							Set("client_id", client_id).
 							Set("label", label))
+					if err != nil {
+						return nil, Status(self.verbose, err)
+					}
 				}
 
 			default:
@@ -372,10 +360,23 @@ func (self *ApiServer) GetFlowDetails(
 		return nil, Status(self.verbose, err)
 	}
 	result, err := launcher.GetFlowDetails(
-		ctx, org_config_obj, in.ClientId, in.FlowId)
+		ctx, org_config_obj, services.GetFlowOptions{
+			Request:   in.IncludeFullRequest || in.IncludeTruncatedRequest,
+			Downloads: true,
+		},
+		in.ClientId, in.FlowId)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
+
+	// Truncate the parameters
+	if in.IncludeTruncatedRequest && result.Context != nil {
+		truncateRequestArgs(result.Context)
+		for _, previouse_request := range result.Context.PreviousFlows {
+			truncateRequestArgs(previouse_request)
+		}
+	}
+
 	return result, nil
 }
 
@@ -403,8 +404,28 @@ func (self *ApiServer) GetFlowRequests(
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
-	result, err := launcher.Storage().GetFlowRequests(
+
+	result, err := launcher.Storage().GetFlowTasks(
 		ctx, org_config_obj, in.ClientId, in.FlowId, in.Offset, in.Count)
+	if err != nil {
+		return nil, Status(self.verbose, err)
+	}
+
+	if in.IncludeTruncatedRequest {
+		for _, item := range result.Items {
+			if item.FlowRequest == nil {
+				continue
+			}
+			for _, action := range item.FlowRequest.VQLClientActions {
+				for _, env := range action.Env {
+					if len(env.Value) > constants.MAX_ENV_TRUNCATE_LIMIT {
+						env.Value = env.Value[:constants.MAX_ENV_TRUNCATE_LIMIT] + " ..."
+					}
+				}
+			}
+		}
+	}
+
 	return result, Status(self.verbose, err)
 }
 
@@ -436,14 +457,15 @@ func (self *ApiServer) GetUserUITraits(
 
 	for _, item := range result.Orgs {
 		if utils.IsRootOrg(item.Id) {
-			item.Name = "<root>"
-			item.Id = "root"
+			item.Name = services.ROOT_ORG_NAME
+			item.Id = services.ROOT_ORG_ID
 		}
 	}
 
 	user_options, err := users.GetUserOptions(ctx, result.Username)
 	if err == nil {
-		result.InterfaceTraits.Org = user_options.Org
+		result.InterfaceTraits.Org = org_config_obj.OrgId
+		result.InterfaceTraits.OrgName = org_config_obj.OrgName
 		result.InterfaceTraits.UiSettings = user_options.Options
 		result.InterfaceTraits.Theme = user_options.Theme
 		result.InterfaceTraits.Timezone = user_options.Timezone
@@ -454,6 +476,7 @@ func (self *ApiServer) GetUserUITraits(
 		result.InterfaceTraits.Links = user_options.Links
 		result.InterfaceTraits.DisableServerEvents = user_options.DisableServerEvents
 		result.InterfaceTraits.DisableQuarantineButton = user_options.DisableQuarantineButton
+		result.Messages = user_options.Messages
 	}
 
 	return result, nil
@@ -463,14 +486,14 @@ func (self *ApiServer) SetGUIOptions(
 	ctx context.Context,
 	in *api_proto.SetGUIOptionsRequest) (*api_proto.SetGUIOptionsResponse, error) {
 
+	defer Instrument("SetGUIOptions")()
+
 	users := services.GetUserManager()
 	user_record, _, err := users.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
 	principal := user_record.Name
-
-	defer Instrument("SetGUIOptions")()
 
 	// This API is only used for the user to change their own options
 	// so it is always allowed.
@@ -607,8 +630,23 @@ func (self *ApiServer) VFSGetBuffer(
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
+
+	// The user may request to download a buffer from any org.
+	if !utils.CompareOrgIds(org_config_obj.OrgId, in.OrgId) {
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+
+		org_config_obj, err = org_manager.GetOrgConfig(in.OrgId)
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+	}
+
 	principal := user_record.Name
 
+	// Make sure the principal has permission in the org.
 	permissions := acls.READ_RESULTS
 	perm, err := services.CheckAccess(org_config_obj, principal, permissions)
 	if !perm || err != nil {
@@ -631,8 +669,13 @@ func (self *ApiServer) VFSGetBuffer(
 		return nil, status.Error(codes.InvalidArgument,
 			"Invalid pathspec")
 	}
-	result, err := vfsGetBuffer(
-		org_config_obj, in.ClientId, pathspec, in.Offset, in.Length)
+
+	padding := true
+	if in.Padding != nil {
+		padding = *in.Padding
+	}
+
+	result, err := vfsGetBuffer(org_config_obj, in.ClientId, pathspec, in.Offset, in.Length, padding)
 
 	return result, Status(self.verbose, err)
 }
@@ -657,7 +700,7 @@ func (self *ApiServer) GetTable(
 			"User is not allowed to view results.")
 	}
 
-	result, err := tables.GetTable(ctx, org_config_obj, in)
+	result, err := tables.GetTable(ctx, org_config_obj, in, principal)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
@@ -700,8 +743,18 @@ func (self *ApiServer) GetArtifacts(
 
 		for _, name := range in.Names {
 			artifact, pres := repository.Get(ctx, org_config_obj, name)
+			if !pres {
+				continue
+			}
+
+			artifact_clone := proto.Clone(artifact).(*artifacts_proto.Artifact)
+			for _, s := range artifact_clone.Sources {
+				s.Queries = nil
+			}
+			artifact_clone.Raw = ""
+
 			if pres {
-				result.Items = append(result.Items, artifact)
+				result.Items = append(result.Items, artifact_clone)
 			}
 		}
 		return result, nil
@@ -752,8 +805,7 @@ func (self *ApiServer) GetArtifactFile(
 
 func (self *ApiServer) SetArtifactFile(
 	ctx context.Context,
-	in *api_proto.SetArtifactRequest) (
-	*api_proto.APIResponse, error) {
+	in *api_proto.SetArtifactRequest) (*api_proto.SetArtifactResponse, error) {
 
 	defer Instrument("SetArtifactFile")()
 
@@ -766,7 +818,42 @@ func (self *ApiServer) SetArtifactFile(
 
 	permissions := acls.ARTIFACT_WRITER
 
-	// First ensure that the artifact is correct.
+	// Verify the artifact first, then only set it if there are no
+	// errors or warnings.
+	if in.Op == api_proto.SetArtifactRequest_CHECK_AND_SET {
+		state, err := checkArtifact(ctx, org_config_obj, in.Artifact)
+		if err != nil {
+			return nil, Status(self.verbose, err)
+		}
+
+		// report the errors and warnings
+		if len(state.Errors) != 0 || len(state.Warnings) != 0 {
+			warnings := make([]string, 0, len(state.Warnings))
+			for _, w := range state.Warnings {
+				warnings = append(warnings, w.Error())
+			}
+			res := &api_proto.SetArtifactResponse{
+				Error:    true,
+				Warnings: warnings,
+			}
+
+			errors := make([]string, 0, len(state.Errors))
+			for _, e := range state.Errors {
+				errors = append(errors, e.Error())
+			}
+
+			res.Errors = append(res.Errors, errors...)
+
+			return res, nil
+		}
+
+		// Fallback to regular setting.
+		in.Op = api_proto.SetArtifactRequest_SET
+	}
+
+	// We need to load the artifact to figure out what type it is
+	// first. Depending on the artifact type we need to check the
+	// relevant permission.
 	manager, err := services.GetRepositoryManager(org_config_obj)
 	if err != nil {
 		return nil, Status(self.verbose, err)
@@ -796,20 +883,20 @@ func (self *ApiServer) SetArtifactFile(
 
 	definition, err := setArtifactFile(ctx, org_config_obj, principal, in, "")
 	if err != nil {
-		message := &api_proto.APIResponse{
+		message := &api_proto.SetArtifactResponse{
 			Error:        true,
 			ErrorMessage: fmt.Sprintf("%v", err),
 		}
-		return message, errors.New(message.ErrorMessage)
+		return message, Status(self.verbose, errors.New(message.ErrorMessage))
 	}
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		org_config_obj, principal, "SetArtifactFile",
 		ordereddict.NewDict().
 			Set("artifact", definition.Name).
 			Set("details", in.Artifact))
 
-	return &api_proto.APIResponse{}, nil
+	return &api_proto.SetArtifactResponse{}, err
 }
 
 func (self *ApiServer) Query(
@@ -855,6 +942,17 @@ func (self *ApiServer) Query(
 			"Permission denied: User %v requires permission %v to run queries",
 			principal, permissions))
 	}
+
+	peer, ok := peer.FromContext(stream.Context())
+	if !ok {
+		return status.Error(codes.PermissionDenied, "No peer")
+	}
+
+	_ = users.SetUserStats(stream.Context(), org_config_obj, principal,
+		&api_proto.UserStats{
+			LastActiveTime: utils.GetTime().Now().Unix(),
+			LastIpAddress:  peer.Addr.String(),
+		})
 
 	return streamQuery(stream.Context(), org_config_obj, in, stream, principal)
 }
@@ -1008,9 +1106,13 @@ func (self *ApiServer) CreateDownloadFile(ctx context.Context,
 	}
 
 	// Log an audit event.
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		org_config_obj, principal, "CreateDownloadRequest",
 		ordereddict.NewDict().Set("request", in))
+	if !perm || err != nil {
+		return nil, PermissionDenied(err,
+			fmt.Sprintf("User is not allowed to create downloads (%v).", permissions))
+	}
 
 	format := ""
 	if in.JsonFormat && !in.CsvFormat {
@@ -1180,7 +1282,7 @@ func StartMonitoringService(
 
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 
-	env_inject_time, pres := os.LookupEnv("VELOCIRAPTOR_INJECT_API_SLEEP")
+	env_inject_time, pres := os.LookupEnv(constants.VELOCIRAPTOR_INJECT_API_SLEEP)
 	if pres {
 		logger.Info("Injecting delays for API calls since VELOCIRAPTOR_INJECT_API_SLEEP is set (only used for testing).")
 		result, err := strconv.ParseInt(env_inject_time, 0, 64)
@@ -1193,7 +1295,7 @@ func StartMonitoringService(
 		config_obj.Monitoring.BindAddress,
 		config_obj.Monitoring.BindPort)
 
-	mux := http.NewServeMux()
+	mux := api_utils.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	server := &http.Server{
 		Addr:     bind_addr,
@@ -1219,8 +1321,9 @@ func StartMonitoringService(
 		<-ctx.Done()
 
 		logger.Info("<red>Shutting down</> Prometheus monitoring service")
-		timeout_ctx, cancel := context.WithTimeout(
-			context.Background(), 10*time.Second)
+		timeout_ctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 10*time.Second,
+			errors.New("Monitoring Service deadline reached"))
 		defer cancel()
 
 		err := server.Shutdown(timeout_ctx)

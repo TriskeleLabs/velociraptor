@@ -36,16 +36,15 @@ func doHuntReconstruct() error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	config_obj.Services = services.GenericToolServices()
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	logger := &StdoutLogWriter{}
 	builder := services.ScopeBuilder{
@@ -95,7 +94,7 @@ func doHuntReconstruct() error {
 					return err
 				}
 				fmt.Printf("Rebuilding %v to %v\n", hunt.HuntId,
-					target.AsDatastoreFilename(config_obj))
+					target.String())
 			}
 		}
 	}

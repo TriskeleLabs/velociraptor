@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -34,10 +34,12 @@ import (
 	kingpin "github.com/alecthomas/kingpin/v2"
 	errors "github.com/go-errors/errors"
 	"github.com/virtuald/go-paniclog"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
+	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
 	"www.velocidex.com/golang/velociraptor/executor"
@@ -46,6 +48,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/startup"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/tools"
 )
 
@@ -245,7 +248,7 @@ func installService(
 		logger.Info("SetRecoveryActions() failed: %s", err)
 	}
 
-	// Try to create an event source but dont sweat it if it does
+	// Try to create an event source but don't sweat it if it does
 	// not work.
 	err = eventlog.InstallAsEventCreate(
 		"velociraptor", eventlog.Error|eventlog.Warning|eventlog.Info)
@@ -396,19 +399,22 @@ func loadClientConfig() (*config_proto.Config, error) {
 
 		// If the config path is not specified we look for the config
 		// file next to the service executable.
-		WithFileLoader(strings.TrimSuffix(
+		WithOptionalFileLoader(strings.TrimSuffix(
 			executable, filepath.Ext(executable)) + ".config.yaml").
 		WithRequiredClient().
 		WithWriteback().LoadAndValidate()
 	if err != nil {
 		// Config obj is not valid here, we can not actually
-		// log anything since we dont know where to send it so
+		// log anything since we don't know where to send it so
 		// prelog instead.
 		Prelog("Failed to load %v: %v will try again soon.\n", err, *config_path)
 		return nil, err
 	}
 
-	executor.SetTempfile(config_obj)
+	tempfile.SetTempfile(config_obj)
+
+	// Strip out any non-client related settings.
+	config_obj = config.GetClientConfig(config_obj)
 
 	// Make sure the config is ok.
 	err = crypto_utils.VerifyConfig(config_obj)
@@ -427,7 +433,7 @@ func maybeWritePanicFile(name string, config_obj *config_proto.Config) {
 	}
 
 	// Make sure %TEMP% is set correctly here
-	executor.SetTempfile(config_obj)
+	tempfile.SetTempfile(config_obj)
 
 	panic_file_path := utils.ExpandEnv(config_obj.Client.PanicFile)
 	fd, err := os.OpenFile(panic_file_path,
@@ -580,6 +586,7 @@ func runOnce(ctx context.Context,
 	}
 
 	maybeWritePanicFile(log_name, config_obj)
+	_ = InstallAuditlogger()
 
 	writeback_service := writeback.GetWritebackService()
 	writeback, err := writeback_service.GetWriteback(config_obj)
@@ -715,4 +722,11 @@ func init() {
 		kingpin.FatalIfError(err, "")
 		return true
 	})
+
+	// From now on all LoadLibrary() calls will be done from the
+	// system directories. This does not help any libraries linked
+	// into the binary because they would have loaded already but this
+	// helps to reduce our DLL hijacking surface especially with
+	// external libraries.
+	windows.SetDefaultDllDirectories(windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
 }

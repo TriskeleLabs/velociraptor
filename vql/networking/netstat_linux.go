@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package networking
@@ -13,10 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -24,8 +26,8 @@ import (
 // constants from netinet/tcp.h, renamed to match Windows
 // implementation
 var socketStates = map[uint16]string{
-	1:  "ESTAB",    // ESTABLISHED
-	2:  "SENT",     // SYN_SENT
+	1:  "ESTAB", // ESTABLISHED
+	2:  "SYN_SENT",
 	3:  "SYN_RCVD", // SYN_RECV
 	4:  "FIN_WAIT1",
 	5:  "FIN_WAIT2",
@@ -64,6 +66,10 @@ func (self *ConnectionStat) TypeString() string {
 	default:
 		return fmt.Sprintf("%d", self.Type)
 	}
+}
+
+func (self *ConnectionStat) Timestamp() time.Time {
+	return self.timestamp
 }
 
 // parse addressses
@@ -156,7 +162,7 @@ func readProcNet(which string, si socketInfo) ([]*ConnectionStat, error) {
 		addrType = c[1]
 	}
 
-	f, err := os.Open("/proc/net/" + which)
+	f, err := os.Open("/proc/net/" + utils.SanitizeString(which))
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +240,8 @@ var _Netstat = vfilter.GenericListPlugin{
 	Doc:        "Collect network information.",
 	Function:   runNetstat,
 	ArgType:    &NetstatArgs{},
-	Metadata:   vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+	Metadata: vql_subsystem.VQLMetadata().Permissions(
+		acls.MACHINE_STATE).Build(),
 }
 
 func init() {

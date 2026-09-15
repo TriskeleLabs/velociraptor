@@ -4,12 +4,12 @@ import (
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/assert"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
-// Sanitized strings should be prefectly reversible.
+// Sanitized strings should be perfectly reversible.
 func TestSanitize(t *testing.T) {
 	golden := ordereddict.NewDict()
 	for _, name := range []string{
@@ -26,6 +26,8 @@ func TestSanitize(t *testing.T) {
 
 		// Windows can not represent a name with a trailing .
 		"foo.",
+
+		"../../foo.",
 	} {
 		sanitized := SanitizeString(name)
 		unsanitized := UnsanitizeComponent(sanitized)

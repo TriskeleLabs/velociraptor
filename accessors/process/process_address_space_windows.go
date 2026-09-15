@@ -26,12 +26,32 @@ import (
 	"time"
 
 	"github.com/Velocidex/ttlcache/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/windows"
 	"www.velocidex.com/golang/velociraptor/vql/windows/process"
 	"www.velocidex.com/golang/vfilter"
+)
+
+var (
+	processAccessorCurrentOpened = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "accessor_process_current_open",
+		Help: "Number of currently opened processes",
+	})
+
+	processAccessorTotalOpened = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "accessor_process_total_open",
+		Help: "Total Number of opened processes",
+	})
+
+	processAccessorTotalReadProcessMemory = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "accessor_process_total_read_process_memory",
+		Help: "Total Number of opened buffers read from process memory",
+	})
 )
 
 const PAGE_SIZE = 0x1000
@@ -91,7 +111,7 @@ func (self *ProcessReader) readDistinctPages(buf []byte) (int, error) {
 		_, err := windows.ReadProcessMemory(
 			self.handle, self.offset, buf[buf_start:buf_end])
 		if err != nil {
-			// Error occured reading a single page, zero
+			// Error occurred reading a single page, zero
 			// it out and skip the page.
 			for i := buf_start; i < buf_end; i++ {
 				buf[i] = 0
@@ -123,11 +143,11 @@ func (self *ProcessReader) Read(buf []byte) (int, error) {
 	_, err := windows.ReadProcessMemory(
 		self.handle, self.offset, buf[:to_read])
 
-	// A read error occured - split the read into multiple page
+	// A read error occurred - split the read into multiple page
 	// size reads to get as much data as we can out of the
 	// region. Note: We always return as much data as was
 	// required, we simply null pad the missing data. Therefore if
-	// a reader askes to read from a memory region that contains
+	// a reader asks to read from a memory region that contains
 	// no data, we never return an error - just zero pad those
 	// regions.
 	if err != nil {
@@ -277,6 +297,14 @@ func (self ProcessAccessor) New(scope vfilter.Scope) (
 	return result_any.(*ProcessAccessor), nil
 }
 
+func (self ProcessAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "process",
+		Description: `Access process memory like a file. The Path is taken in the form "/<pid>", i.e. the pid appears as the top level file.`,
+		Permissions: []acls.ACL_PERMISSION{acls.MACHINE_STATE},
+	}
+}
+
 func (self ProcessAccessor) ParsePath(path string) (
 	*accessors.OSPath, error) {
 	return accessors.NewLinuxOSPath(path)
@@ -378,6 +406,5 @@ func (self *ProcessAccessor) OpenWithOSPath(
 }
 
 func init() {
-	accessors.Register("process", &ProcessAccessor{},
-		`Access process memory like a file. The Path is taken in the form "/<pid>", i.e. the pid appears as the top level file.`)
+	accessors.Register(&ProcessAccessor{})
 }

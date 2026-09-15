@@ -7,12 +7,14 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/actions"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 type QueryPluginArgs struct {
@@ -26,6 +28,7 @@ type QueryPluginArgs struct {
 	OrgId           string            `vfilter:"optional,field=org_id,doc=If specified, the query will run in the specified org space (Use 'root' to refer to the root org)"`
 	Principal       string            `vfilter:"optional,field=runas,doc=If specified, the query will run as the specified user"`
 	InheritScope    bool              `vfilter:"optional,field=inherit,doc=If specified we inherit the scope instead of building a new one."`
+	ExitCB          *vfilter.Lambda   `vfilter:"optional,field=exit,doc=A callback to consider each row. When the callback returns TRUE the query is aborted"`
 }
 
 type QueryPlugin struct{}
@@ -38,7 +41,7 @@ func (self QueryPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("query", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "query", args)()
 
 		// This plugin just passes the current scope to the
 		// subquery so there is no permissions check - the
@@ -61,13 +64,15 @@ func (self QueryPlugin) Call(
 
 		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {
-			config_obj, err = org_manager.GetOrgConfig("")
+			config_obj, err = org_manager.GetOrgConfig(services.ROOT_ORG_ID)
 			if err != nil {
 				scope.Log("query: %v", err)
 				return
 			}
 		}
 		org_config_obj := config_obj
+
+		principal := vql_subsystem.GetPrincipal(scope)
 
 		// Build a completely new scope to evaluate the query
 		// in.
@@ -87,15 +92,27 @@ func (self QueryPlugin) Call(
 				return
 			}
 
-			// The subscoope will switch to the specified org.
+			// The subscope will switch to the specified org.
 			builder.Config = org_config_obj
+			builder.ACLManager = acl_managers.NewServerACLManager(
+				org_config_obj, vql_subsystem.GetPrincipal(scope))
 		}
 
-		if arg.Principal != "" {
-			// Impersonation is only allowed for administrator users.
-			err := vql_subsystem.CheckAccess(scope, acls.IMPERSONATION)
-			if err != nil {
-				scope.Log("ERROR:query: Permission required for runas: %v", err)
+		if arg.Principal != "" && arg.Principal != principal {
+			// Impersonation is only allowed for administrator
+			// users. Check the impersonation permission in the target
+			// org, if the user switched orgs.
+			acl_manager := acl_managers.NewServerACLManager(
+				org_config_obj, principal)
+
+			perm, err := acl_manager.CheckAccess(acls.IMPERSONATION)
+			if !perm {
+				if err == nil {
+					err = utils.PermissionDenied
+				}
+				scope.Log("ERROR:query: User %v (%v) impersonation to %v (%v): %v",
+					principal, config_obj.OrgId, arg.Principal,
+					org_config_obj.OrgId, err)
 				return
 			}
 
@@ -111,9 +128,16 @@ func (self QueryPlugin) Call(
 			return
 		}
 
+		// Make the context cancellable.
 		if arg.Timeout > 0 {
 			subctx, cancel := context.WithTimeout(
 				ctx, time.Duration(arg.Timeout)*time.Second)
+			defer cancel()
+
+			ctx = subctx
+
+		} else {
+			subctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
 			ctx = subctx
@@ -137,8 +161,8 @@ func (self QueryPlugin) Call(
 		}
 		defer subscope.Close()
 
-		throttler := actions.NewThrottler(
-			ctx, subscope, 0, arg.CpuLimit, arg.IopsLimit)
+		throttler, closer := throttler.NewThrottler(
+			ctx, subscope, org_config_obj, 0, arg.CpuLimit, arg.IopsLimit)
 		if arg.ProgressTimeout > 0 {
 			subctx, cancel := context.WithCancel(ctx)
 			ctx = subctx
@@ -149,8 +173,12 @@ func (self QueryPlugin) Call(
 			scope.Log("query: Installing a progress alarm for %v", duration)
 		}
 		subscope.SetThrottler(throttler)
+		err = subscope.AddDestructor(closer)
+		if err != nil {
+			scope.Log("query: %v", err)
+		}
 
-		runQuery(ctx, subscope, output_chan, arg.Query)
+		runQuery(ctx, subscope, output_chan, arg.Query, arg.ExitCB)
 	}()
 
 	return output_chan
@@ -161,17 +189,18 @@ func runQuery(
 	ctx context.Context,
 	scope vfilter.Scope,
 	output_chan chan vfilter.Row,
-	query vfilter.Any) {
+	query vfilter.Any,
+	limit *vfilter.Lambda) {
 
 	switch t := query.(type) {
 	case string:
-		runStringQuery(ctx, scope, output_chan, t)
+		runStringQuery(ctx, scope, output_chan, t, limit)
 
 	case vfilter.StoredQuery:
-		runStoredQuery(ctx, scope, output_chan, t)
+		runStoredQuery(ctx, scope, output_chan, t, limit)
 
 	case vfilter.LazyExpr:
-		runQuery(ctx, scope, output_chan, t.ReduceWithScope(ctx, scope))
+		runQuery(ctx, scope, output_chan, t.ReduceWithScope(ctx, scope), limit)
 
 	default:
 		scope.Log("ERROR:query: query should be a string or subquery")
@@ -183,7 +212,8 @@ func runStoredQuery(
 	ctx context.Context,
 	scope vfilter.Scope,
 	output_chan chan vfilter.Row,
-	query vfilter.StoredQuery) {
+	query vfilter.StoredQuery,
+	limit *vfilter.Lambda) {
 
 	row_chan := query.Eval(ctx, scope)
 	for {
@@ -195,6 +225,12 @@ func runStoredQuery(
 			if !ok {
 				return
 			}
+
+			if limit != nil &&
+				scope.Bool(limit.Reduce(ctx, scope, []types.Any{row})) {
+				return
+			}
+
 			output_chan <- row
 		}
 	}
@@ -204,7 +240,8 @@ func runStringQuery(
 	ctx context.Context,
 	scope vfilter.Scope,
 	output_chan chan vfilter.Row,
-	query_string string) {
+	query_string string,
+	limit *vfilter.Lambda) {
 
 	// Parse and compile the query
 	scope.Log("query: running query %v", query_string)
@@ -227,6 +264,11 @@ func runStringQuery(
 					break get_rows
 				}
 
+				if limit != nil &&
+					scope.Bool(limit.Reduce(ctx, scope, []types.Any{row})) {
+					return
+				}
+
 				output_chan <- row
 			}
 		}
@@ -238,7 +280,8 @@ func (self QueryPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:     "query",
 		Doc:      "Evaluate a VQL query.",
 		ArgType:  type_map.AddType(scope, &QueryPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.IMPERSONATION).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.IMPERSONATION).Build(),
+		Version:  2,
 	}
 }
 

@@ -1,10 +1,12 @@
+//go:build sumo
+// +build sumo
+
 /* An accessor for an S3 bucket */
 
 package s3
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 
@@ -16,8 +18,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/utils"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -45,17 +47,21 @@ func (self RawS3SystemAccessor) ParsePath(path string) (*accessors.OSPath, error
 func (self RawS3SystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 
-	// Check we have permission to open files.
-	err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_READ)
-	if err != nil {
-		return nil, err
-	}
-
 	result := &RawS3SystemAccessor{
 		ctx:   context.TODO(),
 		scope: scope,
 	}
 	return result, nil
+}
+
+func (self RawS3SystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "s3",
+		Description: `Allows access to S3 buckets.`,
+		Permissions: []acls.ACL_PERMISSION{acls.NETWORK},
+		ScopeVar:    constants.S3_CREDENTIALS,
+		ArgType:     S3AcccessorArgs{},
+	}
 }
 
 func (self RawS3SystemAccessor) ReadDir(
@@ -98,16 +104,13 @@ func (self RawS3SystemAccessor) ReadDirWithOSPath(
 		return nil, err
 	}
 
-	// Keys may not have a leading / but we should handle them as
-	// well.
-	key = strings.TrimPrefix(key, "/")
 	bucket_path := accessors.MustNewLinuxOSPath(bucket)
 	child_directories := ordereddict.NewDict()
 	child_files := []*S3FileInfo{}
 
 	params := &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
-		Prefix: aws.String(path.Dirname().String()),
+		Prefix: aws.String(key),
 	}
 
 	// Create the Paginator for the ListObjectsV2 operation.
@@ -168,12 +171,12 @@ func (self RawS3SystemAccessor) ReadDirWithOSPath(
 
 func getBucketAndKey(path *accessors.OSPath) (string, string, error) {
 	if len(path.Components) == 0 {
-		return "", "", os.ErrNotExist
+		return "", "", utils.NotFoundError
 	}
 
 	bucket := path.Components[0]
 	components := append([]string{}, path.Components[1:]...)
-	key := "/" + strings.Join(components, "/")
+	key := strings.Join(components, "/")
 
 	return bucket, key, nil
 }
@@ -202,7 +205,7 @@ func (self RawS3SystemAccessor) OpenWithOSPath(
 	// small reads from the network.
 	paged_reader, err := utils.NewPagedReader(
 		utils.MakeReaderAtter(reader), 1024*1024, 20)
-	return utils.NewReadSeekReaderAdapter(paged_reader), err
+	return utils.NewReadSeekReaderAdapter(paged_reader, nil), err
 }
 
 func (self RawS3SystemAccessor) Open(
@@ -257,32 +260,10 @@ func (self RawS3SystemAccessor) LstatWithOSPath(
 }
 
 func init() {
-	accessors.Register("s3", &RawS3SystemAccessor{},
-		`Access S3 Buckets.
-
-This artifact allows access to S3 buckets:
-
-1. The first component is interpreted as the bucket name.
-
-2. Provide credentials through the VQL environment
-   variable S3_CREDENTIALS. This should be a dict with
-   a key of the bucket name and the value being the credentials.
-
-Example:
-
-LET S3_CREDENTIALS<=dict(endpoint='http://127.0.0.1:4566/',
-  credentials_key='admin',
-  credentials_secret='password',
-  no_verify_cert=1)
-
-SELECT *, read_file(filename=OSPath,
-   length=10, accessor='s3') AS Data
-FROM glob(globs='/velociraptor/orgs/root/clients/C.39a107c4c58c5efa/collections/*/uploads/auto/*', accessor='s3')
-
-`)
+	accessors.Register(&RawS3SystemAccessor{})
 }
 
-// Set the page size for tests. Normally we dont need to adjust this
+// Set the page size for tests. Normally we don't need to adjust this
 // at all. Used in tests.
 func SetPageSize(size int32) {
 	mu.Lock()

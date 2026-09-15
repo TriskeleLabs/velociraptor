@@ -26,7 +26,17 @@ func (self *Ext4FileInfo) IsDir() bool {
 }
 
 func (self *Ext4FileInfo) Data() *ordereddict.Dict {
-	return self.Dict()
+	data := ordereddict.NewDict().
+		Set("Inode", self.Inode()).
+		Set("Uid", self.Uid()).
+		Set("Gid", self.Gid())
+
+	flags := self.Flags()
+	if len(flags) > 0 {
+		data.Set("Flags", flags)
+	}
+
+	return data
 }
 
 func (self *Ext4FileInfo) UniqueName() string {
@@ -69,6 +79,13 @@ func NewExt4FileSystemAccessor(
 		accessor: accessor,
 		device:   device,
 		root:     root_path,
+	}
+}
+
+func (self Ext4FileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "raw_ext4",
+		Description: `Access the Ext4 filesystem inside an image by parsing the image.`,
 	}
 }
 
@@ -130,8 +147,10 @@ func (self *Ext4FileSystemAccessor) ReadDirWithOSPath(
 
 	// List the directory.
 	for _, info := range dir {
+		name := info.Name()
+
 		// Skip these useless directories.
-		if info.Name() == "." || info.Name() == ".." {
+		if name == "" || name == "." || name == ".." {
 			continue
 		}
 
@@ -301,27 +320,7 @@ func (self *Ext4FileSystemAccessor) LstatWithOSPath(
 }
 
 func init() {
-	accessors.Register("raw_ext4", &Ext4FileSystemAccessor{},
-		`Access the Ext4 filesystem inside an image by parsing the image.
-
-This accessor is designed to operate on images directly. It requires a
-delegate accessor to get the raw image and will open files using the
-FAT full path rooted at the top of the filesystem.
-
-## Example
-
-The following query will glob all the files under the directory 'a'
-inside a Ext4 image file
-
-SELECT *
-FROM glob(globs='/**',
-  accessor="raw_ext4",
-  root=pathspec(
-    Path="a",
-    DelegateAccessor="file",
-    DelegatePath='ext4.dd'))
-
-`)
+	accessors.Register(&Ext4FileSystemAccessor{})
 
 	json.RegisterCustomEncoder(&Ext4FileInfo{}, accessors.MarshalGlobFileInfo)
 }

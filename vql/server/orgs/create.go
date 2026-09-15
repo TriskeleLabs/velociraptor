@@ -5,8 +5,8 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -60,18 +60,24 @@ func (self OrgCreateFunction) Call(
 		return vfilter.Null{}
 	}
 
-	org_record, err := org_manager.CreateNewOrg(arg.OrgName, arg.OrgId)
+	org_record, err := org_manager.CreateNewOrg(
+		arg.OrgName, arg.OrgId, services.RandomNonce)
 	if err != nil {
 		scope.Log("org_create: %s", err)
 		return vfilter.Null{}
 	} else if org_record != nil {
 		principal := vql_subsystem.GetPrincipal(scope)
-		services.LogAudit(ctx,
+		err := services.LogAudit(ctx,
 			config_obj, principal, "org_create",
 			ordereddict.NewDict().
 				Set("name", org_record.Name).
 				Set("org_id", org_record.Id).
 				Set("nonce", org_record.Nonce))
+
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("<red>org_create</> %v %v", principal, org_record.Id)
+		}
 	}
 
 	return org_record
@@ -82,7 +88,7 @@ func (self OrgCreateFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:     "org_create",
 		Doc:      "Creates a new organization.",
 		ArgType:  type_map.AddType(scope, &OrgCreateFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.ORG_ADMIN).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.ORG_ADMIN).Build(),
 	}
 }
 

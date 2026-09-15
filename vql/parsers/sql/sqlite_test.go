@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -15,14 +14,15 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	vsql "www.velocidex.com/golang/velociraptor/vql/parsers/sql"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	vfilter "www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
@@ -54,14 +54,14 @@ func (self *TestSuite) TestSQLite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	tempfile, err := ioutil.TempFile("", "sqlite")
+	tempfile, err := tempfile.TempFile("sqlite")
 	assert.NoError(self.T(), err)
 	tempfile.Close()
 
 	defer os.Remove(tempfile.Name())
 
 	// Keep all the logging messages in a string so we can check
-	// whats happening below.
+	// what's happening below.
 	log_buffer := &strings.Builder{}
 
 	builder := services.ScopeBuilder{

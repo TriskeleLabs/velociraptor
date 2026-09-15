@@ -9,6 +9,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"github.com/robertkrimen/otto"
 	_ "github.com/robertkrimen/otto/underscore"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -61,7 +62,8 @@ func (self *JSCompile) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("js", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "js", args)()
+	defer utils.RecoverVQL(scope)
 
 	arg := &JSCompileArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -103,7 +105,7 @@ func (self *JSCall) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("js_call", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "js_call", args)()
 
 	arg := &JSCallArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -164,7 +166,7 @@ func (self *JSSet) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("js_set", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "js_set", args)()
 
 	arg := &JSSetArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -221,7 +223,7 @@ func (self *JSGet) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("js_get", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "js_get", args)()
 
 	arg := &JSGetArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)

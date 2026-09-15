@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
@@ -23,12 +22,12 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/backup"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 )
 
 type TestBackupProvider struct {
 	name []string
-	rows []*ordereddict.Dict
 
 	// Restored rows from backup
 	restored       []vfilter.Row
@@ -44,8 +43,8 @@ func (self TestBackupProvider) Name() []string {
 }
 
 func (self TestBackupProvider) BackupResults(
-	ctx context.Context, wg *sync.WaitGroup) (
-	<-chan vfilter.Row, error) {
+	ctx context.Context, wg *sync.WaitGroup,
+	container services.BackupContainerWriter) (<-chan vfilter.Row, error) {
 
 	output := make(chan vfilter.Row)
 
@@ -63,7 +62,9 @@ func (self TestBackupProvider) BackupResults(
 }
 
 func (self *TestBackupProvider) Restore(
-	ctx context.Context, in <-chan vfilter.Row) (services.BackupStat, error) {
+	ctx context.Context,
+	container services.BackupContainerReader,
+	in <-chan vfilter.Row) (services.BackupStat, error) {
 
 	if self.restored_error != nil {
 		return services.BackupStat{
@@ -97,7 +98,7 @@ func (self *BackupTestSuite) SetupTest() {
 	assert.NoError(self.T(), err)
 
 	client_info_manager.Set(self.Ctx, &services.ClientInfo{
-		actions_proto.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
 			ClientId: "C.12345",
 		}})
 
@@ -124,17 +125,23 @@ func (self *BackupTestSuite) TestBackups() {
 		CreateBackup(export_path)
 	assert.NoError(self.T(), err)
 
-	// Backup file should be dependend on the mocked time.
-	result := self.readBackupFile(export_path)
+	// test_utils.GetMemoryFileStore(self.T(), self.ConfigObj).Debug()
 
-	test_provider, _ := result.Get("TestProvider.json")
+	// Backup file should be dependent on the mocked time.
+	result := self.readBackupFile(export_path)
+	prefix := "orgs/root/"
+	test_provider, _ := result.Get(prefix + "TestProvider.json")
 	golden := ordereddict.NewDict().
 		Set("TestProvider.json", test_provider).
 		Set("TestProvider Stats", filterStats(stats))
 
-	// Now restore the data from backup
+	opts := services.BackupRestoreOptions{}
+
+	// Now restore the data from backup. NOTE: Each org restores only
+	// its own data from the zip file. This allows the same zip file
+	// to be shared between all the orgs.
 	stats, err = backup_service.(*backup.BackupService).
-		RestoreBackup(export_path)
+		RestoreBackup(export_path, opts)
 	assert.NoError(self.T(), err)
 
 	golden.Set("RestoredTestProvider", provider.restored).
@@ -145,7 +152,7 @@ func (self *BackupTestSuite) TestBackups() {
 	provider.restored = nil
 
 	stats, err = backup_service.(*backup.BackupService).
-		RestoreBackup(export_path)
+		RestoreBackup(export_path, opts)
 	assert.NoError(self.T(), err)
 
 	golden.Set("RestoredTestProvider With Error", provider.restored).
@@ -164,7 +171,8 @@ func filterStats(stats []services.BackupStat) (res []services.BackupStat) {
 	return res
 }
 
-func (self *BackupTestSuite) readBackupFile(export_path api.FSPathSpec) *ordereddict.Dict {
+func (self *BackupTestSuite) readBackupFile(
+	export_path api.FSPathSpec) *ordereddict.Dict {
 	file_store_factory := file_store.GetFileStore(self.ConfigObj)
 	fd, err := file_store_factory.ReadFile(export_path)
 	assert.NoError(self.T(), err)

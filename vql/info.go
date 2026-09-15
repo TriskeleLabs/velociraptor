@@ -1,19 +1,19 @@
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package vql
 
@@ -27,6 +27,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql/psutils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -39,11 +40,13 @@ var (
 func GetInfo(host *psutils.InfoStat) *ordereddict.Dict {
 	me, _ := os.Executable()
 	cwd, _ := os.Getwd()
+
+	zone, tz_offset := time.Now().Local().Zone()
+
 	return ordereddict.NewDict().
 		Set("Hostname", host.Hostname).
 		Set("Uptime", host.Uptime).
 		Set("BootTime", host.BootTime).
-		Set("Procs", host.Procs).
 		Set("OS", host.OS).
 		Set("Platform", host.Platform).
 		Set("PlatformFamily", host.PlatformFamily).
@@ -52,11 +55,50 @@ func GetInfo(host *psutils.InfoStat) *ordereddict.Dict {
 		Set("VirtualizationSystem", host.VirtualizationSystem).
 		Set("VirtualizationRole", host.VirtualizationRole).
 		Set("CompilerVersion", runtime.Version()).
-		Set("HostID", host.HostID).
+		Set("HostID", psutils.HostID()).
 		Set("Exe", me).
 		Set("CWD", cwd).
 		Set("IsAdmin", IsAdmin()).
-		Set("ClientStart", start_time)
+		Set("ClientStart", start_time).
+		Set("LocalTZ", zone).
+		Set("LocalTZOffset", tz_offset)
+
+}
+
+func info(
+	ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+
+	err := CheckAccess(scope, acls.MACHINE_STATE)
+	if err != nil {
+		scope.Log("info: %s", err)
+		return vfilter.Null{}
+	}
+
+	arg := &vfilter.Empty{}
+	err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
+	if err != nil {
+		scope.Log("info: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	// It turns out that host.Info() is
+	// actually rather slow so we cache it
+	// in the scope cache.
+	info, ok := CacheGet(scope, "__info").(*psutils.InfoStat)
+	if !ok {
+		info, err = psutils.InfoWithContext(ctx)
+		if err != nil {
+			scope.Log("info: %s", err)
+			return vfilter.Null{}
+		}
+		CacheSet(scope, "__info", info)
+	}
+
+	return GetInfo(info).
+		Set("Fqdn", fqdn.Get()).
+		Set("Architecture", utils.GetArch())
 }
 
 func init() {
@@ -68,41 +110,21 @@ func init() {
 				ctx context.Context,
 				scope vfilter.Scope,
 				args *ordereddict.Dict) []vfilter.Row {
-				var result []vfilter.Row
-
-				err := CheckAccess(scope, acls.MACHINE_STATE)
-				if err != nil {
-					scope.Log("info: %s", err)
-					return result
+				res := info(ctx, scope, args)
+				if utils.IsNil(res) {
+					return []vfilter.Row{}
 				}
-
-				arg := &vfilter.Empty{}
-				err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-				if err != nil {
-					scope.Log("info: %s", err.Error())
-					return result
-				}
-
-				// It turns out that host.Info() is
-				// actually rather slow so we cache it
-				// in the scope cache.
-				info, ok := CacheGet(scope, "__info").(*psutils.InfoStat)
-				if !ok {
-					info, err = psutils.InfoWithContext(ctx)
-					if err != nil {
-						scope.Log("info: %s", err)
-						return result
-					}
-					CacheSet(scope, "__info", info)
-				}
-
-				item := GetInfo(info).
-					Set("Fqdn", fqdn.Get()).
-					Set("Architecture", runtime.GOARCH)
-				result = append(result, item)
-
-				return result
+				return []vfilter.Row{res}
 			},
 			Doc: "Get information about the running host.",
 		})
+
+	RegisterFunction(
+		vfilter.GenericFunction{
+			FunctionName: "info",
+			Metadata:     VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+			Function:     info,
+			Doc:          "Get information about the running host. This is the function version of the info() plugin",
+		})
+
 }

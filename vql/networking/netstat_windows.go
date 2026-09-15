@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -33,7 +33,7 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"golang.org/x/sys/windows"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/allocs"
 	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -57,7 +57,7 @@ var (
 	MIB_TCP_STATE = map[int]string{
 		1:  "CLOSED",
 		2:  "LISTEN",
-		3:  "SENT",
+		3:  "SYN_SENT",
 		4:  "SYN_RCVD",
 		5:  "ESTAB",
 		6:  "FIN_WAIT1",
@@ -340,7 +340,7 @@ func getNetTable(fn uintptr, family int, class int) ([]byte, error) {
 			return ptr, nil
 		} else if err == uintptr(syscall.ERROR_INSUFFICIENT_BUFFER) {
 			// realloc is needed.
-			ptr = utils.AllocateBuff(int(size))
+			ptr = allocs.AllocateAlignedBuff(int(size))
 			addr = uintptr(unsafe.Pointer(&ptr[0]))
 		} else {
 			return nil, fmt.Errorf("getNetTable: %w", syscall.GetLastError())

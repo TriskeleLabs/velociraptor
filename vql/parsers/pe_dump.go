@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 
 	"github.com/Velocidex/ordereddict"
@@ -15,7 +14,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/constants"
 	utils "www.velocidex.com/golang/velociraptor/utils"
 	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/filesystem"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -35,7 +33,7 @@ func (self _PEDumpFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name:     "pe_dump",
 		Doc:      "Dump a PE file from process memory.",
 		ArgType:  type_map.AddType(scope, &_PEDumpFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
 	}
 }
 
@@ -44,16 +42,10 @@ func (self _PEDumpFunction) Call(
 	args *ordereddict.Dict) vfilter.Any {
 
 	defer utils.RecoverVQL(scope)
-	defer vql_subsystem.RegisterMonitor("pe_dump", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "pe_dump", args)()
 
 	arg := &_PEDumpFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-	if err != nil {
-		scope.Log("pe_dump: %v", err)
-		return &vfilter.Null{}
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, "process")
 	if err != nil {
 		scope.Log("pe_dump: %v", err)
 		return &vfilter.Null{}
@@ -104,7 +96,7 @@ func (self _PEDumpFunction) Call(
 	var memory_buffer *utils.MemoryBuffer
 
 	if arg.InMemory == 0 {
-		tmpfile, err = ioutil.TempFile("", "tmp*exe")
+		tmpfile, err = utils_tempfile.TempFile("tmp*exe")
 		if err != nil {
 			scope.Log("pe_dump: %v", err)
 			return false
@@ -115,7 +107,7 @@ func (self _PEDumpFunction) Call(
 
 		root_scope := vql_subsystem.GetRootScope(scope)
 		_ = root_scope.AddDestructor(func() {
-			filesystem.RemoveFile(0, tmpfile.Name(), root_scope)
+			filesystem.RemoveTmpFile(0, tmpfile.Name(), root_scope)
 		})
 
 		writer = tmpfile
@@ -128,9 +120,21 @@ func (self _PEDumpFunction) Call(
 	vm_offset := arg.BaseOffset - int64(pe_file.FileHeader.ImageBase)
 
 	// Copy the PE header to the output
-	writer.Seek(0, os.SEEK_SET)
-	fd.Seek(int64(vm_offset+int64(pe_file.FileHeader.ImageBase)), os.SEEK_SET)
+	_, err = writer.Seek(0, os.SEEK_SET)
+	if err != nil {
+		scope.Log("pe_dump: %v", err)
+	}
+
+	_, err = fd.Seek(int64(vm_offset+int64(pe_file.FileHeader.ImageBase)),
+		os.SEEK_SET)
+	if err != nil {
+		scope.Log("pe_dump: %v", err)
+	}
+
 	_, err = utils.CopyN(ctx, writer, fd, 0x2000)
+	if err != nil {
+		scope.Log("pe_dump: %v", err)
+	}
 
 	// Copy all the regions to the output
 	for _, section := range pe_file.Sections {
@@ -143,8 +147,15 @@ func (self _PEDumpFunction) Call(
 			continue
 		}
 
-		writer.Seek(section.FileOffset, os.SEEK_SET)
-		fd.Seek(vm_offset+int64(section.VMA), os.SEEK_SET)
+		_, err = writer.Seek(section.FileOffset, os.SEEK_SET)
+		if err != nil {
+			scope.Log("pe_dump: %v", err)
+		}
+
+		_, err = fd.Seek(vm_offset+int64(section.VMA), os.SEEK_SET)
+		if err != nil {
+			scope.Log("pe_dump: %v", err)
+		}
 
 		// TODO: Restrict the size to be reasonable.
 		_, err = utils.CopyN(ctx, writer, fd, section.Size)

@@ -6,7 +6,6 @@ import T from '../i8n/i8n.jsx';
 import VeloPagedTable from './paged-table.jsx';
 import Button from 'react-bootstrap/Button';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { formatColumns } from "../core/table.jsx";
 
 
 export default class StackDialog extends Component {
@@ -19,6 +18,11 @@ export default class StackDialog extends Component {
         // Save the transform in our parent so we can resume easily.
         transform: PropTypes.object,
         setTransform: PropTypes.func,
+        setPageSize: PropTypes.func,
+
+        // Start the stack table at this initial row.
+        start_row: PropTypes.number,
+        page_size: PropTypes.number,
     }
 
     navigate = row=>{
@@ -39,10 +43,9 @@ export default class StackDialog extends Component {
         let name = this.props.name || T("Value");
         let columns = {
             value: {text: name},
-            idx: {hidden: true},
+            idx: {text: T("Row Index")},
             c:{text: T("Count")},
         };
-
         return (
             <>
               <Modal show={true}
@@ -56,6 +59,7 @@ export default class StackDialog extends Component {
                 </Modal.Header>
                 <Modal.Body>
                   <VeloPagedTable
+                    name={(this.props.name || "") + "Stack" }
                     extra_columns={["Link"]}
                     columns={columns}
                     renderers={renderers}
@@ -64,6 +68,14 @@ export default class StackDialog extends Component {
                         stack_path: this.props.stack_path}}
                     transform={this.props.transform}
                     setTransform={this.props.setTransform}
+
+                    // Allow the caller to keep strack of the stack
+                    // table's paging.
+                    setPageState={this.props.setPageState}
+
+                    // Start the table with these parameters.
+                    initial_page_size={this.props.page_size}
+                    initial_start_row={this.props.start_row}
                   />
                 </Modal.Body>
               </Modal>

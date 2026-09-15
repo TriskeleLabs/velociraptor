@@ -120,8 +120,6 @@ message DarwinInstallerConfig {
 }
 
 message RingBufferConfig {
-    string filename = 3 [deprecated = true];
-
     uint64 memory_size = 1 [(sem_type) = {
        description: "How many bytes to store in the ring buffer in memory."
     }];
@@ -230,9 +228,11 @@ message ClientConfig {
             description: "Configuration of the windows installer.",
         }];
 
-    bool prevent_execve = 17 [(sem_type) = {
-            description: "If this is set, prevent arbitrary code execution on clients."
-        }];
+    // If this is set, prevent arbitrary code execution on
+    // clients. NOTE: Deprecated. You can now allow and reject any
+    // plugin (not just execve) using the allowed_plugins,
+    // allowed_functions and allowed_accessors parameters below.
+    bool prevent_execve = 17;
 
     // Deprecated, new configs use server_version
     Version version = 18;
@@ -305,6 +305,14 @@ message ClientConfig {
             description: "This mapping provides fallback addresses for network targets so that a connection may still be established."
         }];
 
+    // If greater than 0 we install a local DNS cache. This is usually
+    // not needed as most operating systems already have local DNS
+    // caching resolvers. This DNS cache will be refreshed
+    // periodically from upstream. Note that the ttl of the record is
+    // currently ignored and we refresh according to this setting.
+    // This setting takes effect both on the client and on the server.
+    uint64 dns_cache_refresh_min = 54;
+
     // If set we disable client checkpoints and so we can not report
     // to the server when the client crashes while collecting an
     // artifact.
@@ -322,6 +330,35 @@ message ClientConfig {
     uint64 logfile_size = 48;
 
     string panic_file = 49;
+
+    // Setting this will write clear text network traces to this
+    // file. This is used for debugging network communications in
+    // complex scenarios (e.g. in the presence of proxies etc). Do not
+    // leave this configured in production! This setting will also
+    // disable TLS verification for the server name so it will be
+    // possible to MITM the client->server connection.
+
+    // NOTE: Velociraptor has 2 layers of encryption - this setting
+    // bypasses the outer TLS layer to expose the underlying HTTP
+    // communications. Client->server communication still remain
+    // encrypted however.
+    string insecure_network_trace_file = 51;
+
+    // By default when running on a low resource machine we cap the
+    // CPU use to 50%. This allows to change that - needs to be
+    // between 0 and 100 (100 disables throttling).
+    uint64 low_resource_max_cpu = 52;
+
+    // We determine we are running on a low resource machine if the
+    // system has less than 2 cores. This allows to increase the
+    // threadhold. Set to a large number to disable.
+    uint64 low_resource_cpu_count = 53;
+
+
+    // Client specific logging configuration - this can be different
+    // from the server configuration. Usually the client does not log
+    // anything but you can enable this for debugging.
+    LoggingConfig Logging = 55;
 }
 
 message APIConfig {
@@ -372,6 +409,9 @@ message ApiClientConfig {
         }];
 
     string pinned_server_name = 6;
+
+    // This is 4mb by default but you can increase it if you like.
+    uint64 max_grpc_recv_size = 7;
 }
 
 // Fine grained configuration of proxies for http connections.
@@ -415,6 +455,45 @@ message GUILink {
     bool disabled = 9;
 }
 
+message OIDCACL {
+    repeated string roles = 1;
+    repeated string permissions = 2;
+}
+
+// Allow flexible claims in OIDC response - only set if you need to.
+message OIDCClaims {
+    // The name of the claim that represents the username (by default
+    // this is 'email'). Be careful that this MUST be unique across
+    // the domain! It is vulnerability to allow something like 'name'
+    // across a public domain because anyone can set this name in
+    // their OIDC accounts!
+    string username = 1;
+
+    // The field that specifies the roles. If this not set, we do not
+    // allow roles to be set via OIDC.
+    string roles = 2;
+
+    // A mapping between OIDC claim roles and Velociraptor roles.
+    // For example:
+    // role_map:
+    //    Velociraptor.Reader:
+    //      roles:
+    //        - reader
+    map<string, OIDCACL> role_map = 3;
+
+    // Velociraptor usually requires the email_verified claim before
+    // we can trust the email claim and use it as the
+    // username. However, some IDP (e.g. Azure) do not set this. If
+    // you want to ignore this requirement, set the below to true.
+    bool allow_unverified_email = 4;
+
+    // When this is set, the OIDC roles override (clear) existing
+    // velociraptor roles. The default behavior is to ensure the
+    // user's ACL contains at least the OIDC roles. This is needed if
+    // you want to be able to **remove** access from the IDP.
+    bool override_acls = 5;
+}
+
 message Authenticator {
     string type = 1;
 
@@ -424,6 +503,8 @@ message Authenticator {
         }];
     string oidc_name = 18;
 
+    map<string, string> oidc_auth_url_params = 24;
+
     // Can be an img src for the avatar
     string avatar = 19;
     string oauth_client_id = 5 [(sem_type) = {
@@ -432,6 +513,24 @@ message Authenticator {
     string oauth_client_secret = 6 [(sem_type) = {
             description: "If set we use oauth authentication flow.",
         }];
+
+    OIDCClaims claims = 25;
+
+    // When this is set we emit detailed logging.
+    bool oidc_debug = 26;
+
+    // In many IdP the email address change be changed and is not
+    // verified. By default Velociraptor OIDC authenticator pins the
+    // email address to the immutable sub GUID reported by the OIDC
+    // server. This stops email addresss hijacking in some situation
+    // but prevents the same email from being used by different IdP
+    // servers. Set this parameter to disable this pinning and allow
+    // the same email address on different OIDC sub IDs. Be careful
+    // that users are not able to set any email address for their
+    // account in the IdP as this allows them to take over other
+    // user's accounts.
+    bool disable_email_to_sub_pin = 28;
+
 
     // Azure requires a tenancy as well.
     string tenant = 7;
@@ -454,6 +553,9 @@ message Authenticator {
         }];
     repeated string saml_user_roles = 23 [(sem_type) = {
             description: "List of roles to assign authenticated SAML users. If this option is not set then no users will be created automatically."
+        }];
+    bool saml_allow_idp_initiated = 27 [(sem_type) = {
+            description: "Allow IdP-initiated SAML flow."
         }];
 
     // MultiAuthenticator delegates to multiple other authenticators.
@@ -545,16 +647,10 @@ message GUIConfig {
     // packs).
     string artifact_search_filter = 18;
 
-    // SAML info deprecated - will be moved to a saml authenticator.
-    string saml_certificate = 12;
-    string saml_private_key = 13;
-    string saml_idp_metadata_url = 14;
-    string saml_root_url = 15;
-    string saml_user_attribute = 16;
-
-    // DEPRECATED: Will be moved to a Google authenticator
-    string google_oauth_client_id = 5;
-    string google_oauth_client_secret = 6;
+    // A list of domains that we will trust to send us the CSRF
+    // token. Use this only when serving the JS from a different
+    // domain than the API server.
+    repeated string trusted_origins = 25;
 }
 
 message GUIUser {
@@ -577,8 +673,6 @@ message ReverseProxyConfig {
 
 
 message DynDNSConfig {
-    string hostname = 1 [deprecated=true];
-
     // Type of DynDNS server. Currently supported:
     // * empty string or dyndns
     // * cloudflare
@@ -688,6 +782,15 @@ message FrontendResourceControl {
     uint64 client_info_sync_time = 29;
     uint64 client_info_write_time = 30;
 
+    // Old versions on Velociraptor would write client records
+    // separately. This is not longer used as the records are combined
+    // into larger index files. However, it may still be worth writing
+    // the legacy records because it allows Velociraptor to rebuild
+    // the index if needed. This may prove to add too much to the load
+    // so we can turn it off.
+    bool client_info_skip_writing_legacy_records = 34;
+
+
     // The journal files are used to queue messages between event
     // generators and event consumers when the consumer is unable to
     // drain these quickly enough. The setting specifies the maximum
@@ -711,8 +814,6 @@ message FrontendResourceControl {
 
 
 message FrontendConfig {
-    string public_path = 8 [deprecated=true];
-
     // Publicly accessible hostname for this frontend.
     string hostname = 19;
 
@@ -882,6 +983,17 @@ message DatastoreConfig {
     string location = 2;
     string filestore_directory = 3;
 
+    // The compression mode for collections.
+
+    // Allowed settings:
+    // - none: No compression - disable compression in client
+    //   transmission. Note that for older clients (prior to 0.75),
+    //   compression is not supported anyway, but this setting will
+    //   disable compression on new clients as well.
+    // - zlib: Zlib compression enabled on collections. This is the
+    //   default setting when communicating with newer clients.
+    string compression = 19;
+
     // Used by the default FileBaseDataStore
 
     // Set to the min required disk space. When we fall below this
@@ -897,6 +1009,15 @@ message DatastoreConfig {
     // should not happen normally but may happen if the deployment has
     // been very active or due to a bug!
     uint64 max_dir_size = 13;
+
+    // The maximum size of stored objects in the datastore. The
+    // Datastore is assumed to contain smallish objects which are read
+    // and written atomically. This setting places a limit on the size
+    // of these objects to mainain efficiency and speed. If you hit
+    // this limit it means that you need to rethink your approach. See
+    // https://docs.velociraptor.app/knowledge_base/tips/grpc_errors/
+    // The default size is 4Mb.
+    uint64 max_object_size = 20;
 
     // How long to expire the memcache (default 10 min)
     uint64 memcache_expiration_sec = 4;
@@ -929,6 +1050,9 @@ message DatastoreConfig {
     int64 memcache_datastore_max_size = 10;
     int64 memcache_datastore_max_item_size = 11;
     int64 memcache_datastore_max_dir_size = 12;
+
+    // Remote datastore is used by the minion (default 1000 sec)
+    int64 remote_datastore_rpc_deadline = 18;
 
     // Experimental - do not set in configs yet!
     string minion_implementation = 7;
@@ -1077,7 +1201,14 @@ message Defaults {
 
     // How often to refresh the hunt index (default 600 sec)
     int64 hunt_dispatcher_refresh_sec = 43;
+    uint64 hunt_dispatcher_refresh_rate = 60;
 
+    // By default new cells only list 50 rows if there is no custom
+    // cell template. This is to make refreshing the cell
+    // quick. Usually users need to edit or the limit clause to see
+    // the full result table in the cell. This setting increases the
+    // default 50 rows.
+    int64 notebook_default_new_cell_rows = 57;
 
     int64 notebook_cell_timeout_min = 2;
 
@@ -1129,14 +1260,6 @@ message Defaults {
     // is a lot slower. Default 30000
     uint64 max_in_memory_group_by = 9;
 
-    // If these are set we enforce VQL to only have the specified
-    // allowed VQL plugins and functions. This is a way to harden the
-    // server by removing potentially sensitive functionality to allow
-    // only approved VQL plugins to run.
-    repeated string allowed_plugins = 10;
-    repeated string allowed_functions = 11;
-    repeated string allowed_accessors = 12;
-
     // How long to cache ACL policies (default 60 sec)
     uint64 acl_lru_timeout_sec = 13;
 
@@ -1160,27 +1283,9 @@ message Defaults {
     // your clients are behind a proxy that only accepts very small
     // POST messages. If not set we use client defaults.
     uint64 max_rows = 30;
+    uint64 max_logs = 56;
     uint64 max_row_buffer_size = 31;
     uint64 max_batch_wait = 35;
-
-    // When the server is in lockdown mode the following permissions
-    // will be denied (Even for administrators).
-    // The default list is:
-    // - ARTIFACT_WRITER
-    // - SERVER_ARTIFACT_WRITER
-    // - EXECVE
-    // - SERVER_ADMIN
-    // - FILESYSTEM_WRITE
-    // - FILESYSTEM_READ
-    // - MACHINE_STATE
-    repeated string lockdown_denied_permissions = 32;
-
-    // Default expiry of certificate issuances (default 365 days)
-    int64 certificate_validity_days = 33;
-
-    // Normally the inventory service attempts to download tools in
-    // its own but if this is set, we prevent any external access.
-    bool disable_inventory_service_external_access = 34;
 
     // Controls how exports work (creating hunt or colletion exports
     // to a zip file).
@@ -1207,6 +1312,55 @@ message Defaults {
     // attacks. Setting the following to true will restrict usernames
     // to the set a-z and 0-9
     bool disable_unicode_usernames = 49;
+
+    // How often to refresh the search index (default 5 min)
+    int64 reindex_period_seconds = 50;
+
+    // The client metadata is an arbitrary key/value store that holds
+    // user defined information per client. You can normally store
+    // anything in the client metadata but this information is not
+    // indexed, making searching on it slow (using VQL each client's
+    // metadata blob needs to be opened, read and matched).
+
+    // This setting allows you to define **some** fields in the client
+    // metadata that will be indexed. These fields should not be too
+    // large so as to keep the index size smallish so it is
+    // recommended to use only small strings. Once fields are defined
+    // here, the extra data can be searched in the GUI search bar
+    // using a verb such as <field_name>:match.
+
+    // For example, define here:
+    // indexed_client_metadata:
+    //  - department
+    //
+    // Then a search for `department:accounting` will match all
+    // clients with the key department and value contains accounting
+    // in their client metadata.
+    repeated string indexed_client_metadata = 51;
+
+    // If this is set we do not actively check the status of inflight
+    // collections. This is a new feature and may need to be disabled
+    // in some large deployments.
+    bool disable_active_inflight_checks = 52;
+
+    int64 inflight_check_time = 59;
+
+    // Normally internal event artifacts are not written to disk but
+    // passed internally. For debugging it is useful to have a written
+    // record though. Enabling this will also write them to disk.
+    bool write_internal_events = 53;
+
+    // DEPRECATED: The below are deprecated and will be moved by the
+    // upgrade code.
+    repeated string allowed_plugins = 10;
+    repeated string allowed_functions = 11;
+    repeated string allowed_accessors = 12;
+    repeated string denied_plugins = 54;
+    repeated string denied_functions = 55;
+    repeated string denied_accessors = 58;
+    repeated string lockdown_denied_permissions = 32;
+    int64 certificate_validity_days = 33;
+    bool disable_inventory_service_external_access = 34;
 }
 
 // Configures crypto preferences
@@ -1299,9 +1453,97 @@ message RemappingConfig {
     repeated string disabled_plugins = 9;
 }
 
-message Config {
-    string autocert_domain = 21 [deprecated=true];
+// Various security related configuration options for the server.
+message Security {
+    // A list of path prefixes allowed for the 'file' accessor. If
+    // this is empty the file accessor will work on all
+    // directories. If you want to disable access to the server's
+    // filesystem you can set this to a non existent directory,
+    // e.g. /nonexistent/ .
+    repeated string allowed_file_accessor_prefix = 1;
 
+    // Deny takes precedent over allow.
+    repeated string denied_file_accessor_prefix = 59;
+
+    // A list of prefixes allowed for the fs accessor. All other
+    // prefixes will be rejected. The default is:
+    // - artifact_definitions
+    // - clients
+    // - downloads
+    // - notebooks
+    // - public
+    // - temp
+    // - server_artifacts
+    // - server_artifacts_logs
+    //
+    // to allow all access set this to "/"
+    repeated string allowed_fs_accessor_prefix = 2;
+    repeated string denied_fs_accessor_prefix = 60;
+
+    // If these are set we enforce VQL to only have the specified
+    // allowed VQL plugins and functions. This is a way to harden the
+    // server by removing potentially sensitive functionality to allow
+    // only approved VQL plugins to run.
+    repeated string allowed_plugins = 10;
+    repeated string allowed_functions = 11;
+    repeated string allowed_accessors = 12;
+
+    // Alternatively, it might be easier to deny specific plugins and
+    // functions.
+    repeated string denied_plugins = 54;
+    repeated string denied_functions = 55;
+    repeated string denied_accessors = 58;
+
+    // When the server is in lockdown mode the following permissions
+    // will be denied (Even for administrators).
+    // The default list is:
+    // - ARTIFACT_WRITER
+    // - SERVER_ARTIFACT_WRITER
+    // - EXECVE
+    // - SERVER_ADMIN
+    // - FILESYSTEM_WRITE
+    // - FILESYSTEM_READ
+    // - MACHINE_STATE
+    // - NETWORK
+    repeated string lockdown_denied_permissions = 32;
+
+    // Default expiry of certificate issuances (default 365 days)
+    int64 certificate_validity_days = 33;
+
+    // Normally the inventory service attempts to download tools in
+    // its own but if this is set, we prevent any external access.
+    bool disable_inventory_service_external_access = 34;
+
+    // The Data Encryptions Key to use for protecting the secrets in
+    // storage. This can take a number of forms:
+
+    // 1. If it starts with env:// the secret will be taken from an
+    //    Environment variable.
+    // 2. If empty the secret is taken from obfuscation_nonce (which
+    //    by default is the hash of the private key).
+    //
+    // In future further methods may be implemented (e.g. EKMS).
+    string secrets_dek = 3;
+
+    // This controls VQL plugins that may accept secrets as well full
+    // parameters. If this flag is set, those plugins will refuse to
+    // accept direct parameters, instead only accepting a secret
+    // name. This allows the admin to control exactly how these
+    // plugins work without disabling them completely.
+    bool vql_must_use_secrets = 5;
+
+    // Prevent VQL from having access to these environment
+    // variables. Environment Vars sometimes may contain secrets and
+    // confidential information.
+    repeated string shadowed_env_vars = 4;
+
+    // This allows communication with very old clients (pre
+    // 0.68). Definitely not recommended.
+    bool allow_ancient_clients = 61;
+}
+
+
+message Config {
     Version version = 8 [(sem_type) = {
             description: "Version information."
         }];
@@ -1334,6 +1576,7 @@ message Config {
     // Deprecated - Mail plugin setting are now provided by args.
     MailConfig Mail = 11;
 
+    // Server specific logging configuration
     LoggingConfig Logging = 23;
 
     // Minion specific overrides
@@ -1366,7 +1609,8 @@ message Config {
             description: "Type of server (linux, windows, darwin)"
         }];
 
-    // If set we obfuscate VQL to the clients using this key.
+    // If set we obfuscate VQL to the clients using this key. If not
+    // set this is set to the hash of the Frontend.PrivateKey.
     string obfuscation_nonce = 32;
 
     // Various defaults can be changed here (usually not needed).
@@ -1377,7 +1621,7 @@ message Config {
     // from the operating system used on the device. DEPRECATED!
     string analysis_target = 34;
 
-    // The list of data sources which Velociraptor should map instead of the
+
     // host's own file system.
     repeated RemappingConfig remappings = 35;
 
@@ -1393,6 +1637,10 @@ message Config {
     // set in the config file by the user but is propagated from the
     // startup code.
     ServerServicesConfig services = 38;
+
+    // Specifies various security related configuration options for
+    // the server.
+    Security security = 42;
 
     // The Velociraptor server may be placed into "lockdown"
     // mode. While in lockdown mode certain permissions are denied -

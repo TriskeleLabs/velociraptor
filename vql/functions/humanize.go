@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -40,7 +40,7 @@ type HumanizeFunction struct{}
 func (self *HumanizeFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("humanize", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "humanize", args)()
 
 	arg := &HumanizeArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -69,6 +69,7 @@ func (self HumanizeFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:    "humanize",
 		Doc:     "Format items in human readable way.",
 		ArgType: type_map.AddType(scope, &HumanizeArgs{}),
+		Version: 2,
 	}
 }
 

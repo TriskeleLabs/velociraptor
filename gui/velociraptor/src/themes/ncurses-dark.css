@@ -49,7 +49,7 @@
   --color-sidebar-active-background: var(--color-accent-100);
 
   --color-client-link-hover: white;
-  --color-tooltip-background: var(--color-accent-complement);
+  --color-tooltip-background: var(--color-foreground-inverse);
 
   --color-tab: var(--color-btn-default-background);
   --color-tab-active: var(--color-foreground);
@@ -60,8 +60,6 @@
   --color-scrollbar-track: #808080;
   --color-scrollbar-thumb: var(--color-tab);
   --color-scrollbar-thumb-hover: var(--color-accent-100);
-  --color-scrollbar-main: var(--color-accent-25);
-  --color-scrollbar-background: rgba(var(--color-accent), 0.1);
 
   --color-btn-border: var(--color-btn-default-border);
   --color-btn-default-border: grey;
@@ -101,7 +99,13 @@
   --color-vfs-files-timestomped: #ed5d40;
   --color-level-error: #ef5350;
 
+  --hex-highlight-background: #ccff00;
+  --hex-highlight-foreground: var(--color-foreground-inverse);
+
   --invalid-form-control-error: #ff6666;
+
+  --hljs-color: #FFFFFF;
+  --hljs-comment: #4EC9B0;
 }
 
 body.ncurses-dark {
@@ -112,13 +116,16 @@ body.ncurses-dark {
 }
 
 .ncurses-dark .btn-tooltip[data-tooltip]::before {
-  border-radius: 0;
   color: var(--color-foreground-inverse);
 }
 
 .ncurses-dark .tooltip.show {
   font-family: var(--font-family-sans-serif);
   font-size: var(--font-size-base);
+}
+
+.ncurses-dark .sidebar-icon {
+  filter: invert(1);
 }
 
 /* ACE things */
@@ -164,10 +171,11 @@ body.ncurses-dark {
 
 
 
-.ncurses-dark code, .ncurses-dark pre, .ncurses-dark .monospace {
+.ncurses-dark code, .ncurses-dark .notebook-output pre, .ncurses-dark .monospace {
   font-family: var(--font-family-monospace);
   font-size: var(--font-size-base);
   color: var(--color-code);
+  background-color: inherit;
 }
 
 .ncurses-dark h1,
@@ -402,7 +410,6 @@ body.ncurses-dark {
 }
 
 .ncurses-dark .btn,
-.ncurses-dark .btn-outline-default
 .ncurses-dark .btn.btn-default,
 .ncurses-dark .report-viewer .btn-group a.btn {
   font-family: var(--font-family-sans-serif);
@@ -418,6 +425,11 @@ body.ncurses-dark {
   border-top: 1px solid darkgrey;
   border-right: 1px solid #000000;
   border-bottom: 1px solid #000000;
+}
+
+.ncurses-dark .btn.btn-outline-default {
+    border: none;
+    background: none;
 }
 
 .ncurses-dark .btn:hover,
@@ -638,68 +650,7 @@ body.ncurses-dark {
   color: var(--color-sidebar-disabled-foreground);
 }
 
-/* Datepicker */
-
-.ncurses-dark .react-datetime-picker__wrapper {
-  border: 1px solid var(--color-btn-border);
-  color: var(--color-foreground);
-  border-radius: 0.25rem;
-}
-
-.ncurses-dark .react-datepicker,
-.ncurses-dark .react-datetime-picker__calendar .react-calendar,
-.ncurses-dark .react-datetime-picker {
-  font-family: var(--font-family-sans-serif);
-  background: var(--color-form-control-background);
-  color: var(--color-foreground);
-}
-
-.ncurses-dark .react-datetime-picker__inputGroup__input,
-.ncurses-dark .react-datetime-picker__button {
-  filter: invert(91%) sepia(8%) saturate(48%) hue-rotate(171deg) brightness(106%) contrast(93%);
-  stroke: var(--color-accent-100) !important;
-}
-
-.ncurses-dark .react-datetime-picker__button:enabled:hover .react-datetime-picker__button__icon,
-.ncurses-dark .react-datetime-picker__button:enabled:focus .react-datetime-picker__button__icon,
-.ncurses-dark .react-datetime-picker__button:hover {
-  stroke: var(--color-accent-100) !important;
-  filter: none;
-}
-
-.ncurses-dark .react-calendar button:enabled:hover {
-  background-color: var(--color-accent-100);
-  border: none;
-}
-
-.ncurses-dark .react-calendar__navigation button:disabled,
-.ncurses-dark .react-calendar__navigation button:enabled:focus {
-  background-color: unset;
-}
-
-.ncurses-dark .react-calendar__tile:enabled:hover {
-  background-color: var(--color-accent-25);
-  border: none;
-}
-
-.ncurses-dark .react-calendar .react-calendar__tile--now {
-  background-color: magenta;
-  color: var(--color-foreground);
-}
-
-.ncurses-dark .react-calendar .react-calendar__tile--active,
-.ncurses-dark .react-calendar .react-calendar__tile--active:hover {
-  background-color: var(--color-accent-100);
-  font-weight: 400;
-  color: var(--color-foreground-inverse);
-}
-
-.ncurses-dark .react-calendar .react-calendar__month-view__days__day--weekend {
-  color: var(--color-canvas-background);
-}
-
 /* Form controls */
-
 .ncurses-dark .custom-switch .custom-control-input:disabled:checked~.custom-control-label:before {
   background-color: var(--color-accent-25);
 }
@@ -986,7 +937,6 @@ body.ncurses-dark {
 }
 
 .ncurses-dark .table tbody tr:nth-of-type(odd) {
-  background: unset;
   border: none;
 }
 
@@ -996,6 +946,7 @@ body.ncurses-dark {
 }
 
 .ncurses-dark .table tbody tr.row-selected,
+.ncurses-dark .table tbody tr.row-selected:hover,
 .ncurses-dark .table tbody tr.row_selected td {
   background: var(--color-table-row-selected);
   color: var(--color-foreground);
@@ -1029,10 +980,19 @@ body.ncurses-dark {
   max-height: calc(100vh - 138px);
 }
 
-/* .ncurses-dark .artifact-search-table td:hover {
+.ncurses-dark .artifact-search-table tr td {
+  background: var(--color-form-control-background);
+}
+
+.ncurses-dark .artifact-search-table td:hover {
   background: var(--color-table-row-hover);
   color: unset;
-} */
+}
+
+.ncurses-dark .artifact-search-table tbody tr.row-selected td {
+  background: var(--color-table-row-selected);
+  color: var(--color-foreground);
+}
 
 .ncurses-dark .event-report-viewer {
   background: #303030;
@@ -1072,6 +1032,7 @@ body.ncurses-dark {
 .ncurses-dark .report-viewer pre {
   font-weight: normal;
   filter: invert(1) hue-rotate(4rad);
+  color: var(--color-canvas-background);
   border-radius: 0;
   border: none;
   padding-top: 2px;
@@ -1198,6 +1159,21 @@ body.ncurses-dark {
   box-shadow: 10px 10px 0px #000000;
 }
 
+/* Offline docs search */
+
+.ncurses-dark .hit-body.accordion-body {
+  background: var(--color-foreground-inverse);
+  font-size: var(--font-size-base);
+}
+
+.ncurses-dark .hit-body.accordion-body :not(pre) > code {
+  background: #303030;
+  border-radius: 0;
+  border: none;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
 /* Modal dialogs */
 .ncurses-dark .modal-content {
   background: #303030;
@@ -1227,17 +1203,16 @@ body.ncurses-dark {
   color: var(--color-foreground)
 }
 
-.ncurses-dark .modal-header .close {
-  color: var(--color-foreground);
-  opacity: 1;
+.ncurses-dark .modal-header .btn-close {
+  color: var(--color-foreground-dimmed);
+  opacity: 0.8;
+  filter: invert(1);
   text-shadow: none;
   outline: none;
-  border: none;
 }
 
-.ncurses-dark .modal-header .close:hover,
-.ncurses-dark .modal-header .close:focus {
-  background: var(--color-accent-100);
+.ncurses-dark .modal-header .btn-close:hover,
+.ncurses-dark .modal-header .btn-close:focus {
   opacity: 1;
   text-shadow: none;
   outline: none;
@@ -1362,4 +1337,21 @@ color: #f06292;
 .ncurses-dark .accordion-item,
 .ncurses-dark .accordion .accordion-item .accordion-header .accordion-button {
     border-radius: 0;
+}
+
+
+/* Calendar */
+.ncurses-dark .calendar-selector:hover {
+    background: var(--btn-default-background);
+}
+
+.ncurses-dark div.calendar-other-day {
+    color: var(--color-canvas-background);
+}
+
+.ncurses-dark div.calendar-day:hover,
+.ncurses-dark div.calendar-other-day:hover,
+.ncurses-dark div.calendar-selected-date {
+    background: var(--color-accent-75);
+    color: var(--color-foreground);
 }

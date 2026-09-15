@@ -2,23 +2,23 @@ package repository_test
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sebdah/goldie/v2"
 	"github.com/stretchr/testify/assert"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
-	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/orgs"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
+	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 func TestLoadingFromFilestore(t *testing.T) {
@@ -27,7 +27,7 @@ func TestLoadingFromFilestore(t *testing.T) {
 		LoadAndValidate()
 	assert.NoError(t, err)
 
-	tmpdir, err := ioutil.TempDir("", "tmp")
+	tmpdir, err := tempfile.TempDir("tmp")
 	assert.NoError(t, err)
 	defer os.RemoveAll(tmpdir)
 
@@ -56,6 +56,7 @@ func TestLoadingFromFilestore(t *testing.T) {
 	}
 
 	err = orgs.StartTestOrgManager(ctx, wg, config_obj, nil)
+	assert.NoError(t, err)
 
 	manager, err := services.GetRepositoryManager(config_obj)
 	assert.NoError(t, err)
@@ -86,6 +87,7 @@ func TestOverrideBuiltInArtifacts(t *testing.T) {
 	}
 
 	err = orgs.StartTestOrgManager(ctx, wg, config_obj, nil)
+	assert.NoError(t, err)
 
 	manager, err := services.GetRepositoryManager(config_obj)
 	assert.NoError(t, err)
@@ -101,7 +103,7 @@ func TestOverrideBuiltInArtifacts(t *testing.T) {
 		})
 	assert.NoError(t, err)
 
-	artifact, pres := repository.Get(ctx, config_obj, "Custom.BuiltIn")
+	_, pres := repository.Get(ctx, config_obj, "Custom.BuiltIn")
 	assert.True(t, pres)
 
 	// Now try to override it - not a built in should fail
@@ -122,7 +124,7 @@ description: Override
 	})
 	assert.NoError(t, err)
 
-	artifact, pres = repository.Get(ctx, config_obj, "Custom.BuiltIn")
+	artifact, pres := repository.Get(ctx, config_obj, "Custom.BuiltIn")
 	assert.True(t, pres)
 
 	assert.Equal(t, artifact.Name, "Custom.BuiltIn")
@@ -141,11 +143,14 @@ func TestArtifactMetadata(t *testing.T) {
 	defer cancel()
 
 	config_obj.Services = &config_proto.ServerServicesConfig{
+		ClientInfo:        true,
 		JournalService:    true,
 		RepositoryManager: true,
 	}
 
 	err = orgs.StartTestOrgManager(ctx, wg, config_obj, nil)
+	assert.NoError(t, err)
+
 	manager, err := services.GetRepositoryManager(config_obj)
 	assert.NoError(t, err)
 
@@ -177,15 +182,24 @@ func TestArtifactMetadata(t *testing.T) {
 	assert.True(t, pres)
 	assert.True(t, artifact.Metadata.Hidden)
 
-	metadata_storage := &artifacts_proto.ArtifactMetadataStorage{}
+	err = manager.Flush(ctx, config_obj)
+	assert.NoError(t, err)
+
 	path_manager := paths.RepositoryPathManager{}
 	db, err := datastore.GetDB(config_obj)
 	assert.NoError(t, err)
 
-	err = db.GetSubject(config_obj, path_manager.Metadata(), metadata_storage)
-	assert.NoError(t, err)
+	var metadata *artifacts_proto.ArtifactMetadata
 
-	g := goldie.New(t)
-	g.Assert(t, "TestArtifactMetadata",
-		json.MustMarshalIndent(metadata_storage))
+	vtesting.WaitUntil(1*time.Second, t, func() bool {
+		metadata_storage := &artifacts_proto.ArtifactMetadataStorage{}
+		err = db.GetSubject(config_obj, path_manager.Metadata(), metadata_storage)
+		assert.NoError(t, err)
+
+		md, pres := metadata_storage.Metadata["Custom.BuiltIn"]
+		metadata = md
+		return pres
+	})
+
+	goldie.AssertJson(t, "TestArtifactMetadata", metadata)
 }

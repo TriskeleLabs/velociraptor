@@ -8,7 +8,10 @@ import (
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
-	proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
+	unsafe "unsafe"
+	proto2 "www.velocidex.com/golang/velociraptor/actions/proto"
+	proto1 "www.velocidex.com/golang/velociraptor/artifacts/proto"
+	proto "www.velocidex.com/golang/velociraptor/flows/proto"
 )
 
 const (
@@ -19,21 +22,18 @@ const (
 )
 
 type ReformatVQLMessage struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vql           string                 `protobuf:"bytes,1,opt,name=vql,proto3" json:"vql,omitempty"`
+	Artifact      string                 `protobuf:"bytes,2,opt,name=artifact,proto3" json:"artifact,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	Vql      string `protobuf:"bytes,1,opt,name=vql,proto3" json:"vql,omitempty"`
-	Artifact string `protobuf:"bytes,2,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReformatVQLMessage) Reset() {
 	*x = ReformatVQLMessage{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[0]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *ReformatVQLMessage) String() string {
@@ -44,7 +44,7 @@ func (*ReformatVQLMessage) ProtoMessage() {}
 
 func (x *ReformatVQLMessage) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[0]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -74,21 +74,18 @@ func (x *ReformatVQLMessage) GetArtifact() string {
 }
 
 type Env struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	Key   string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Value string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Env) Reset() {
 	*x = Env{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[1]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *Env) String() string {
@@ -99,7 +96,7 @@ func (*Env) ProtoMessage() {}
 
 func (x *Env) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[1]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -129,22 +126,19 @@ func (x *Env) GetValue() string {
 }
 
 type NotebookExportRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NotebookId    string                 `protobuf:"bytes,1,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
+	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	PreferredName string                 `protobuf:"bytes,3,opt,name=preferred_name,json=preferredName,proto3" json:"preferred_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	NotebookId    string `protobuf:"bytes,1,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
-	Type          string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	PreferredName string `protobuf:"bytes,3,opt,name=preferred_name,json=preferredName,proto3" json:"preferred_name,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NotebookExportRequest) Reset() {
 	*x = NotebookExportRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[2]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookExportRequest) String() string {
@@ -155,7 +149,7 @@ func (*NotebookExportRequest) ProtoMessage() {}
 
 func (x *NotebookExportRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[2]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -193,34 +187,32 @@ func (x *NotebookExportRequest) GetPreferredName() string {
 
 // Message sent to the notebook processor ro request a cell recalc.
 type NotebookCellRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	NotebookId        string   `protobuf:"bytes,1,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
-	CellId            string   `protobuf:"bytes,2,opt,name=cell_id,json=cellId,proto3" json:"cell_id,omitempty"`
-	Version           string   `protobuf:"bytes,12,opt,name=version,proto3" json:"version,omitempty"`
-	AvailableVersions []string `protobuf:"bytes,13,rep,name=available_versions,json=availableVersions,proto3" json:"available_versions,omitempty"`
-	Input             string   `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
-	Output            string   `protobuf:"bytes,14,opt,name=output,proto3" json:"output,omitempty"`
-	Name              string   `protobuf:"bytes,11,opt,name=name,proto3" json:"name,omitempty"`
-	Offset            uint64   `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
-	Count             uint64   `protobuf:"varint,5,opt,name=count,proto3" json:"count,omitempty"`
-	Type              string   `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
-	CurrentlyEditing  bool     `protobuf:"varint,8,opt,name=currently_editing,json=currentlyEditing,proto3" json:"currently_editing,omitempty"`
-	Env               []*Env   `protobuf:"bytes,9,rep,name=env,proto3" json:"env,omitempty"`
-	IncludeUploads    bool     `protobuf:"varint,10,opt,name=include_uploads,json=includeUploads,proto3" json:"include_uploads,omitempty"`
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	NotebookId        string                 `protobuf:"bytes,1,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
+	CellId            string                 `protobuf:"bytes,2,opt,name=cell_id,json=cellId,proto3" json:"cell_id,omitempty"`
+	Version           string                 `protobuf:"bytes,12,opt,name=version,proto3" json:"version,omitempty"`
+	AvailableVersions []string               `protobuf:"bytes,13,rep,name=available_versions,json=availableVersions,proto3" json:"available_versions,omitempty"`
+	Input             string                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	Output            string                 `protobuf:"bytes,14,opt,name=output,proto3" json:"output,omitempty"`
+	Name              string                 `protobuf:"bytes,11,opt,name=name,proto3" json:"name,omitempty"`
+	Offset            uint64                 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
+	Count             uint64                 `protobuf:"varint,5,opt,name=count,proto3" json:"count,omitempty"`
+	Type              string                 `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
+	CurrentlyEditing  bool                   `protobuf:"varint,8,opt,name=currently_editing,json=currentlyEditing,proto3" json:"currently_editing,omitempty"`
+	Env               []*Env                 `protobuf:"bytes,9,rep,name=env,proto3" json:"env,omitempty"`
+	IncludeUploads    bool                   `protobuf:"varint,10,opt,name=include_uploads,json=includeUploads,proto3" json:"include_uploads,omitempty"`
+	IncludeTimelines  bool                   `protobuf:"varint,16,opt,name=include_timelines,json=includeTimelines,proto3" json:"include_timelines,omitempty"`
 	// If this is set schedule the calculation syncronously.
-	Sync bool `protobuf:"varint,15,opt,name=sync,proto3" json:"sync,omitempty"`
+	Sync          bool `protobuf:"varint,15,opt,name=sync,proto3" json:"sync,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NotebookCellRequest) Reset() {
 	*x = NotebookCellRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[3]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookCellRequest) String() string {
@@ -231,7 +223,7 @@ func (*NotebookCellRequest) ProtoMessage() {}
 
 func (x *NotebookCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[3]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -337,6 +329,13 @@ func (x *NotebookCellRequest) GetIncludeUploads() bool {
 	return false
 }
 
+func (x *NotebookCellRequest) GetIncludeTimelines() bool {
+	if x != nil {
+		return x.IncludeTimelines
+	}
+	return false
+}
+
 func (x *NotebookCellRequest) GetSync() bool {
 	if x != nil {
 		return x.Sync
@@ -345,26 +344,23 @@ func (x *NotebookCellRequest) GetSync() bool {
 }
 
 type NotebookContext struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	HuntId        string                 `protobuf:"bytes,2,opt,name=hunt_id,json=huntId,proto3" json:"hunt_id,omitempty"`
+	FlowId        string                 `protobuf:"bytes,3,opt,name=flow_id,json=flowId,proto3" json:"flow_id,omitempty"`
+	ClientId      string                 `protobuf:"bytes,4,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	EventArtifact string                 `protobuf:"bytes,5,opt,name=event_artifact,json=eventArtifact,proto3" json:"event_artifact,omitempty"`
+	StartTime     int64                  `protobuf:"varint,6,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	EndTime       int64                  `protobuf:"varint,7,opt,name=end_time,json=endTime,proto3" json:"end_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	Type          string `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
-	HuntId        string `protobuf:"bytes,2,opt,name=hunt_id,json=huntId,proto3" json:"hunt_id,omitempty"`
-	FlowId        string `protobuf:"bytes,3,opt,name=flow_id,json=flowId,proto3" json:"flow_id,omitempty"`
-	ClientId      string `protobuf:"bytes,4,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	EventArtifact string `protobuf:"bytes,5,opt,name=event_artifact,json=eventArtifact,proto3" json:"event_artifact,omitempty"`
-	StartTime     int64  `protobuf:"varint,6,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
-	EndTime       int64  `protobuf:"varint,7,opt,name=end_time,json=endTime,proto3" json:"end_time,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NotebookContext) Reset() {
 	*x = NotebookContext{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[4]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookContext) String() string {
@@ -375,7 +371,7 @@ func (*NotebookContext) ProtoMessage() {}
 
 func (x *NotebookContext) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[4]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -439,25 +435,33 @@ func (x *NotebookContext) GetEndTime() int64 {
 	return 0
 }
 
+// Represents an entire notebook.
 type NotebookMetadata struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Name        string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Description string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	Creator     string `protobuf:"bytes,3,opt,name=creator,proto3" json:"creator,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Creator     string                 `protobuf:"bytes,3,opt,name=creator,proto3" json:"creator,omitempty"`
 	// Type of notebook - Hunt, Flow or empty for default.
 	Context *NotebookContext `protobuf:"bytes,16,opt,name=context,proto3" json:"context,omitempty"`
 	// A list of usernames that have access to this notebook.
 	Collaborators []string `protobuf:"bytes,12,rep,name=collaborators,proto3" json:"collaborators,omitempty"`
 	// A list of NOTEBOOK artifacts to create the notebook with.
 	Artifacts []string `protobuf:"bytes,20,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
+	// Each notebook template can be passed parameters
+	Specs []*proto.ArtifactSpec `protobuf:"bytes,21,rep,name=specs,proto3" json:"specs,omitempty"`
+	// Notebooks can have typed parameters which are injected into
+	// every cell.
+	Parameters []*proto1.ArtifactParameter `protobuf:"bytes,22,rep,name=parameters,proto3" json:"parameters,omitempty"`
+	// These queries will be run before each cell is evaluated in
+	// order to set up the parameters.
+	Requests []*proto2.VQLCollectorArgs `protobuf:"bytes,23,rep,name=requests,proto3" json:"requests,omitempty"`
 	// If this is set, the notebook is public.
-	Public       bool   `protobuf:"varint,13,opt,name=public,proto3" json:"public,omitempty"`
-	CreatedTime  int64  `protobuf:"varint,4,opt,name=created_time,json=createdTime,proto3" json:"created_time,omitempty"`
-	ModifiedTime int64  `protobuf:"varint,5,opt,name=modified_time,json=modifiedTime,proto3" json:"modified_time,omitempty"`
-	NotebookId   string `protobuf:"bytes,7,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
+	Public       bool  `protobuf:"varint,13,opt,name=public,proto3" json:"public,omitempty"`
+	CreatedTime  int64 `protobuf:"varint,4,opt,name=created_time,json=createdTime,proto3" json:"created_time,omitempty"`
+	ModifiedTime int64 `protobuf:"varint,5,opt,name=modified_time,json=modifiedTime,proto3" json:"modified_time,omitempty"`
+	// A strictly incrementing version of this notebook.
+	Version    int64  `protobuf:"varint,24,opt,name=version,proto3" json:"version,omitempty"`
+	NotebookId string `protobuf:"bytes,7,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
 	// Deprecated
 	Cells              []string            `protobuf:"bytes,6,rep,name=cells,proto3" json:"cells,omitempty"`
 	CellMetadata       []*NotebookCell     `protobuf:"bytes,11,rep,name=cell_metadata,json=cellMetadata,proto3" json:"cell_metadata,omitempty"`
@@ -467,21 +471,21 @@ type NotebookMetadata struct {
 	AvailableUploads   *AvailableDownloads `protobuf:"bytes,18,opt,name=available_uploads,json=availableUploads,proto3" json:"available_uploads,omitempty"`
 	// These environment variables will be populated into each
 	// notebook cell in this notebook.
-	Env         []*Env              `protobuf:"bytes,14,rep,name=env,proto3" json:"env,omitempty"`
-	Timelines   []string            `protobuf:"bytes,15,rep,name=timelines,proto3" json:"timelines,omitempty"`
-	ColumnTypes []*proto.ColumnType `protobuf:"bytes,17,rep,name=column_types,json=columnTypes,proto3" json:"column_types,omitempty"`
+	Env         []*Env               `protobuf:"bytes,14,rep,name=env,proto3" json:"env,omitempty"`
+	Timelines   []string             `protobuf:"bytes,15,rep,name=timelines,proto3" json:"timelines,omitempty"`
+	ColumnTypes []*proto1.ColumnType `protobuf:"bytes,17,rep,name=column_types,json=columnTypes,proto3" json:"column_types,omitempty"`
 	// Cells that are not immediately included but may be included by
 	// the GUI as suggestions.
-	Suggestions []*NotebookCellRequest `protobuf:"bytes,19,rep,name=suggestions,proto3" json:"suggestions,omitempty"`
+	Suggestions   []*NotebookCellRequest `protobuf:"bytes,19,rep,name=suggestions,proto3" json:"suggestions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NotebookMetadata) Reset() {
 	*x = NotebookMetadata{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[5]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookMetadata) String() string {
@@ -492,7 +496,7 @@ func (*NotebookMetadata) ProtoMessage() {}
 
 func (x *NotebookMetadata) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[5]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -549,6 +553,27 @@ func (x *NotebookMetadata) GetArtifacts() []string {
 	return nil
 }
 
+func (x *NotebookMetadata) GetSpecs() []*proto.ArtifactSpec {
+	if x != nil {
+		return x.Specs
+	}
+	return nil
+}
+
+func (x *NotebookMetadata) GetParameters() []*proto1.ArtifactParameter {
+	if x != nil {
+		return x.Parameters
+	}
+	return nil
+}
+
+func (x *NotebookMetadata) GetRequests() []*proto2.VQLCollectorArgs {
+	if x != nil {
+		return x.Requests
+	}
+	return nil
+}
+
 func (x *NotebookMetadata) GetPublic() bool {
 	if x != nil {
 		return x.Public
@@ -566,6 +591,13 @@ func (x *NotebookMetadata) GetCreatedTime() int64 {
 func (x *NotebookMetadata) GetModifiedTime() int64 {
 	if x != nil {
 		return x.ModifiedTime
+	}
+	return 0
+}
+
+func (x *NotebookMetadata) GetVersion() int64 {
+	if x != nil {
+		return x.Version
 	}
 	return 0
 }
@@ -633,7 +665,7 @@ func (x *NotebookMetadata) GetTimelines() []string {
 	return nil
 }
 
-func (x *NotebookMetadata) GetColumnTypes() []*proto.ColumnType {
+func (x *NotebookMetadata) GetColumnTypes() []*proto1.ColumnType {
 	if x != nil {
 		return x.ColumnTypes
 	}
@@ -648,20 +680,17 @@ func (x *NotebookMetadata) GetSuggestions() []*NotebookCellRequest {
 }
 
 type Notebooks struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []*NotebookMetadata    `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	Items []*NotebookMetadata `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Notebooks) Reset() {
 	*x = Notebooks{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[6]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *Notebooks) String() string {
@@ -672,7 +701,7 @@ func (*Notebooks) ProtoMessage() {}
 
 func (x *Notebooks) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[6]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -695,20 +724,23 @@ func (x *Notebooks) GetItems() []*NotebookMetadata {
 }
 
 type NotebookCell struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Input    string   `protobuf:"bytes,1,opt,name=input,proto3" json:"input,omitempty"`
-	Output   string   `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	NotebookId string                 `protobuf:"bytes,16,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
+	Input      string                 `protobuf:"bytes,1,opt,name=input,proto3" json:"input,omitempty"`
+	Output     string                 `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
+	// A short summary of the notebook cell.
+	Summary  string   `protobuf:"bytes,17,opt,name=summary,proto3" json:"summary,omitempty"`
 	Data     string   `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	CellId   string   `protobuf:"bytes,4,opt,name=cell_id,json=cellId,proto3" json:"cell_id,omitempty"`
 	Messages []string `protobuf:"bytes,5,rep,name=messages,proto3" json:"messages,omitempty"`
 	// True if there are more messages than are included in the
 	// messages field above.
-	MoreMessages bool  `protobuf:"varint,12,opt,name=more_messages,json=moreMessages,proto3" json:"more_messages,omitempty"`
-	Timestamp    int64 `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Duration     int64 `protobuf:"varint,10,opt,name=duration,proto3" json:"duration,omitempty"`
+	MoreMessages bool `protobuf:"varint,12,opt,name=more_messages,json=moreMessages,proto3" json:"more_messages,omitempty"`
+	// Last modified time.
+	Timestamp int64 `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// A monotonic incremented version of this cell.
+	Version  int64 `protobuf:"varint,18,opt,name=version,proto3" json:"version,omitempty"`
+	Duration int64 `protobuf:"varint,10,opt,name=duration,proto3" json:"duration,omitempty"`
 	// The type of this cell.
 	Type              string   `protobuf:"bytes,7,opt,name=type,proto3" json:"type,omitempty"`
 	CurrentlyEditing  bool     `protobuf:"varint,8,opt,name=currently_editing,json=currentlyEditing,proto3" json:"currently_editing,omitempty"`
@@ -717,15 +749,15 @@ type NotebookCell struct {
 	Error             string   `protobuf:"bytes,13,opt,name=error,proto3" json:"error,omitempty"`
 	CurrentVersion    string   `protobuf:"bytes,14,opt,name=current_version,json=currentVersion,proto3" json:"current_version,omitempty"`
 	AvailableVersions []string `protobuf:"bytes,15,rep,name=available_versions,json=availableVersions,proto3" json:"available_versions,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *NotebookCell) Reset() {
 	*x = NotebookCell{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[7]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookCell) String() string {
@@ -736,7 +768,7 @@ func (*NotebookCell) ProtoMessage() {}
 
 func (x *NotebookCell) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[7]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -751,6 +783,13 @@ func (*NotebookCell) Descriptor() ([]byte, []int) {
 	return file_notebooks_proto_rawDescGZIP(), []int{7}
 }
 
+func (x *NotebookCell) GetNotebookId() string {
+	if x != nil {
+		return x.NotebookId
+	}
+	return ""
+}
+
 func (x *NotebookCell) GetInput() string {
 	if x != nil {
 		return x.Input
@@ -761,6 +800,13 @@ func (x *NotebookCell) GetInput() string {
 func (x *NotebookCell) GetOutput() string {
 	if x != nil {
 		return x.Output
+	}
+	return ""
+}
+
+func (x *NotebookCell) GetSummary() string {
+	if x != nil {
+		return x.Summary
 	}
 	return ""
 }
@@ -796,6 +842,13 @@ func (x *NotebookCell) GetMoreMessages() bool {
 func (x *NotebookCell) GetTimestamp() int64 {
 	if x != nil {
 		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *NotebookCell) GetVersion() int64 {
+	if x != nil {
+		return x.Version
 	}
 	return 0
 }
@@ -857,24 +910,22 @@ func (x *NotebookCell) GetAvailableVersions() []string {
 }
 
 type NotebookFileUploadRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Data       string   `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
-	Filename   string   `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
-	Components []string `protobuf:"bytes,4,rep,name=components,proto3" json:"components,omitempty"`
-	NotebookId string   `protobuf:"bytes,3,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
-	CellId     string   `protobuf:"bytes,5,opt,name=cell_id,json=cellId,proto3" json:"cell_id,omitempty"`
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Data                string                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	Filename            string                 `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
+	DisableAttachmentId bool                   `protobuf:"varint,6,opt,name=disable_attachment_id,json=disableAttachmentId,proto3" json:"disable_attachment_id,omitempty"`
+	Components          []string               `protobuf:"bytes,4,rep,name=components,proto3" json:"components,omitempty"`
+	NotebookId          string                 `protobuf:"bytes,3,opt,name=notebook_id,json=notebookId,proto3" json:"notebook_id,omitempty"`
+	CellId              string                 `protobuf:"bytes,5,opt,name=cell_id,json=cellId,proto3" json:"cell_id,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *NotebookFileUploadRequest) Reset() {
 	*x = NotebookFileUploadRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[8]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookFileUploadRequest) String() string {
@@ -885,7 +936,7 @@ func (*NotebookFileUploadRequest) ProtoMessage() {}
 
 func (x *NotebookFileUploadRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[8]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -914,6 +965,13 @@ func (x *NotebookFileUploadRequest) GetFilename() string {
 	return ""
 }
 
+func (x *NotebookFileUploadRequest) GetDisableAttachmentId() bool {
+	if x != nil {
+		return x.DisableAttachmentId
+	}
+	return false
+}
+
 func (x *NotebookFileUploadRequest) GetComponents() []string {
 	if x != nil {
 		return x.Components
@@ -936,22 +994,19 @@ func (x *NotebookFileUploadRequest) GetCellId() string {
 }
 
 type NotebookFileUploadResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Url           string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	Filename      string                 `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
+	MimeType      string                 `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	Url      string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
-	Filename string `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
-	MimeType string `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NotebookFileUploadResponse) Reset() {
 	*x = NotebookFileUploadResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_notebooks_proto_msgTypes[9]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_notebooks_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *NotebookFileUploadResponse) String() string {
@@ -962,7 +1017,7 @@ func (*NotebookFileUploadResponse) ProtoMessage() {}
 
 func (x *NotebookFileUploadResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_notebooks_proto_msgTypes[9]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -1000,187 +1055,131 @@ func (x *NotebookFileUploadResponse) GetMimeType() string {
 
 var File_notebooks_proto protoreflect.FileDescriptor
 
-var file_notebooks_proto_rawDesc = []byte{
-	0x0a, 0x0f, 0x6e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x12, 0x05, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x1a, 0x1e, 0x61, 0x72, 0x74, 0x69, 0x66, 0x61,
-	0x63, 0x74, 0x73, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x61, 0x72, 0x74, 0x69, 0x66, 0x61,
-	0x63, 0x74, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x1a, 0x0b, 0x66, 0x6c, 0x6f, 0x77, 0x73, 0x2e,
-	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x22, 0x42, 0x0a, 0x12, 0x52, 0x65, 0x66, 0x6f, 0x72, 0x6d, 0x61,
-	0x74, 0x56, 0x51, 0x4c, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x12, 0x10, 0x0a, 0x03, 0x76,
-	0x71, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x76, 0x71, 0x6c, 0x12, 0x1a, 0x0a,
-	0x08, 0x61, 0x72, 0x74, 0x69, 0x66, 0x61, 0x63, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x08, 0x61, 0x72, 0x74, 0x69, 0x66, 0x61, 0x63, 0x74, 0x22, 0x2d, 0x0a, 0x03, 0x45, 0x6e, 0x76,
-	0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b,
-	0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x22, 0x73, 0x0a, 0x15, 0x4e, 0x6f, 0x74, 0x65,
-	0x62, 0x6f, 0x6f, 0x6b, 0x45, 0x78, 0x70, 0x6f, 0x72, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x12, 0x1f, 0x0a, 0x0b, 0x6e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x5f, 0x69, 0x64,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x6e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b,
-	0x49, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x79, 0x70, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x04, 0x74, 0x79, 0x70, 0x65, 0x12, 0x25, 0x0a, 0x0e, 0x70, 0x72, 0x65, 0x66, 0x65, 0x72,
-	0x72, 0x65, 0x64, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d,
-	0x70, 0x72, 0x65, 0x66, 0x65, 0x72, 0x72, 0x65, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x22, 0xa4, 0x03,
-	0x0a, 0x13, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x43, 0x65, 0x6c, 0x6c, 0x52, 0x65,
-	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1f, 0x0a, 0x0b, 0x6e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f,
-	0x6b, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x6e, 0x6f, 0x74, 0x65,
-	0x62, 0x6f, 0x6f, 0x6b, 0x49, 0x64, 0x12, 0x17, 0x0a, 0x07, 0x63, 0x65, 0x6c, 0x6c, 0x5f, 0x69,
-	0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x63, 0x65, 0x6c, 0x6c, 0x49, 0x64, 0x12,
-	0x18, 0x0a, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x0c, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x2d, 0x0a, 0x12, 0x61, 0x76, 0x61,
-	0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x73, 0x18,
-	0x0d, 0x20, 0x03, 0x28, 0x09, 0x52, 0x11, 0x61, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65,
-	0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x73, 0x12, 0x14, 0x0a, 0x05, 0x69, 0x6e, 0x70, 0x75,
-	0x74, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x12, 0x16,
-	0x0a, 0x06, 0x6f, 0x75, 0x74, 0x70, 0x75, 0x74, 0x18, 0x0e, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06,
-	0x6f, 0x75, 0x74, 0x70, 0x75, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x0b,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x6f, 0x66,
-	0x66, 0x73, 0x65, 0x74, 0x18, 0x04, 0x20, 0x01, 0x28, 0x04, 0x52, 0x06, 0x6f, 0x66, 0x66, 0x73,
-	0x65, 0x74, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x18, 0x05, 0x20, 0x01, 0x28,
-	0x04, 0x52, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x79, 0x70, 0x65,
-	0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x74, 0x79, 0x70, 0x65, 0x12, 0x2b, 0x0a, 0x11,
-	0x63, 0x75, 0x72, 0x72, 0x65, 0x6e, 0x74, 0x6c, 0x79, 0x5f, 0x65, 0x64, 0x69, 0x74, 0x69, 0x6e,
-	0x67, 0x18, 0x08, 0x20, 0x01, 0x28, 0x08, 0x52, 0x10, 0x63, 0x75, 0x72, 0x72, 0x65, 0x6e, 0x74,
-	0x6c, 0x79, 0x45, 0x64, 0x69, 0x74, 0x69, 0x6e, 0x67, 0x12, 0x1c, 0x0a, 0x03, 0x65, 0x6e, 0x76,
-	0x18, 0x09, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0a, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x45,
-	0x6e, 0x76, 0x52, 0x03, 0x65, 0x6e, 0x76, 0x12, 0x27, 0x0a, 0x0f, 0x69, 0x6e, 0x63, 0x6c, 0x75,
-	0x64, 0x65, 0x5f, 0x75, 0x70, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x18, 0x0a, 0x20, 0x01, 0x28, 0x08,
-	0x52, 0x0e, 0x69, 0x6e, 0x63, 0x6c, 0x75, 0x64, 0x65, 0x55, 0x70, 0x6c, 0x6f, 0x61, 0x64, 0x73,
-	0x12, 0x12, 0x0a, 0x04, 0x73, 0x79, 0x6e, 0x63, 0x18, 0x0f, 0x20, 0x01, 0x28, 0x08, 0x52, 0x04,
-	0x73, 0x79, 0x6e, 0x63, 0x22, 0xd5, 0x01, 0x0a, 0x0f, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f,
-	0x6b, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x74, 0x79, 0x70, 0x65,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x74, 0x79, 0x70, 0x65, 0x12, 0x17, 0x0a, 0x07,
-	0x68, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x68,
-	0x75, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x17, 0x0a, 0x07, 0x66, 0x6c, 0x6f, 0x77, 0x5f, 0x69, 0x64,
-	0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x66, 0x6c, 0x6f, 0x77, 0x49, 0x64, 0x12, 0x1b,
-	0x0a, 0x09, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x08, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x25, 0x0a, 0x0e, 0x65,
-	0x76, 0x65, 0x6e, 0x74, 0x5f, 0x61, 0x72, 0x74, 0x69, 0x66, 0x61, 0x63, 0x74, 0x18, 0x05, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x0d, 0x65, 0x76, 0x65, 0x6e, 0x74, 0x41, 0x72, 0x74, 0x69, 0x66, 0x61,
-	0x63, 0x74, 0x12, 0x1d, 0x0a, 0x0a, 0x73, 0x74, 0x61, 0x72, 0x74, 0x5f, 0x74, 0x69, 0x6d, 0x65,
-	0x18, 0x06, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x73, 0x74, 0x61, 0x72, 0x74, 0x54, 0x69, 0x6d,
-	0x65, 0x12, 0x19, 0x0a, 0x08, 0x65, 0x6e, 0x64, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x18, 0x07, 0x20,
-	0x01, 0x28, 0x03, 0x52, 0x07, 0x65, 0x6e, 0x64, 0x54, 0x69, 0x6d, 0x65, 0x22, 0xab, 0x06, 0x0a,
-	0x10, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
-	0x61, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x20, 0x0a, 0x0b, 0x64, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70,
-	0x74, 0x69, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0b, 0x64, 0x65, 0x73, 0x63,
-	0x72, 0x69, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x18, 0x0a, 0x07, 0x63, 0x72, 0x65, 0x61, 0x74,
-	0x6f, 0x72, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x63, 0x72, 0x65, 0x61, 0x74, 0x6f,
-	0x72, 0x12, 0x30, 0x0a, 0x07, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x18, 0x10, 0x20, 0x01,
-	0x28, 0x0b, 0x32, 0x16, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x4e, 0x6f, 0x74, 0x65, 0x62,
-	0x6f, 0x6f, 0x6b, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x52, 0x07, 0x63, 0x6f, 0x6e, 0x74,
-	0x65, 0x78, 0x74, 0x12, 0x24, 0x0a, 0x0d, 0x63, 0x6f, 0x6c, 0x6c, 0x61, 0x62, 0x6f, 0x72, 0x61,
-	0x74, 0x6f, 0x72, 0x73, 0x18, 0x0c, 0x20, 0x03, 0x28, 0x09, 0x52, 0x0d, 0x63, 0x6f, 0x6c, 0x6c,
-	0x61, 0x62, 0x6f, 0x72, 0x61, 0x74, 0x6f, 0x72, 0x73, 0x12, 0x1c, 0x0a, 0x09, 0x61, 0x72, 0x74,
-	0x69, 0x66, 0x61, 0x63, 0x74, 0x73, 0x18, 0x14, 0x20, 0x03, 0x28, 0x09, 0x52, 0x09, 0x61, 0x72,
-	0x74, 0x69, 0x66, 0x61, 0x63, 0x74, 0x73, 0x12, 0x16, 0x0a, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69,
-	0x63, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x08, 0x52, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x12,
-	0x21, 0x0a, 0x0c, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x64, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x18,
-	0x04, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0b, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x64, 0x54, 0x69,
-	0x6d, 0x65, 0x12, 0x23, 0x0a, 0x0d, 0x6d, 0x6f, 0x64, 0x69, 0x66, 0x69, 0x65, 0x64, 0x5f, 0x74,
-	0x69, 0x6d, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0c, 0x6d, 0x6f, 0x64, 0x69, 0x66,
-	0x69, 0x65, 0x64, 0x54, 0x69, 0x6d, 0x65, 0x12, 0x1f, 0x0a, 0x0b, 0x6e, 0x6f, 0x74, 0x65, 0x62,
-	0x6f, 0x6f, 0x6b, 0x5f, 0x69, 0x64, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x6e, 0x6f,
-	0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x65, 0x6c, 0x6c,
-	0x73, 0x18, 0x06, 0x20, 0x03, 0x28, 0x09, 0x52, 0x05, 0x63, 0x65, 0x6c, 0x6c, 0x73, 0x12, 0x38,
-	0x0a, 0x0d, 0x63, 0x65, 0x6c, 0x6c, 0x5f, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18,
-	0x0b, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x13, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x4e, 0x6f,
-	0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x43, 0x65, 0x6c, 0x6c, 0x52, 0x0c, 0x63, 0x65, 0x6c, 0x6c,
-	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x12, 0x24, 0x0a, 0x0e, 0x6c, 0x61, 0x74, 0x65,
-	0x73, 0x74, 0x5f, 0x63, 0x65, 0x6c, 0x6c, 0x5f, 0x69, 0x64, 0x18, 0x08, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x0c, 0x6c, 0x61, 0x74, 0x65, 0x73, 0x74, 0x43, 0x65, 0x6c, 0x6c, 0x49, 0x64, 0x12, 0x16,
-	0x0a, 0x06, 0x68, 0x69, 0x64, 0x64, 0x65, 0x6e, 0x18, 0x09, 0x20, 0x01, 0x28, 0x08, 0x52, 0x06,
-	0x68, 0x69, 0x64, 0x64, 0x65, 0x6e, 0x12, 0x4a, 0x0a, 0x13, 0x61, 0x76, 0x61, 0x69, 0x6c, 0x61,
-	0x62, 0x6c, 0x65, 0x5f, 0x64, 0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x18, 0x0a, 0x20,
-	0x01, 0x28, 0x0b, 0x32, 0x19, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x41, 0x76, 0x61, 0x69,
-	0x6c, 0x61, 0x62, 0x6c, 0x65, 0x44, 0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x52, 0x12,
-	0x61, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65, 0x44, 0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61,
-	0x64, 0x73, 0x12, 0x46, 0x0a, 0x11, 0x61, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65, 0x5f,
-	0x75, 0x70, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x18, 0x12, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x19, 0x2e,
-	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x41, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65, 0x44,
-	0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x52, 0x10, 0x61, 0x76, 0x61, 0x69, 0x6c, 0x61,
-	0x62, 0x6c, 0x65, 0x55, 0x70, 0x6c, 0x6f, 0x61, 0x64, 0x73, 0x12, 0x1c, 0x0a, 0x03, 0x65, 0x6e,
-	0x76, 0x18, 0x0e, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0a, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e,
-	0x45, 0x6e, 0x76, 0x52, 0x03, 0x65, 0x6e, 0x76, 0x12, 0x1c, 0x0a, 0x09, 0x74, 0x69, 0x6d, 0x65,
-	0x6c, 0x69, 0x6e, 0x65, 0x73, 0x18, 0x0f, 0x20, 0x03, 0x28, 0x09, 0x52, 0x09, 0x74, 0x69, 0x6d,
-	0x65, 0x6c, 0x69, 0x6e, 0x65, 0x73, 0x12, 0x34, 0x0a, 0x0c, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e,
-	0x5f, 0x74, 0x79, 0x70, 0x65, 0x73, 0x18, 0x11, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x70,
-	0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x54, 0x79, 0x70, 0x65, 0x52,
-	0x0b, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x54, 0x79, 0x70, 0x65, 0x73, 0x12, 0x3c, 0x0a, 0x0b,
-	0x73, 0x75, 0x67, 0x67, 0x65, 0x73, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x18, 0x13, 0x20, 0x03, 0x28,
-	0x0b, 0x32, 0x1a, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f,
-	0x6f, 0x6b, 0x43, 0x65, 0x6c, 0x6c, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x52, 0x0b, 0x73,
-	0x75, 0x67, 0x67, 0x65, 0x73, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x22, 0x3a, 0x0a, 0x09, 0x4e, 0x6f,
-	0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x73, 0x12, 0x2d, 0x0a, 0x05, 0x69, 0x74, 0x65, 0x6d, 0x73,
-	0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x17, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x4e,
-	0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52,
-	0x05, 0x69, 0x74, 0x65, 0x6d, 0x73, 0x22, 0xd3, 0x03, 0x0a, 0x0c, 0x4e, 0x6f, 0x74, 0x65, 0x62,
-	0x6f, 0x6f, 0x6b, 0x43, 0x65, 0x6c, 0x6c, 0x12, 0x14, 0x0a, 0x05, 0x69, 0x6e, 0x70, 0x75, 0x74,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x12, 0x16, 0x0a,
-	0x06, 0x6f, 0x75, 0x74, 0x70, 0x75, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x6f,
-	0x75, 0x74, 0x70, 0x75, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x61, 0x74, 0x61, 0x18, 0x03, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x04, 0x64, 0x61, 0x74, 0x61, 0x12, 0x17, 0x0a, 0x07, 0x63, 0x65, 0x6c,
-	0x6c, 0x5f, 0x69, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x63, 0x65, 0x6c, 0x6c,
-	0x49, 0x64, 0x12, 0x1a, 0x0a, 0x08, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x73, 0x18, 0x05,
-	0x20, 0x03, 0x28, 0x09, 0x52, 0x08, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x73, 0x12, 0x23,
-	0x0a, 0x0d, 0x6d, 0x6f, 0x72, 0x65, 0x5f, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x73, 0x18,
-	0x0c, 0x20, 0x01, 0x28, 0x08, 0x52, 0x0c, 0x6d, 0x6f, 0x72, 0x65, 0x4d, 0x65, 0x73, 0x73, 0x61,
-	0x67, 0x65, 0x73, 0x12, 0x1c, 0x0a, 0x09, 0x74, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70,
-	0x18, 0x06, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x74, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d,
-	0x70, 0x12, 0x1a, 0x0a, 0x08, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x18, 0x0a, 0x20,
-	0x01, 0x28, 0x03, 0x52, 0x08, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x12, 0x0a,
-	0x04, 0x74, 0x79, 0x70, 0x65, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x74, 0x79, 0x70,
-	0x65, 0x12, 0x2b, 0x0a, 0x11, 0x63, 0x75, 0x72, 0x72, 0x65, 0x6e, 0x74, 0x6c, 0x79, 0x5f, 0x65,
-	0x64, 0x69, 0x74, 0x69, 0x6e, 0x67, 0x18, 0x08, 0x20, 0x01, 0x28, 0x08, 0x52, 0x10, 0x63, 0x75,
-	0x72, 0x72, 0x65, 0x6e, 0x74, 0x6c, 0x79, 0x45, 0x64, 0x69, 0x74, 0x69, 0x6e, 0x67, 0x12, 0x20,
-	0x0a, 0x0b, 0x63, 0x61, 0x6c, 0x63, 0x75, 0x6c, 0x61, 0x74, 0x69, 0x6e, 0x67, 0x18, 0x09, 0x20,
-	0x01, 0x28, 0x08, 0x52, 0x0b, 0x63, 0x61, 0x6c, 0x63, 0x75, 0x6c, 0x61, 0x74, 0x69, 0x6e, 0x67,
-	0x12, 0x1c, 0x0a, 0x03, 0x65, 0x6e, 0x76, 0x18, 0x0b, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0a, 0x2e,
-	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x45, 0x6e, 0x76, 0x52, 0x03, 0x65, 0x6e, 0x76, 0x12, 0x14,
-	0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65,
-	0x72, 0x72, 0x6f, 0x72, 0x12, 0x27, 0x0a, 0x0f, 0x63, 0x75, 0x72, 0x72, 0x65, 0x6e, 0x74, 0x5f,
-	0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x0e, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0e, 0x63,
-	0x75, 0x72, 0x72, 0x65, 0x6e, 0x74, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x2d, 0x0a,
-	0x12, 0x61, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x6c, 0x65, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69,
-	0x6f, 0x6e, 0x73, 0x18, 0x0f, 0x20, 0x03, 0x28, 0x09, 0x52, 0x11, 0x61, 0x76, 0x61, 0x69, 0x6c,
-	0x61, 0x62, 0x6c, 0x65, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x73, 0x22, 0xa5, 0x01, 0x0a,
-	0x19, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x46, 0x69, 0x6c, 0x65, 0x55, 0x70, 0x6c,
-	0x6f, 0x61, 0x64, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x61,
-	0x74, 0x61, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x64, 0x61, 0x74, 0x61, 0x12, 0x1a,
-	0x0a, 0x08, 0x66, 0x69, 0x6c, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x08, 0x66, 0x69, 0x6c, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1e, 0x0a, 0x0a, 0x63, 0x6f,
-	0x6d, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x73, 0x18, 0x04, 0x20, 0x03, 0x28, 0x09, 0x52, 0x0a,
-	0x63, 0x6f, 0x6d, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x73, 0x12, 0x1f, 0x0a, 0x0b, 0x6e, 0x6f,
-	0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x5f, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x0a, 0x6e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x49, 0x64, 0x12, 0x17, 0x0a, 0x07, 0x63,
-	0x65, 0x6c, 0x6c, 0x5f, 0x69, 0x64, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x63, 0x65,
-	0x6c, 0x6c, 0x49, 0x64, 0x22, 0x67, 0x0a, 0x1a, 0x4e, 0x6f, 0x74, 0x65, 0x62, 0x6f, 0x6f, 0x6b,
-	0x46, 0x69, 0x6c, 0x65, 0x55, 0x70, 0x6c, 0x6f, 0x61, 0x64, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x12, 0x10, 0x0a, 0x03, 0x75, 0x72, 0x6c, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x03, 0x75, 0x72, 0x6c, 0x12, 0x1a, 0x0a, 0x08, 0x66, 0x69, 0x6c, 0x65, 0x6e, 0x61, 0x6d, 0x65,
-	0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x66, 0x69, 0x6c, 0x65, 0x6e, 0x61, 0x6d, 0x65,
-	0x12, 0x1b, 0x0a, 0x09, 0x6d, 0x69, 0x6d, 0x65, 0x5f, 0x74, 0x79, 0x70, 0x65, 0x18, 0x03, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x08, 0x6d, 0x69, 0x6d, 0x65, 0x54, 0x79, 0x70, 0x65, 0x42, 0x31, 0x5a,
-	0x2f, 0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x6c, 0x6f, 0x63, 0x69, 0x64, 0x65, 0x78, 0x2e, 0x63,
-	0x6f, 0x6d, 0x2f, 0x67, 0x6f, 0x6c, 0x61, 0x6e, 0x67, 0x2f, 0x76, 0x65, 0x6c, 0x6f, 0x63, 0x69,
-	0x72, 0x61, 0x70, 0x74, 0x6f, 0x72, 0x2f, 0x61, 0x70, 0x69, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f,
-	0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
-}
+const file_notebooks_proto_rawDesc = "" +
+	"\n" +
+	"\x0fnotebooks.proto\x12\x05proto\x1a\x17actions/proto/vql.proto\x1a\x1eartifacts/proto/artifact.proto\x1a$flows/proto/artifact_collector.proto\x1a\vflows.proto\"B\n" +
+	"\x12ReformatVQLMessage\x12\x10\n" +
+	"\x03vql\x18\x01 \x01(\tR\x03vql\x12\x1a\n" +
+	"\bartifact\x18\x02 \x01(\tR\bartifact\"-\n" +
+	"\x03Env\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"s\n" +
+	"\x15NotebookExportRequest\x12\x1f\n" +
+	"\vnotebook_id\x18\x01 \x01(\tR\n" +
+	"notebookId\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12%\n" +
+	"\x0epreferred_name\x18\x03 \x01(\tR\rpreferredName\"\xd1\x03\n" +
+	"\x13NotebookCellRequest\x12\x1f\n" +
+	"\vnotebook_id\x18\x01 \x01(\tR\n" +
+	"notebookId\x12\x17\n" +
+	"\acell_id\x18\x02 \x01(\tR\x06cellId\x12\x18\n" +
+	"\aversion\x18\f \x01(\tR\aversion\x12-\n" +
+	"\x12available_versions\x18\r \x03(\tR\x11availableVersions\x12\x14\n" +
+	"\x05input\x18\x03 \x01(\tR\x05input\x12\x16\n" +
+	"\x06output\x18\x0e \x01(\tR\x06output\x12\x12\n" +
+	"\x04name\x18\v \x01(\tR\x04name\x12\x16\n" +
+	"\x06offset\x18\x04 \x01(\x04R\x06offset\x12\x14\n" +
+	"\x05count\x18\x05 \x01(\x04R\x05count\x12\x12\n" +
+	"\x04type\x18\x06 \x01(\tR\x04type\x12+\n" +
+	"\x11currently_editing\x18\b \x01(\bR\x10currentlyEditing\x12\x1c\n" +
+	"\x03env\x18\t \x03(\v2\n" +
+	".proto.EnvR\x03env\x12'\n" +
+	"\x0finclude_uploads\x18\n" +
+	" \x01(\bR\x0eincludeUploads\x12+\n" +
+	"\x11include_timelines\x18\x10 \x01(\bR\x10includeTimelines\x12\x12\n" +
+	"\x04sync\x18\x0f \x01(\bR\x04sync\"\xd5\x01\n" +
+	"\x0fNotebookContext\x12\x12\n" +
+	"\x04type\x18\x01 \x01(\tR\x04type\x12\x17\n" +
+	"\ahunt_id\x18\x02 \x01(\tR\x06huntId\x12\x17\n" +
+	"\aflow_id\x18\x03 \x01(\tR\x06flowId\x12\x1b\n" +
+	"\tclient_id\x18\x04 \x01(\tR\bclientId\x12%\n" +
+	"\x0eevent_artifact\x18\x05 \x01(\tR\reventArtifact\x12\x1d\n" +
+	"\n" +
+	"start_time\x18\x06 \x01(\x03R\tstartTime\x12\x19\n" +
+	"\bend_time\x18\a \x01(\x03R\aendTime\"\xdf\a\n" +
+	"\x10NotebookMetadata\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x18\n" +
+	"\acreator\x18\x03 \x01(\tR\acreator\x120\n" +
+	"\acontext\x18\x10 \x01(\v2\x16.proto.NotebookContextR\acontext\x12$\n" +
+	"\rcollaborators\x18\f \x03(\tR\rcollaborators\x12\x1c\n" +
+	"\tartifacts\x18\x14 \x03(\tR\tartifacts\x12)\n" +
+	"\x05specs\x18\x15 \x03(\v2\x13.proto.ArtifactSpecR\x05specs\x128\n" +
+	"\n" +
+	"parameters\x18\x16 \x03(\v2\x18.proto.ArtifactParameterR\n" +
+	"parameters\x123\n" +
+	"\brequests\x18\x17 \x03(\v2\x17.proto.VQLCollectorArgsR\brequests\x12\x16\n" +
+	"\x06public\x18\r \x01(\bR\x06public\x12!\n" +
+	"\fcreated_time\x18\x04 \x01(\x03R\vcreatedTime\x12#\n" +
+	"\rmodified_time\x18\x05 \x01(\x03R\fmodifiedTime\x12\x18\n" +
+	"\aversion\x18\x18 \x01(\x03R\aversion\x12\x1f\n" +
+	"\vnotebook_id\x18\a \x01(\tR\n" +
+	"notebookId\x12\x14\n" +
+	"\x05cells\x18\x06 \x03(\tR\x05cells\x128\n" +
+	"\rcell_metadata\x18\v \x03(\v2\x13.proto.NotebookCellR\fcellMetadata\x12$\n" +
+	"\x0elatest_cell_id\x18\b \x01(\tR\flatestCellId\x12\x16\n" +
+	"\x06hidden\x18\t \x01(\bR\x06hidden\x12J\n" +
+	"\x13available_downloads\x18\n" +
+	" \x01(\v2\x19.proto.AvailableDownloadsR\x12availableDownloads\x12F\n" +
+	"\x11available_uploads\x18\x12 \x01(\v2\x19.proto.AvailableDownloadsR\x10availableUploads\x12\x1c\n" +
+	"\x03env\x18\x0e \x03(\v2\n" +
+	".proto.EnvR\x03env\x12\x1c\n" +
+	"\ttimelines\x18\x0f \x03(\tR\ttimelines\x124\n" +
+	"\fcolumn_types\x18\x11 \x03(\v2\x11.proto.ColumnTypeR\vcolumnTypes\x12<\n" +
+	"\vsuggestions\x18\x13 \x03(\v2\x1a.proto.NotebookCellRequestR\vsuggestions\":\n" +
+	"\tNotebooks\x12-\n" +
+	"\x05items\x18\x01 \x03(\v2\x17.proto.NotebookMetadataR\x05items\"\xa8\x04\n" +
+	"\fNotebookCell\x12\x1f\n" +
+	"\vnotebook_id\x18\x10 \x01(\tR\n" +
+	"notebookId\x12\x14\n" +
+	"\x05input\x18\x01 \x01(\tR\x05input\x12\x16\n" +
+	"\x06output\x18\x02 \x01(\tR\x06output\x12\x18\n" +
+	"\asummary\x18\x11 \x01(\tR\asummary\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\tR\x04data\x12\x17\n" +
+	"\acell_id\x18\x04 \x01(\tR\x06cellId\x12\x1a\n" +
+	"\bmessages\x18\x05 \x03(\tR\bmessages\x12#\n" +
+	"\rmore_messages\x18\f \x01(\bR\fmoreMessages\x12\x1c\n" +
+	"\ttimestamp\x18\x06 \x01(\x03R\ttimestamp\x12\x18\n" +
+	"\aversion\x18\x12 \x01(\x03R\aversion\x12\x1a\n" +
+	"\bduration\x18\n" +
+	" \x01(\x03R\bduration\x12\x12\n" +
+	"\x04type\x18\a \x01(\tR\x04type\x12+\n" +
+	"\x11currently_editing\x18\b \x01(\bR\x10currentlyEditing\x12 \n" +
+	"\vcalculating\x18\t \x01(\bR\vcalculating\x12\x1c\n" +
+	"\x03env\x18\v \x03(\v2\n" +
+	".proto.EnvR\x03env\x12\x14\n" +
+	"\x05error\x18\r \x01(\tR\x05error\x12'\n" +
+	"\x0fcurrent_version\x18\x0e \x01(\tR\x0ecurrentVersion\x12-\n" +
+	"\x12available_versions\x18\x0f \x03(\tR\x11availableVersions\"\xd9\x01\n" +
+	"\x19NotebookFileUploadRequest\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\tR\x04data\x12\x1a\n" +
+	"\bfilename\x18\x02 \x01(\tR\bfilename\x122\n" +
+	"\x15disable_attachment_id\x18\x06 \x01(\bR\x13disableAttachmentId\x12\x1e\n" +
+	"\n" +
+	"components\x18\x04 \x03(\tR\n" +
+	"components\x12\x1f\n" +
+	"\vnotebook_id\x18\x03 \x01(\tR\n" +
+	"notebookId\x12\x17\n" +
+	"\acell_id\x18\x05 \x01(\tR\x06cellId\"g\n" +
+	"\x1aNotebookFileUploadResponse\x12\x10\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1a\n" +
+	"\bfilename\x18\x02 \x01(\tR\bfilename\x12\x1b\n" +
+	"\tmime_type\x18\x03 \x01(\tR\bmimeTypeB1Z/www.velocidex.com/golang/velociraptor/api/protob\x06proto3"
 
 var (
 	file_notebooks_proto_rawDescOnce sync.Once
-	file_notebooks_proto_rawDescData = file_notebooks_proto_rawDesc
+	file_notebooks_proto_rawDescData []byte
 )
 
 func file_notebooks_proto_rawDescGZIP() []byte {
 	file_notebooks_proto_rawDescOnce.Do(func() {
-		file_notebooks_proto_rawDescData = protoimpl.X.CompressGZIP(file_notebooks_proto_rawDescData)
+		file_notebooks_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_notebooks_proto_rawDesc), len(file_notebooks_proto_rawDesc)))
 	})
 	return file_notebooks_proto_rawDescData
 }
 
 var file_notebooks_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_notebooks_proto_goTypes = []interface{}{
+var file_notebooks_proto_goTypes = []any{
 	(*ReformatVQLMessage)(nil),         // 0: proto.ReformatVQLMessage
 	(*Env)(nil),                        // 1: proto.Env
 	(*NotebookExportRequest)(nil),      // 2: proto.NotebookExportRequest
@@ -1191,25 +1190,31 @@ var file_notebooks_proto_goTypes = []interface{}{
 	(*NotebookCell)(nil),               // 7: proto.NotebookCell
 	(*NotebookFileUploadRequest)(nil),  // 8: proto.NotebookFileUploadRequest
 	(*NotebookFileUploadResponse)(nil), // 9: proto.NotebookFileUploadResponse
-	(*AvailableDownloads)(nil),         // 10: proto.AvailableDownloads
-	(*proto.ColumnType)(nil),           // 11: proto.ColumnType
+	(*proto.ArtifactSpec)(nil),         // 10: proto.ArtifactSpec
+	(*proto1.ArtifactParameter)(nil),   // 11: proto.ArtifactParameter
+	(*proto2.VQLCollectorArgs)(nil),    // 12: proto.VQLCollectorArgs
+	(*AvailableDownloads)(nil),         // 13: proto.AvailableDownloads
+	(*proto1.ColumnType)(nil),          // 14: proto.ColumnType
 }
 var file_notebooks_proto_depIdxs = []int32{
 	1,  // 0: proto.NotebookCellRequest.env:type_name -> proto.Env
 	4,  // 1: proto.NotebookMetadata.context:type_name -> proto.NotebookContext
-	7,  // 2: proto.NotebookMetadata.cell_metadata:type_name -> proto.NotebookCell
-	10, // 3: proto.NotebookMetadata.available_downloads:type_name -> proto.AvailableDownloads
-	10, // 4: proto.NotebookMetadata.available_uploads:type_name -> proto.AvailableDownloads
-	1,  // 5: proto.NotebookMetadata.env:type_name -> proto.Env
-	11, // 6: proto.NotebookMetadata.column_types:type_name -> proto.ColumnType
-	3,  // 7: proto.NotebookMetadata.suggestions:type_name -> proto.NotebookCellRequest
-	5,  // 8: proto.Notebooks.items:type_name -> proto.NotebookMetadata
-	1,  // 9: proto.NotebookCell.env:type_name -> proto.Env
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	10, // 2: proto.NotebookMetadata.specs:type_name -> proto.ArtifactSpec
+	11, // 3: proto.NotebookMetadata.parameters:type_name -> proto.ArtifactParameter
+	12, // 4: proto.NotebookMetadata.requests:type_name -> proto.VQLCollectorArgs
+	7,  // 5: proto.NotebookMetadata.cell_metadata:type_name -> proto.NotebookCell
+	13, // 6: proto.NotebookMetadata.available_downloads:type_name -> proto.AvailableDownloads
+	13, // 7: proto.NotebookMetadata.available_uploads:type_name -> proto.AvailableDownloads
+	1,  // 8: proto.NotebookMetadata.env:type_name -> proto.Env
+	14, // 9: proto.NotebookMetadata.column_types:type_name -> proto.ColumnType
+	3,  // 10: proto.NotebookMetadata.suggestions:type_name -> proto.NotebookCellRequest
+	5,  // 11: proto.Notebooks.items:type_name -> proto.NotebookMetadata
+	1,  // 12: proto.NotebookCell.env:type_name -> proto.Env
+	13, // [13:13] is the sub-list for method output_type
+	13, // [13:13] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_notebooks_proto_init() }
@@ -1218,133 +1223,11 @@ func file_notebooks_proto_init() {
 		return
 	}
 	file_flows_proto_init()
-	if !protoimpl.UnsafeEnabled {
-		file_notebooks_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ReformatVQLMessage); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*Env); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookExportRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookCellRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookContext); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookMetadata); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[6].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*Notebooks); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[7].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookCell); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[8].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookFileUploadRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_notebooks_proto_msgTypes[9].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*NotebookFileUploadResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: file_notebooks_proto_rawDesc,
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_notebooks_proto_rawDesc), len(file_notebooks_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   10,
 			NumExtensions: 0,
@@ -1355,7 +1238,6 @@ func file_notebooks_proto_init() {
 		MessageInfos:      file_notebooks_proto_msgTypes,
 	}.Build()
 	File_notebooks_proto = out.File
-	file_notebooks_proto_rawDesc = nil
 	file_notebooks_proto_goTypes = nil
 	file_notebooks_proto_depIdxs = nil
 }

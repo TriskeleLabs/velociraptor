@@ -7,13 +7,11 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
-	"www.velocidex.com/golang/velociraptor/flows/proto"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
@@ -24,6 +22,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/vql/server/flows"
 	"www.velocidex.com/golang/velociraptor/vql/tools/collector"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
 	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
@@ -82,11 +82,11 @@ BhI8P2RbNR2Yey5nnhFQcoTxpmVw3EYwE01nkxoPJRs/QVvxi9Mepg==
 )
 
 func (self *TestSuite) TestCreateAndImportCollection() {
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.SetFlowIdForTests("F.1234")()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
 
 	fs_factory := file_store_accessor.NewFileStoreFileSystemAccessor(self.ConfigObj)
-	accessors.Register("fs", fs_factory, "")
+	accessors.Register(fs_factory)
 
 	manager, err := services.GetRepositoryManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
@@ -109,7 +109,7 @@ func (self *TestSuite) TestCreateAndImportCollection() {
 
 	ctx := self.Ctx
 	scope := manager.BuildScope(builder)
-	client_id := "server"
+	client_id := constants.VELOCIRAPTOR_SERVER_CLIENT_ID
 
 	flow_id, err := launcher.ScheduleArtifactCollection(self.Ctx, self.ConfigObj,
 		acl_manager, repository, &flows_proto.ArtifactCollectorArgs{
@@ -121,7 +121,9 @@ func (self *TestSuite) TestCreateAndImportCollection() {
 
 	// Wait here until the collection is completed.
 	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
-		flow, err := launcher.GetFlowDetails(self.Ctx, self.ConfigObj, "server", flow_id)
+		flow, err := launcher.GetFlowDetails(
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, flow_id)
 		assert.NoError(self.T(), err)
 
 		return flow.Context.State == flows_proto.ArtifactCollectorContext_FINISHED
@@ -135,7 +137,7 @@ func (self *TestSuite) TestCreateAndImportCollection() {
 			Set("flow_id", flow_id).
 			Set("wait", true))
 
-	download_pathspec, ok := result.(path_specs.FSPathSpec)
+	download_pathspec, ok := result.(*path_specs.FSPathSpec)
 	assert.True(self.T(), ok)
 	assert.NotEmpty(self.T(), download_pathspec.String())
 
@@ -145,7 +147,7 @@ func (self *TestSuite) TestCreateAndImportCollection() {
 		Set("Original Flow", self.snapshotHuntFlow())
 
 	// Now delete the old flow
-	for _ = range (&flows.DeleteFlowPlugin{}).Call(ctx, scope,
+	for range (&flows.DeleteFlowPlugin{}).Call(ctx, scope,
 		ordereddict.NewDict().
 			Set("client_id", client_id).
 			Set("flow_id", flow_id).
@@ -170,6 +172,9 @@ func (self *TestSuite) TestCreateAndImportCollection() {
 }
 
 func (self *TestSuite) TestImportCollectionFromFixture() {
+	self.CreateFlow(constants.VELOCIRAPTOR_SERVER_CLIENT_ID, "F.1234")
+	defer utils.SetFlowIdForTests("F.1234")()
+
 	manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository, _ := manager.GetGlobalRepository(self.ConfigObj)
 	_, err := repository.LoadYaml(CustomTestArtifactDependent,
@@ -189,15 +194,20 @@ func (self *TestSuite) TestImportCollectionFromFixture() {
 	ctx := self.Ctx
 	scope := manager.BuildScope(builder)
 
+	// This file contains an client_info.json file with the real client's
+	// HostID and Hostname.
 	import_file_path, err := filepath.Abs("fixtures/import.zip")
 	assert.NoError(self.T(), err)
 
 	result := collector.ImportCollectionFunction{}.Call(ctx, scope,
 		ordereddict.NewDict().
 			Set("client_id", "auto").
+
+			// This will be ignored as the new client will be added
+			// with the TestHost hostname in the host.json file.
 			Set("hostname", "MyNewHost").
 			Set("filename", import_file_path))
-	context, ok := result.(*proto.ArtifactCollectorContext)
+	context, ok := result.(*flows_proto.ArtifactCollectorContext)
 	assert.True(self.T(), ok)
 
 	// Check the import was successful.
@@ -212,8 +222,10 @@ func (self *TestSuite) TestImportCollectionFromFixture() {
 
 	// Check the indexes are correct for the new client_id
 	search_resp, err := indexer.SearchClients(ctx, self.ConfigObj,
-		&api_proto.SearchClientsRequest{Query: "host:MyNewHost"}, "")
+		&api_proto.SearchClientsRequest{Query: "host:TestHost"}, "")
 	assert.NoError(self.T(), err)
+
+	assert.Equal(self.T(), 1, len(search_resp.Items))
 
 	new_client_id := search_resp.Items[0].ClientId
 
@@ -223,18 +235,28 @@ func (self *TestSuite) TestImportCollectionFromFixture() {
 
 	// Importing the collection again and providing the same host name
 	// will reuse the client id
-
 	result2 := collector.ImportCollectionFunction{}.Call(ctx, scope,
 		ordereddict.NewDict().
 			Set("client_id", "auto").
 			Set("hostname", "MyNewHost").
 			Set("filename", import_file_path))
-	context2, ok := result2.(*proto.ArtifactCollectorContext)
+	context2, ok := result2.(*flows_proto.ArtifactCollectorContext)
 	assert.True(self.T(), ok)
 
 	// The new flow was created on the same client id as before.
 	assert.Equal(self.T(), context2.ClientId, context.ClientId)
 	assert.Equal(self.T(), context2.ClientId, new_client_id)
+
+	// Importing the collection with a fixed client id will use that client id.
+	spec_client_id := "C.1XYZ23"
+	result3 := collector.ImportCollectionFunction{}.Call(ctx, scope,
+		ordereddict.NewDict().
+			Set("client_id", spec_client_id).
+			Set("filename", import_file_path))
+	context3, ok := result3.(*flows_proto.ArtifactCollectorContext)
+	assert.True(self.T(), ok)
+
+	assert.Equal(self.T(), context3.ClientId, spec_client_id)
 
 	// Now ensure the uploads file is properly adjusted to refer to
 	// the client's file store.
@@ -270,7 +292,7 @@ func (self *TestSuite) TestImportX509CollectionFromFixture() {
 			Set("client_id", "auto").
 			Set("hostname", "MyNewHost").
 			Set("filename", import_file_path))
-	context, ok := result.(*proto.ArtifactCollectorContext)
+	context, ok := result.(*flows_proto.ArtifactCollectorContext)
 	assert.True(self.T(), ok)
 
 	assert.Equal(self.T(), []string{"Demo.Plugins.GUI"},
@@ -278,6 +300,53 @@ func (self *TestSuite) TestImportX509CollectionFromFixture() {
 	assert.Equal(self.T(), uint64(1), context.TotalCollectedRows)
 	assert.Equal(self.T(), flows_proto.ArtifactCollectorContext_FINISHED,
 		context.State)
+}
+
+func (self *TestSuite) TestImportCollectionInvalidClientID() {
+	self.CreateFlow(constants.VELOCIRAPTOR_SERVER_CLIENT_ID, "F.1234")
+	defer utils.SetFlowIdForTests("F.1234")()
+
+	manager, _ := services.GetRepositoryManager(self.ConfigObj)
+	repository, _ := manager.GetGlobalRepository(self.ConfigObj)
+	_, err := repository.LoadYaml(CustomTestArtifactDependent,
+		services.ArtifactOptions{
+			ValidateArtifact:  true,
+			ArtifactIsBuiltIn: true})
+
+	assert.NoError(self.T(), err)
+
+	builder := services.ScopeBuilder{
+		Config:     self.ConfigObj,
+		ACLManager: acl_managers.NullACLManager{},
+		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
+		Env:        ordereddict.NewDict(),
+	}
+
+	ctx := self.Ctx
+	scope := manager.BuildScope(builder)
+
+	// This file contains an client_info.json file with the real client's
+	// HostID and Hostname.
+	import_file_path, err := filepath.Abs("fixtures/import.zip")
+	assert.NoError(self.T(), err)
+
+	new_client_id := "foobar_invalid_clientid"
+
+	result := collector.ImportCollectionFunction{}.Call(ctx, scope,
+		ordereddict.NewDict().
+			Set("client_id", new_client_id).
+
+			// This will be ignored as the new client will be added
+			// with the TestHost hostname in the host.json file.
+			Set("hostname", "MyNewHost").
+			Set("filename", import_file_path))
+	assert.True(self.T(), utils.IsNil(result))
+
+	// Check that no data is actually written
+	path := "/clients/" + new_client_id + "/collections/F.1234/uploads.json"
+	_, pres := test_utils.GetMemoryFileStore(
+		self.T(), self.ConfigObj).Get(path)
+	assert.False(self.T(), pres)
 }
 
 func (self *TestSuite) getData(

@@ -4,13 +4,13 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/assert"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 // Test migration from an old index arrangement.
@@ -52,7 +52,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetMigration() {
 	result := ordereddict.NewDict()
 
 	rs_reader, err := result_sets.NewTimedResultSetReader(
-		self.Sm.Ctx, file_store_factory, path_manager)
+		self.Sm.Ctx, self.ConfigObj, path_manager)
 	assert.NoError(self.T(), err)
 
 	result.Set("Available Files", rs_reader.GetAvailableFiles(self.Sm.Ctx))

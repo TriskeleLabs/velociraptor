@@ -3,7 +3,6 @@ package datastore_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sort"
 	"sync"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -22,7 +20,9 @@ import (
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 var (
@@ -41,7 +41,7 @@ type MemcacheFileTestSuite struct {
 func (self *MemcacheFileTestSuite) SetupTest() {
 	// Make a tempdir
 	var err error
-	self.dirname, err = ioutil.TempDir("", "datastore_test")
+	self.dirname, err = tempfile.TempDir("datastore_test")
 	assert.NoError(self.T(), err)
 
 	self.config_obj = config.GetDefaultConfig()
@@ -92,7 +92,7 @@ func (self MemcacheFileTestSuite) TestSetOnFileSystem() {
 		return client_record.ClientId == client_id
 	})
 
-	// Now write a file to the filsystem and read it from memcache.
+	// Now write a file to the filesystem and read it from memcache.
 	flow_id := "F.123"
 	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
 	md := &flows_proto.ArtifactCollectorContext{

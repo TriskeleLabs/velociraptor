@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -51,7 +52,7 @@ const (
 	API_User
 
 	// Used by the Velociraptor Server to make minion to master API
-	// calls. Implicitely trusted.
+	// calls. Implicitly trusted.
 	SuperUser
 )
 
@@ -61,6 +62,11 @@ var (
 	grpcCallCounter = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grpc_client_calls",
 		Help: "Total number of internal gRPC calls.",
+	})
+
+	grpcStubs = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grpc_stubs",
+		Help: "Total current number of stubs.",
 	})
 
 	grpcTimeoutCounter = promauto.NewCounter(prometheus.CounterOpts{
@@ -103,7 +109,7 @@ func NewGRPCPool(config_obj *config_proto.Config,
 	case SuperUser:
 		if config_obj.Frontend != nil && config_obj.Client != nil {
 			// Present the frontend certificate as our identity. This
-			// will be implicitely trusted for every ACL.
+			// will be implicitly trusted for every ACL.
 			certificate = config_obj.Frontend.Certificate
 			private_key = config_obj.Frontend.PrivateKey
 			ca_certificate = config_obj.Client.CaCertificate
@@ -232,11 +238,19 @@ func (self GRPCAPIClient) GetAPIClient(
 	}
 
 	grpcCallCounter.Inc()
-
-	return api_proto.NewAPIClient(channel.ClientConn), channel.Close, err
+	grpcStubs.Inc()
+	return api_proto.NewAPIClient(channel.ClientConn),
+		// This is called when the stub is done with.
+		func() error {
+			grpcStubs.Dec()
+			channel.Close()
+			return nil
+		},
+		err
 }
 
-func (self *gRPCPool) getChannel(ctx context.Context) (*grpcpool.ClientConn, error) {
+func (self *gRPCPool) getChannel(ctx context.Context) (
+	*grpcpool.ClientConn, error) {
 
 	// Collect number of callers waiting for a channel - this
 	// indicates backpressure from the grpc pool.
@@ -280,20 +294,38 @@ func GetAPIConnectionString(config_obj *config_proto.Config) string {
 
 	switch config_obj.API.BindScheme {
 	case "tcp":
-		hostname := config_obj.API.Hostname
-		if config_obj.API.BindAddress == "127.0.0.1" {
-			hostname = config_obj.API.BindAddress
-		}
-		if hostname == "" {
-			hostname = config_obj.API.BindAddress
-		}
-		return fmt.Sprintf("%s:%d", hostname, config_obj.API.BindPort)
+		return fmt.Sprintf("%s:%d", GetAPIHostname(config_obj),
+			config_obj.API.BindPort)
 
 	case "unix":
 		return fmt.Sprintf("unix://%s", config_obj.API.BindAddress)
 	}
 
 	panic("Unknown API.BindScheme")
+}
+
+func GetAPIHostname(config_obj *config_proto.Config) string {
+	hostname := config_obj.API.Hostname
+
+	// Prefer connecting over the loopback if possible.
+	if config_obj.API.BindAddress == "127.0.0.1" {
+		hostname = config_obj.API.BindAddress
+	}
+
+	// If there is not specifically a hostname here, we try the
+	// frontend's hostname
+	if hostname == "" {
+		hostname = config_obj.Frontend.Hostname
+	}
+
+	// Failing that we try to bind to the API BindAddress - this
+	// only works if the interface is routable from here (i.e. it
+	// will fail on minions which are from another server).
+	if hostname == "" {
+		hostname = config_obj.API.BindAddress
+	}
+
+	return hostname
 }
 
 // Make sure the pool is established and running.
@@ -309,12 +341,26 @@ func (self *gRPCPool) EnsureInit(
 
 	// Build a new pool.
 	factory := func(ctx context.Context) (*grpc.ClientConn, error) {
-		return grpc.DialContext(ctx, self.address,
-			grpc.WithTransportCredentials(self.creds))
+		opts := []grpc.DialOption{
+			grpc.WithTransportCredentials(self.creds),
+		}
+
+		if self.config_obj.ApiConfig != nil &&
+			self.config_obj.ApiConfig.MaxGrpcRecvSize > 0 {
+			opts = append(opts,
+				grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(
+					int(self.config_obj.ApiConfig.MaxGrpcRecvSize))))
+
+			logger := logging.GetLogger(self.config_obj, &logging.GUIComponent)
+			logger.Info("<green>API Client</>: Limiting gRPC message size to %v",
+				self.config_obj.ApiConfig.MaxGrpcRecvSize)
+
+		}
+		return grpc.DialContext(ctx, self.address, opts...)
 	}
 
-	max_size := 100
-	max_wait := 60
+	max_size := 10
+	max_wait := 6000
 	if self.config_obj.Frontend != nil {
 		if self.config_obj.Frontend.GRPCPoolMaxSize > 0 {
 			max_size = int(self.config_obj.Frontend.GRPCPoolMaxSize)
@@ -326,7 +372,9 @@ func (self *gRPCPool) EnsureInit(
 	}
 
 	self.pool, err = grpcpool.NewWithContext(ctx,
-		factory, 1, max_size, time.Duration(max_wait)*time.Second)
+		factory, 1, max_size,
+		time.Duration(max_wait)*time.Second,
+		time.Duration(max_wait)*time.Second)
 	if err != nil {
 		return fmt.Errorf(
 			"Unable to connect to gRPC server: %v: %v", self.address, err)

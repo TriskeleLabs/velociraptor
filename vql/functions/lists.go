@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -38,13 +38,19 @@ type ArrayFunction struct{}
 func (self *ArrayFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("array", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "array", args)()
+
+	arg := &ArrayFunctionArgs{}
+	kwargs, err := arg_parser.ExtractKWArgsWithContext(ctx, scope, args, arg)
+	if err != nil {
+		scope.Log("ERROR:alert: %v", err)
+		return &vfilter.Null{}
+	}
 
 	result := []vfilter.Any{}
 
-	value, pres := args.Get("_")
-	if pres {
-		value = vql_subsystem.Materialize(ctx, scope, value)
+	if arg.Value != nil {
+		value := vql_subsystem.Materialize(ctx, scope, arg.Value)
 
 		a_value := reflect.Indirect(reflect.ValueOf(value))
 		a_type := a_value.Type()
@@ -57,13 +63,8 @@ func (self *ArrayFunction) Call(ctx context.Context,
 		}
 	}
 
-	for _, key := range args.Keys() {
-		if key == "_" {
-			continue
-		}
-
-		value, _ := args.Get(key)
-		value = vql_subsystem.Materialize(ctx, scope, value)
+	for _, i := range kwargs.Items() {
+		value := vql_subsystem.Materialize(ctx, scope, i.Value)
 		result = append(result, value)
 	}
 
@@ -72,8 +73,9 @@ func (self *ArrayFunction) Call(ctx context.Context,
 
 func (self ArrayFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name: "array",
-		Doc:  "Create an array with all the args.",
+		Name:         "array",
+		Doc:          "Create an array with all the args.",
+		FreeFormArgs: true,
 	}
 }
 
@@ -87,7 +89,7 @@ type JoinFunction struct{}
 func (self *JoinFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("join", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "join", args)()
 	arg := &JoinFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -116,7 +118,7 @@ type FilterFunction struct{}
 func (self *FilterFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("filter", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "filter", args)()
 	arg := &FilterFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -163,7 +165,7 @@ type LenFunction struct{}
 func (self *LenFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("len", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "len", args)()
 	arg := &LenFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -216,7 +218,7 @@ func (self *SliceFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("slice", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "slice", args)()
 
 	arg := &SliceFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)

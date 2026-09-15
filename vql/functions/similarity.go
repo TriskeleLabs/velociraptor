@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -38,7 +38,7 @@ func (self *SimilarityFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("similarity", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "similarity", args)()
 
 	// Parse arguments using arg_parser
 	arg := &similarityArgs{}

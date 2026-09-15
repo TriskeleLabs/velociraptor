@@ -1,15 +1,13 @@
 package simple_test
 
 import (
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
+
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
@@ -20,7 +18,10 @@ import (
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/result_sets/simple"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
 )
@@ -103,7 +104,8 @@ func (self *ResultSetTestSuite) TestResultSetSimple() {
 
 func (self *ResultSetTestSuite) TestResultSetWriter() {
 	// Write some flow logs.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(
 		self.file_store, path_manager, nil, utils.SyncCompleter, true)
 	assert.NoError(self.T(), err)
@@ -146,11 +148,13 @@ func (self *ResultSetTestSuite) TestResultSetWriter() {
 
 func (self *ResultSetTestSuite) TestResultSetUpdaterBulkJSONL() {
 	// Write some flow logs.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(
 		self.file_store, path_manager, nil, utils.SyncCompleter, true)
 	assert.NoError(self.T(), err)
-	rs.WriteJSONL([]byte("{\"Foo\": 10}\n{\"Foo\": 20}\n{\"Foo\": 30}\n"), 3)
+	err = rs.WriteJSONL([]byte("{\"Foo\": 10}\n{\"Foo\": 20}\n{\"Foo\": 30}\n"), 3)
+	assert.NoError(self.T(), err)
 
 	// Writes may not occur until the Close()
 	rs.Close()
@@ -159,6 +163,7 @@ func (self *ResultSetTestSuite) TestResultSetUpdaterBulkJSONL() {
 		self.file_store, path_manager, nil, utils.SyncCompleter,
 		result_sets.AppendMode)
 	assert.NoError(self.T(), err)
+	defer rs.Close()
 
 	// Update a row with a new record which is shorter than the old
 	// record, new record will be slotted inside the existing record
@@ -204,11 +209,13 @@ func (self *ResultSetTestSuite) TestResultSetUpdaterBulkJSONL() {
 
 func (self *ResultSetTestSuite) TestResultSetUpdaterWithAppend() {
 	// Write some flow logs.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(
 		self.file_store, path_manager, nil, utils.SyncCompleter, true)
 	assert.NoError(self.T(), err)
-	rs.WriteJSONL([]byte("{\"Foo\": 10}\n{\"Foo\": 20}\n{\"Foo\": 30}\n"), 3)
+	err = rs.WriteJSONL([]byte("{\"Foo\": 10}\n{\"Foo\": 20}\n{\"Foo\": 30}\n"), 3)
+	assert.NoError(self.T(), err)
 
 	// Writes may not occur until the Close()
 	rs.Close()
@@ -222,13 +229,16 @@ func (self *ResultSetTestSuite) TestResultSetUpdaterWithAppend() {
 	err = rs.Update(1, ordereddict.NewDict().Set("Foo", "A very long string"))
 	assert.NoError(self.T(), err)
 
+	rs.Close()
+
 	// Append a new row to the end of the result_set.
 	rs, err = result_sets.NewResultSetWriter(
 		self.file_store, path_manager, nil, utils.SyncCompleter,
 		result_sets.AppendMode)
 	assert.NoError(self.T(), err)
 
-	rs.WriteJSONL([]byte("{\"Foo\": \"Additional Row\"}\n"), 3)
+	err = rs.WriteJSONL([]byte("{\"Foo\": \"Additional Row\"}\n"), 3)
+	assert.NoError(self.T(), err)
 	rs.Close()
 
 	// Reading the rows should be fine.
@@ -245,7 +255,9 @@ func (self *ResultSetTestSuite) TestResultSetUpdaterWithAppend() {
 
 func (self *ResultSetTestSuite) TestResultSetUpdaterSeparateRows() {
 	// Write some flow logs.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
+
 	rs, err := result_sets.NewResultSetWriter(
 		self.file_store, path_manager, nil, utils.SyncCompleter, true)
 	assert.NoError(self.T(), err)
@@ -260,6 +272,7 @@ func (self *ResultSetTestSuite) TestResultSetUpdaterSeparateRows() {
 		self.file_store, path_manager, nil, utils.SyncCompleter,
 		result_sets.AppendMode)
 	assert.NoError(self.T(), err)
+	defer rs.Close()
 
 	// Update a row with a new record which is shorter than the old
 	// record, new record will be slotted inside the existing record
@@ -299,7 +312,8 @@ func (self *ResultSetTestSuite) TestResultSetWriterWithCompletion() {
 	var mu sync.Mutex
 	result := ordereddict.NewDict()
 
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(self.file_store, path_manager,
 		nil,
 		func() {
@@ -328,7 +342,8 @@ func (self *ResultSetTestSuite) TestResultSetWriterWithCompletion() {
 
 func (self *ResultSetTestSuite) TestResultSetWriterTruncate() {
 	// Write some flow logs.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(self.file_store,
 		path_manager, nil, utils.SyncCompleter, false /* truncate */)
 	assert.NoError(self.T(), err)
@@ -383,15 +398,18 @@ func (self *ResultSetTestSuite) TestResultSetWriterWriteJSONL() {
 	// WriteJSONL is supposed to optimize the write load by
 	// writing large JSON chunks into the result set. We
 	// deliberately do not want to parse it out so we just append
-	// the data to the file. However we dont know any of the row
+	// the data to the file. However we don't know any of the row
 	// indexes in the JSON blob, but we do know how many rows it
 	// is in total.
-	path_manager := paths.NewFlowPathManager(self.client_id, self.flow_id).Log()
+	path_manager := paths.NewFlowPathManager(
+		self.client_id, self.flow_id).Log()
 	rs, err := result_sets.NewResultSetWriter(self.file_store, path_manager,
 		nil, utils.SyncCompleter, result_sets.AppendMode)
 	assert.NoError(self.T(), err)
 	rs.Write(ordereddict.NewDict().Set("Foo", 1))
-	rs.WriteJSONL([]byte("{\"Foo\":2}\n{\"Foo\":3}\n"), 2)
+	err = rs.WriteJSONL([]byte("{\"Foo\":2}\n{\"Foo\":3}\n"), 2)
+	assert.NoError(self.T(), err)
+
 	rs.Close()
 
 	rs_reader, err := result_sets.NewResultSetReader(self.file_store, path_manager)
@@ -402,8 +420,11 @@ func (self *ResultSetTestSuite) TestResultSetWriterWriteJSONL() {
 
 	// Seek into the middle of the JSON blob (last row)
 	err = rs_reader.SeekToRow(2)
+	assert.NoError(self.T(), err)
+
 	rows := simple.GetAllResults(rs_reader)
 	assert.Equal(self.T(), len(rows), 1)
+
 	value, _ := rows[0].GetInt64("Foo")
 	assert.Equal(self.T(), value, int64(3))
 }
@@ -421,7 +442,7 @@ func (self *ResultSetTestSuiteFileBased) SetupTest() {
 	self.ConfigObj = self.LoadConfig()
 
 	var err error
-	self.dir, err = ioutil.TempDir("", "file_store_test")
+	self.dir, err = tempfile.TempDir("file_store_test")
 	assert.NoError(self.T(), err)
 
 	self.ConfigObj.Datastore.Implementation = "FileBaseDataStore"

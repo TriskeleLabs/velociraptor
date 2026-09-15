@@ -8,6 +8,7 @@ import (
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -17,24 +18,37 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// A Timeline is a collection of timed events. The timeline is written
+// to storage as a ResultSet with some mandated columns and the rest
+// being free form.
 type Timeline struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StartTime int64                  `protobuf:"varint,1,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	EndTime   int64                  `protobuf:"varint,2,opt,name=end_time,json=endTime,proto3" json:"end_time,omitempty"`
+	// The name of the timeline.
+	Id string `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`
+	// The name of the timestamp column. If not specified it is _ts
+	TimestampColumn string `protobuf:"bytes,5,opt,name=timestamp_column,json=timestampColumn,proto3" json:"timestamp_column,omitempty"`
+	// The name of the message column. If not specified it is
+	// 'message'. If there is no such column we render an elided
+	// message with some of the fields.
+	MessageColumn string `protobuf:"bytes,6,opt,name=message_column,json=messageColumn,proto3" json:"message_column,omitempty"`
+	// The name of the timestamp description. If not specified it is
+	// 'timestamp_description'. If not specified it is empty.
+	TimestampDescriptionColumn string `protobuf:"bytes,7,opt,name=timestamp_description_column,json=timestampDescriptionColumn,proto3" json:"timestamp_description_column,omitempty"`
+	// When we return from GetTable() indicates if the timeline is
+	// active.
+	Active        bool   `protobuf:"varint,8,opt,name=active,proto3" json:"active,omitempty"`
+	Version       string `protobuf:"bytes,9,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
-
-	StartTime int64  `protobuf:"varint,1,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
-	EndTime   int64  `protobuf:"varint,2,opt,name=end_time,json=endTime,proto3" json:"end_time,omitempty"`
-	Name      string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	Id        string `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Timeline) Reset() {
 	*x = Timeline{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_timelines_proto_msgTypes[0]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_timelines_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *Timeline) String() string {
@@ -45,7 +59,7 @@ func (*Timeline) ProtoMessage() {}
 
 func (x *Timeline) ProtoReflect() protoreflect.Message {
 	mi := &file_timelines_proto_msgTypes[0]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -74,13 +88,6 @@ func (x *Timeline) GetEndTime() int64 {
 	return 0
 }
 
-func (x *Timeline) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
 func (x *Timeline) GetId() string {
 	if x != nil {
 		return x.Id
@@ -88,22 +95,57 @@ func (x *Timeline) GetId() string {
 	return ""
 }
 
-type SuperTimeline struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
+func (x *Timeline) GetTimestampColumn() string {
+	if x != nil {
+		return x.TimestampColumn
+	}
+	return ""
+}
 
-	Name      string      `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Timelines []*Timeline `protobuf:"bytes,2,rep,name=timelines,proto3" json:"timelines,omitempty"`
+func (x *Timeline) GetMessageColumn() string {
+	if x != nil {
+		return x.MessageColumn
+	}
+	return ""
+}
+
+func (x *Timeline) GetTimestampDescriptionColumn() string {
+	if x != nil {
+		return x.TimestampDescriptionColumn
+	}
+	return ""
+}
+
+func (x *Timeline) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+func (x *Timeline) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+// A SuperTimeline is a collection of individual timelines.
+type SuperTimeline struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name of the super timeline.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// A list of timelines contained in the super timeline.
+	Timelines     []*Timeline `protobuf:"bytes,2,rep,name=timelines,proto3" json:"timelines,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SuperTimeline) Reset() {
 	*x = SuperTimeline{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_timelines_proto_msgTypes[1]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
+	mi := &file_timelines_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
 func (x *SuperTimeline) String() string {
@@ -114,7 +156,7 @@ func (*SuperTimeline) ProtoMessage() {}
 
 func (x *SuperTimeline) ProtoReflect() protoreflect.Message {
 	mi := &file_timelines_proto_msgTypes[1]
-	if protoimpl.UnsafeEnabled && x != nil {
+	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
 			ms.StoreMessageInfo(mi)
@@ -145,41 +187,37 @@ func (x *SuperTimeline) GetTimelines() []*Timeline {
 
 var File_timelines_proto protoreflect.FileDescriptor
 
-var file_timelines_proto_rawDesc = []byte{
-	0x0a, 0x0f, 0x74, 0x69, 0x6d, 0x65, 0x6c, 0x69, 0x6e, 0x65, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x12, 0x05, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x22, 0x68, 0x0a, 0x08, 0x54, 0x69, 0x6d, 0x65,
-	0x6c, 0x69, 0x6e, 0x65, 0x12, 0x1d, 0x0a, 0x0a, 0x73, 0x74, 0x61, 0x72, 0x74, 0x5f, 0x74, 0x69,
-	0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x73, 0x74, 0x61, 0x72, 0x74, 0x54,
-	0x69, 0x6d, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x65, 0x6e, 0x64, 0x5f, 0x74, 0x69, 0x6d, 0x65, 0x18,
-	0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x07, 0x65, 0x6e, 0x64, 0x54, 0x69, 0x6d, 0x65, 0x12, 0x12,
-	0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61,
-	0x6d, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02,
-	0x69, 0x64, 0x22, 0x52, 0x0a, 0x0d, 0x53, 0x75, 0x70, 0x65, 0x72, 0x54, 0x69, 0x6d, 0x65, 0x6c,
-	0x69, 0x6e, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x2d, 0x0a, 0x09, 0x74, 0x69, 0x6d, 0x65, 0x6c,
-	0x69, 0x6e, 0x65, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x2e, 0x54, 0x69, 0x6d, 0x65, 0x6c, 0x69, 0x6e, 0x65, 0x52, 0x09, 0x74, 0x69, 0x6d,
-	0x65, 0x6c, 0x69, 0x6e, 0x65, 0x73, 0x42, 0x37, 0x5a, 0x35, 0x77, 0x77, 0x77, 0x2e, 0x76, 0x65,
-	0x6c, 0x6f, 0x63, 0x69, 0x64, 0x65, 0x78, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x67, 0x6f, 0x6c, 0x61,
-	0x6e, 0x67, 0x2f, 0x76, 0x65, 0x6c, 0x6f, 0x63, 0x69, 0x72, 0x61, 0x70, 0x74, 0x6f, 0x72, 0x2f,
-	0x74, 0x69, 0x6d, 0x65, 0x6c, 0x69, 0x6e, 0x65, 0x73, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62,
-	0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
-}
+const file_timelines_proto_rawDesc = "" +
+	"\n" +
+	"\x0ftimelines.proto\x12\x05proto\"\x9a\x02\n" +
+	"\bTimeline\x12\x1d\n" +
+	"\n" +
+	"start_time\x18\x01 \x01(\x03R\tstartTime\x12\x19\n" +
+	"\bend_time\x18\x02 \x01(\x03R\aendTime\x12\x0e\n" +
+	"\x02id\x18\x04 \x01(\tR\x02id\x12)\n" +
+	"\x10timestamp_column\x18\x05 \x01(\tR\x0ftimestampColumn\x12%\n" +
+	"\x0emessage_column\x18\x06 \x01(\tR\rmessageColumn\x12@\n" +
+	"\x1ctimestamp_description_column\x18\a \x01(\tR\x1atimestampDescriptionColumn\x12\x16\n" +
+	"\x06active\x18\b \x01(\bR\x06active\x12\x18\n" +
+	"\aversion\x18\t \x01(\tR\aversion\"R\n" +
+	"\rSuperTimeline\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
+	"\ttimelines\x18\x02 \x03(\v2\x0f.proto.TimelineR\ttimelinesB7Z5www.velocidex.com/golang/velociraptor/timelines/protob\x06proto3"
 
 var (
 	file_timelines_proto_rawDescOnce sync.Once
-	file_timelines_proto_rawDescData = file_timelines_proto_rawDesc
+	file_timelines_proto_rawDescData []byte
 )
 
 func file_timelines_proto_rawDescGZIP() []byte {
 	file_timelines_proto_rawDescOnce.Do(func() {
-		file_timelines_proto_rawDescData = protoimpl.X.CompressGZIP(file_timelines_proto_rawDescData)
+		file_timelines_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_timelines_proto_rawDesc), len(file_timelines_proto_rawDesc)))
 	})
 	return file_timelines_proto_rawDescData
 }
 
 var file_timelines_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_timelines_proto_goTypes = []interface{}{
+var file_timelines_proto_goTypes = []any{
 	(*Timeline)(nil),      // 0: proto.Timeline
 	(*SuperTimeline)(nil), // 1: proto.SuperTimeline
 }
@@ -197,37 +235,11 @@ func file_timelines_proto_init() {
 	if File_timelines_proto != nil {
 		return
 	}
-	if !protoimpl.UnsafeEnabled {
-		file_timelines_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*Timeline); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_timelines_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SuperTimeline); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: file_timelines_proto_rawDesc,
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_timelines_proto_rawDesc), len(file_timelines_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
@@ -238,7 +250,6 @@ func file_timelines_proto_init() {
 		MessageInfos:      file_timelines_proto_msgTypes,
 	}.Build()
 	File_timelines_proto = out.File
-	file_timelines_proto_rawDesc = nil
 	file_timelines_proto_goTypes = nil
 	file_timelines_proto_depIdxs = nil
 }

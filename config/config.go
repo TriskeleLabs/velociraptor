@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 // Embed build time constants into here for reporting client version.
@@ -48,7 +49,7 @@ func GetVersion() *config_proto.Version {
 		CiBuildUrl:   ci_run_url,
 		Compiler:     runtime.Version(),
 		System:       runtime.GOOS,
-		Architecture: runtime.GOARCH,
+		Architecture: utils.GetArch(),
 	}
 }
 
@@ -63,9 +64,12 @@ func GetDefaultConfig() *config_proto.Config {
 			Level2WritebackSuffix: ".bak",
 			TempdirWindows:        "$ProgramFiles\\Velociraptor\\Tools",
 			MaxPoll:               60,
+			ServerUrls: []string{
+				"https://127.0.0.1:8889/",
+			},
 
 			// By default restart the client if we are unable to
-			// contant the server within this long. (NOTE - even a
+			// contact the server within this long. (NOTE - even a
 			// failed connection will reset the counter, the nanny
 			// will only fire if the client has failed in some way -
 			// e.g. the communicator is stopped for some reason).
@@ -94,14 +98,10 @@ func GetDefaultConfig() *config_proto.Config {
 
 			DarwinInstaller: &config_proto.DarwinInstallerConfig{
 				ServiceName: "com.velocidex.velociraptor",
-				InstallPath: "/usr/local/sbin/velociraptor",
+				InstallPath: "/usr/local/bin/velociraptor",
 			},
 
-			// If set to true this will stop
-			// arbitrary code execution on the
-			// client.
-			PreventExecve: false,
-			MaxUploadSize: constants.MAX_MEMORY,
+			MaxUploadSize: constants.MAX_POST_SIZE,
 		},
 		API: &config_proto.APIConfig{
 			// Bind port for gRPC endpoint - this should not
@@ -115,6 +115,7 @@ func GetDefaultConfig() *config_proto.Config {
 			// reachable IP address you must enable TLS!
 			BindAddress:  "127.0.0.1",
 			BindPort:     8889,
+			PublicUrl:    "https://localhost:8889/app/index.html",
 			ReverseProxy: []*config_proto.ReverseProxyConfig{},
 			Authenticator: &config_proto.Authenticator{
 				Type: "Basic",
@@ -160,6 +161,10 @@ func GetDefaultConfig() *config_proto.Config {
 			// this to something more permanent.
 			Location:           "/var/tmp/velociraptor/",
 			FilestoreDirectory: "/var/tmp/velociraptor/",
+
+			// This is the default but we add it here for clarity. Set
+			// to none to disable.
+			Compression: "zlib",
 		},
 		Logging: &config_proto.LoggingConfig{
 			// Disable debug logging by default.
@@ -185,6 +190,7 @@ func GetDefaultConfig() *config_proto.Config {
 			HuntExpiryHours:        24 * 7,
 			NotebookCellTimeoutMin: 10,
 		},
+		Security: &config_proto.Security{},
 	}
 
 	// The client's version needs to keep in sync with the

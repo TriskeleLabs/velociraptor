@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build linux || freebsd
+// +build linux freebsd
 
 // Parse auditd log files.
 
@@ -16,6 +16,7 @@ import (
 	"github.com/elastic/go-libaudit/v2"
 	"github.com/elastic/go-libaudit/v2/aucoalesce"
 	"github.com/elastic/go-libaudit/v2/auparse"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -37,7 +38,8 @@ func (self AuditdPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("parse_auditd", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_auditd", args)()
+		defer utils.RecoverVQL(scope)
 
 		reassembler, err := libaudit.NewReassembler(5, 2*time.Second,
 			&streamHandler{scope: scope, ctx: ctx, output_chan: output_chan})
@@ -126,7 +128,7 @@ func (self WatchAuditdPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("watch_auditd", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_auditd", args)()
 
 		reassembler, err := libaudit.NewReassembler(5, 2*time.Second,
 			&streamHandler{scope: scope, ctx: ctx, output_chan: output_chan})

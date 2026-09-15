@@ -2,9 +2,11 @@ package sigma
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/bradleyjkemp/sigma-go"
+	"github.com/Velocidex/sigma-go"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -35,7 +37,8 @@ func (self SigmaPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("sigma", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "sigma", args)()
+		defer utils.RecoverVQL(scope)
 
 		arg := &SigmaPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -52,26 +55,37 @@ func (self SigmaPlugin) Call(
 
 		// Compile all the rules
 		var rules []sigma.Rule
-		for _, r := range arg.Rules {
-			rule, err := sigma.ParseRule([]byte(r))
-			if err != nil {
-				// Skip the rules we can not parse
-				scope.Log("sigma: Error parsing: %v in rule '%v'",
-					err, utils.Elide(r, 20))
-				continue
-			}
+		for _, rules_text := range arg.Rules {
+			for _, r := range strings.Split(rules_text, "\n---\n") {
 
-			// A rule must have a title
-			if rule.Title == "" {
-				continue
-			}
+				// Just ignore empty rules.
+				r := strings.TrimSpace(r)
+				if len(r) == 0 {
+					continue
+				}
 
-			if arg.RuleFilter != nil &&
-				!scope.Bool(arg.RuleFilter.Reduce(ctx, scope, []vfilter.Any{rule})) {
-				continue
-			}
+				rule, err := sigma.ParseRule([]byte(r))
+				if err != nil {
+					// Skip the rules we can not parse
+					scope.Log("sigma: Error parsing: %v in rule '%v'",
+						err, utils.Elide(r, 20))
+					continue
+				}
 
-			rules = append(rules, rule)
+				// A rule must have a title
+				if rule.Title == "" {
+					scope.Log("sigma: Error parsing rule '%v': no title set",
+						utils.Elide(r, 20))
+					continue
+				}
+
+				if arg.RuleFilter != nil &&
+					!scope.Bool(arg.RuleFilter.Reduce(ctx, scope, []vfilter.Any{rule})) {
+					continue
+				}
+
+				rules = append(rules, rule)
+			}
 		}
 
 		// Build a new evaluation context around the rules. This binds
@@ -86,10 +100,11 @@ func (self SigmaPlugin) Call(
 			scope.Log("sigma: %v", err)
 			return
 		}
+		defer sigma_context.Close()
 
 		scope.Log("INFO:sigma: Loaded %v rules (from %v) into %v log sources and %v field mappings",
 			sigma_context.total_rules, len(rules), len(sigma_context.runners),
-			len(sigma_context.fieldmappings))
+			sigma_context.fieldmappings.Len())
 
 		for row := range sigma_context.Rows(ctx, scope) {
 			output_chan <- row
@@ -105,6 +120,14 @@ func (self SigmaPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:    "sigma",
 		Doc:     "Evaluate sigma rules.",
 		ArgType: type_map.AddType(scope, &SigmaPluginArgs{}),
+		// Sigma rules may contain lambda functions which can do
+		// pretty much anything.
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.MACHINE_STATE,
+			acls.EXECVE,
+			acls.FILESYSTEM_READ,
+			acls.FILESYSTEM_WRITE,
+		).Build(),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -110,7 +111,7 @@ func (self *VirtualFileInfo) GetLink() (*OSPath, error) {
 	return nil, errors.New("Not implemented")
 }
 
-// Mount tree is very sparse so we dont really need a map here -
+// Mount tree is very sparse so we don't really need a map here -
 // linear search is fast enough.
 type directory_node struct {
 	file_info *VirtualFileInfo
@@ -162,7 +163,7 @@ func (self *directory_node) MakeChild(name string) *directory_node {
 	return new_directory_node
 }
 
-// A Virtual Filsystem stores files and directories in memory.
+// A Virtual Filesystem stores files and directories in memory.
 type VirtualFilesystemAccessor struct {
 	root_path *OSPath
 	root      directory_node
@@ -171,6 +172,13 @@ type VirtualFilesystemAccessor struct {
 func (self VirtualFilesystemAccessor) New(scope vfilter.Scope) (
 	FileSystemAccessor, error) {
 	return self, nil
+}
+
+func (self VirtualFilesystemAccessor) Describe() *AccessorDescriptor {
+	return &AccessorDescriptor{
+		Name:        "virtual",
+		Description: "An accessor for virtual mapped filesystems",
+	}
 }
 
 func (self VirtualFilesystemAccessor) ParsePath(path string) (*OSPath, error) {
@@ -235,7 +243,7 @@ func (self VirtualFilesystemAccessor) OpenWithOSPath(path *OSPath) (
 	ReadSeekCloser, error) {
 	node, err := self.getNode(path)
 	if err != nil {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 
 	return VirtualReadSeekCloser{
@@ -251,7 +259,7 @@ func (self VirtualFilesystemAccessor) getNode(path *OSPath) (*directory_node, er
 			next_node := node.GetChild(c)
 			if next_node == nil {
 				return nil, fmt.Errorf("While finding %v: Can not find %v: %w",
-					path, c, os.ErrNotExist)
+					path, c, utils.NotFoundError)
 			}
 			node = next_node
 		}

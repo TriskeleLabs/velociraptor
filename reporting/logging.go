@@ -6,13 +6,17 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/vfilter"
 )
 
 type notebookCellLogger struct {
@@ -26,11 +30,15 @@ type notebookCellLogger struct {
 
 	ctx        context.Context
 	config_obj *config_proto.Config
+
+	scope vfilter.Scope
 }
 
 func newNotebookCellLogger(
 	ctx context.Context,
-	config_obj *config_proto.Config, log_path api.FSPathSpec) (
+	config_obj *config_proto.Config,
+	log_path api.FSPathSpec,
+	scope vfilter.Scope) (
 	*notebookCellLogger, error) {
 	file_store_factory := file_store.GetFileStore(config_obj)
 
@@ -42,10 +50,13 @@ func newNotebookCellLogger(
 		return nil, err
 	}
 
+	scope.AddDestructor(rs_writer.Close)
+
 	return &notebookCellLogger{
 		ctx:        ctx,
 		config_obj: config_obj,
 		rs_writer:  rs_writer,
+		scope:      scope,
 	}, nil
 }
 
@@ -57,7 +68,10 @@ func (self *notebookCellLogger) Write(b []byte) (int, error) {
 		Set("message", msg))
 
 	if level == logging.ALERT {
-		self.processAlert(msg)
+		err := self.processAlert(msg)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	// Only keep the first 10 messages in the cell. This provides a
@@ -93,19 +107,22 @@ func (self *notebookCellLogger) processAlert(msg string) error {
 		return err
 	}
 
-	alert.ClientId = "server"
+	alert.ClientId = constants.VELOCIRAPTOR_SERVER_CLIENT_ID
 	serialized, err := json.Marshal(alert)
 	if err != nil {
 		return err
 	}
 	serialized = append(serialized, '\n')
 
+	principal := vql_subsystem.GetPrincipal(self.scope)
 	journal, err := services.GetJournal(self.config_obj)
 	if err != nil {
 		return err
 	}
-	return journal.PushJsonlToArtifact(self.ctx, self.config_obj,
-		serialized, 1, "Server.Internal.Alerts", "server", "")
+	return journal.PushJsonlToArtifact(
+		self.ctx, self.config_obj,
+		serialized, 1,
+		artifacts.ALERT_QUEUE.WithUser(principal))
 }
 
 func (self *notebookCellLogger) Messages() []string {

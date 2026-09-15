@@ -15,6 +15,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -48,7 +49,7 @@ func (self UnzipPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("unzip", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "unzip", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
 		if err != nil {
@@ -60,12 +61,6 @@ func (self UnzipPlugin) Call(
 		err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("unzip: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("unzip: %s", err)
 			return
 		}
 
@@ -87,6 +82,13 @@ func (self UnzipPlugin) Call(
 		}
 
 		output_directory, err := filepath.Abs(arg.OutputDirectory)
+		if err != nil {
+			scope.Log("unzip: %v", err)
+			return
+		}
+
+		// Make sure we are allowed to write there.
+		err = file.CheckPath(output_directory)
 		if err != nil {
 			scope.Log("unzip: %v", err)
 			return
@@ -157,12 +159,10 @@ func (self *UnzipPlugin) unpackZip(
 			continue
 		}
 
-		// Sanitize the name for writing.
-		output_path := filepath.Join(output_directory, member.Name)
-
-		// Directory traversal ...
-		if !strings.HasPrefix(output_path, output_directory) {
-			continue
+		output_path := utils.Join(output_directory, member.Name)
+		err = file.CheckPath(output_path)
+		if err != nil {
+			return err
 		}
 
 		err = os.MkdirAll(filepath.Dir(output_path), 0700)
@@ -239,12 +239,18 @@ func (self *UnzipPlugin) unpackTGZ(
 			continue
 		}
 
-		// Sanitize the name for writing.
-		output_path := filepath.Join(output_directory, member.Name)
+		// Sanitize the name for writing. We do not support traversal
+		// names in the ZIP file.
+		output_path := utils.Join(output_directory, member.Name)
 
 		// Directory traversal ...
 		if !strings.HasPrefix(output_path, output_directory) {
 			continue
+		}
+
+		err = file.CheckPath(output_path)
+		if err != nil {
+			return err
 		}
 
 		err = os.MkdirAll(filepath.Dir(output_path), 0700)
@@ -277,7 +283,6 @@ func (self *UnzipPlugin) unpackTGZ(
 		case output_chan <- output:
 		}
 	}
-	return nil
 }
 
 func (self UnzipPlugin) Name() string {
@@ -290,6 +295,7 @@ func (self UnzipPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Doc:      "Unzips a file into a directory",
 		ArgType:  type_map.AddType(scope, &UnzipPluginArgs{}),
 		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE, acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 

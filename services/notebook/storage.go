@@ -5,7 +5,6 @@ import (
 	"os"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
@@ -15,76 +14,48 @@ import (
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
-	timelines_proto "www.velocidex.com/golang/velociraptor/timelines/proto"
+	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/timelines"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/vfilter"
 )
 
-var (
-	IGNORE_REPORT chan *ordereddict.Dict = nil
-
-	DO_NOT_SYNC_NOTEBOOKS_FOR_TEST = atomic.Bool{}
-)
-
-type NotebookStore interface {
-	// TODO: The following Get/Modify/Set pattern is not thread safe -
-	// Enhance the API to allow safe modifications.
-	SetNotebook(in *api_proto.NotebookMetadata) error
-	GetNotebook(notebook_id string) (*api_proto.NotebookMetadata, error)
-
-	SetNotebookCell(notebook_id string, in *api_proto.NotebookCell) error
-	GetNotebookCell(notebook_id, cell_id, version string) (
-		*api_proto.NotebookCell, error)
-
-	// progress_chan receives information about deletion. It may be
-	// nil if callers dont care about it.
-	RemoveNotebookCell(
-		ctx context.Context, config_obj *config_proto.Config,
-		notebook_id, cell_id, version string,
-		progress_chan chan *ordereddict.Dict) error
-
-	StoreAttachment(notebook_id,
-		filename string, data []byte) (api.FSPathSpec, error)
-	RemoveAttachment(ctx context.Context,
-		notebook_id string, components []string) error
-
-	GetAvailableDownloadFiles(notebook_id string) (
-		*api_proto.AvailableDownloads, error)
-	GetAvailableTimelines(notebook_id string) []string
-	GetAvailableUploadFiles(notebook_id string) (
-		*api_proto.AvailableDownloads, error)
-
-	GetAllNotebooks() ([]*api_proto.NotebookMetadata, error)
-
-	Timelines(ctx context.Context,
-		notebook_id string) ([]*timelines_proto.SuperTimeline, error)
-
-	ReadTimeline(ctx context.Context, notebook_id string,
-		timeline string, start time.Time,
-		include_components, exclude_components []string) (
-		<-chan *ordereddict.Dict, error)
-
-	AddTimeline(ctx context.Context, scope vfilter.Scope,
-		notebook_id string, timeline string, component string,
-		key string, in <-chan vfilter.Row) (*timelines_proto.SuperTimeline, error)
-}
-
+// Compose the notebook store from various components.
 type NotebookStoreImpl struct {
 	config_obj *config_proto.Config
 
 	// Keep an in memory cache of all global notebooks.
 	mu               sync.Mutex
 	global_notebooks map[string]*api_proto.NotebookMetadata
+
+	// The latest known version of all notebooks.
+	last_version int64
+
+	last_shared_results map[string]int64
+
+	SuperTimelineStorer timelines.ISuperTimelineStorer
+}
+
+func MakeNotebookStore(
+	config_obj *config_proto.Config,
+	SuperTimelineStorer timelines.ISuperTimelineStorer) *NotebookStoreImpl {
+	return &NotebookStoreImpl{
+		config_obj: config_obj,
+		// Pick something relatively unique but not too large as a starting point.
+		last_version:        utils.GetTime().Now().Unix() * 1000,
+		last_shared_results: make(map[string]int64),
+		SuperTimelineStorer: SuperTimelineStorer,
+	}
 }
 
 func NewNotebookStore(
 	ctx context.Context,
 	wg *sync.WaitGroup,
-	config_obj *config_proto.Config) (*NotebookStoreImpl, error) {
-	result := &NotebookStoreImpl{
-		config_obj: config_obj,
-	}
+	config_obj *config_proto.Config,
+	SuperTimelineStorer timelines.ISuperTimelineStorer) (*NotebookStoreImpl, error) {
+
+	result := MakeNotebookStore(config_obj, SuperTimelineStorer)
 
 	wg.Add(1)
 	go func() {
@@ -98,12 +69,36 @@ func NewNotebookStore(
 			case <-ctx.Done():
 				return
 			case <-utils.GetTime().After(utils.Jitter(time.Minute)):
-				result.syncAllNotebooks()
+				err := result.syncAllNotebooks()
+				if err != nil {
+					logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+					logger.Error("<red>syncAllNotebooks</> %v", err)
+				}
 			}
 		}
 	}()
 
+	// Make the first sync now so we populate the store.
 	return result, result.syncAllNotebooks()
+}
+
+func (self *NotebookStoreImpl) Version() (res int64) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	return self.last_version
+}
+
+func (self *NotebookStoreImpl) GetNextVersion() int64 {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	return self._GetNextVersion()
+}
+
+func (self *NotebookStoreImpl) _GetNextVersion() int64 {
+	self.last_version++
+	return self.last_version
 }
 
 func (self *NotebookStoreImpl) SetNotebook(in *api_proto.NotebookMetadata) error {
@@ -114,7 +109,10 @@ func (self *NotebookStoreImpl) SetNotebook(in *api_proto.NotebookMetadata) error
 }
 
 func (self *NotebookStoreImpl) _SetNotebook(in *api_proto.NotebookMetadata) error {
-	if isGlobalNotebooks(in.NotebookId) {
+	// Ensure the notebook reflects the last time it was set.
+	in.ModifiedTime = utils.GetTime().Now().Unix()
+
+	if utils.IsGlobalNotebooks(in.NotebookId) {
 		self.global_notebooks[in.NotebookId] = in
 	}
 
@@ -125,8 +123,6 @@ func (self *NotebookStoreImpl) _SetNotebook(in *api_proto.NotebookMetadata) erro
 
 	notebook_path_manager := paths.NewNotebookPathManager(in.NotebookId)
 
-	// Ensure the notebook reflects the last time it was set.
-	in.ModifiedTime = utils.GetTime().Now().Unix()
 	return db.SetSubject(self.config_obj, notebook_path_manager.Path(), in)
 }
 
@@ -160,8 +156,7 @@ func (self *NotebookStoreImpl) _GetNotebook(notebook_id string) (*api_proto.Note
 	}
 
 	notebook.CellMetadata = nil
-	for _, k := range cell_metadata.Keys() {
-		v, _ := cell_metadata.Get(k)
+	for _, v := range cell_metadata.Values() {
 		notebook.CellMetadata = append(notebook.CellMetadata,
 			v.(*api_proto.NotebookCell))
 	}
@@ -175,6 +170,11 @@ func (self *NotebookStoreImpl) SetNotebookCell(
 
 	self.mu.Lock()
 	defer self.mu.Unlock()
+
+	in.NotebookId = notebook_id
+
+	// Tag the cell with a version
+	in.Version = self._GetNextVersion()
 
 	db, err := datastore.GetDB(self.config_obj)
 	if err != nil {
@@ -216,6 +216,8 @@ func (self *NotebookStoreImpl) SetNotebookCell(
 	}
 
 	notebook.CellMetadata = new_cell_md
+	notebook.Version = self._GetNextVersion()
+
 	return self._SetNotebook(notebook)
 }
 
@@ -257,16 +259,17 @@ func (self *NotebookStoreImpl) RemoveNotebookCell(
 	}
 
 	// Remove the empty directories
-	err = datastore.Walk(config_obj, db, notebook_path_manager.DSDirectory(),
+	_ = datastore.Walk(config_obj, db, notebook_path_manager.DSDirectory(),
 		datastore.WalkWithDirectories,
 		func(filename api.DSPathSpec) error {
-			db.DeleteSubject(config_obj, filename)
+			// Ignore errors so we can try to delete as much as possible
+			_ = db.DeleteSubject(config_obj, filename)
 			return nil
 		})
 
 	// Delete the filestore files.
 	file_store_factory := file_store.GetFileStore(config_obj)
-	err = api.Walk(file_store_factory, notebook_path_manager.Directory(),
+	_ = api.Walk(file_store_factory, notebook_path_manager.Directory(),
 		func(filename api.FSPathSpec, info os.FileInfo) error {
 			if output_chan != nil {
 				select {
@@ -310,6 +313,8 @@ func (self *NotebookStoreImpl) RemoveNotebookCell(
 	}
 
 	notebook.CellMetadata = new_cell_md
+	notebook.Version = self._GetNextVersion()
+
 	return self._SetNotebook(notebook)
 }
 
@@ -342,32 +347,38 @@ func (self *NotebookStoreImpl) GetNotebookCell(
 	notebook_cell := &api_proto.NotebookCell{}
 	err = db.GetSubject(self.config_obj, notebook_path_manager.Path(),
 		notebook_cell)
+
+	// Ensure the cell carries its owner ID.
+	notebook_cell.NotebookId = notebook_id
+
 	return notebook_cell, err
 }
 
-func (self *NotebookStoreImpl) StoreAttachment(
-	notebook_id, filename string, data []byte) (api.FSPathSpec, error) {
-	full_path := paths.NewNotebookPathManager(notebook_id).
-		Attachment(filename)
-	file_store_factory := file_store.GetFileStore(self.config_obj)
-	fd, err := file_store_factory.WriteFile(full_path)
-	if err != nil {
-		return nil, err
-	}
-	defer fd.Close()
-
-	_, err = fd.Write(data)
-	return full_path, err
-}
-
-func (self *NotebookStoreImpl) GetAllNotebooks() (
+func (self *NotebookStoreImpl) GetAllNotebooks(
+	ctx context.Context, opts services.NotebookSearchOptions) (
 	[]*api_proto.NotebookMetadata, error) {
 
 	result := []*api_proto.NotebookMetadata{}
 	self.mu.Lock()
 	for _, notebook := range self.global_notebooks {
-		result = append(result,
-			proto.Clone(notebook).(*api_proto.NotebookMetadata))
+		if notebook.Hidden || notebook.NotebookId == "" {
+			continue
+		}
+
+		if opts.Username != "" && !checkNotebookAccess(notebook, opts.Username) {
+			continue
+		}
+
+		// We should check the number of timelines in each notebook.
+		super_timelines := self.SuperTimelineStorer.GetAvailableTimelines(
+			ctx, notebook.NotebookId)
+		if opts.Timelines && len(super_timelines) == 0 {
+			continue
+		}
+
+		out := proto.Clone(notebook).(*api_proto.NotebookMetadata)
+		out.Timelines = super_timelines
+		result = append(result, out)
 	}
 	self.mu.Unlock()
 
@@ -419,10 +430,17 @@ func (self *NotebookStoreImpl) syncAllNotebooks() error {
 
 		notebook := res.Message().(*api_proto.NotebookMetadata)
 		if notebook.NotebookId == "" ||
-			!isGlobalNotebooks(notebook.NotebookId) {
+			notebook.Hidden ||
+			!utils.IsGlobalNotebooks(notebook.NotebookId) {
 			continue
 		}
 		self.global_notebooks[notebook.NotebookId] = notebook
+
+		// Update the global version to at least the latest version of
+		// the notebooks..
+		if notebook.Version > self.last_version {
+			self.last_version = notebook.Version
+		}
 	}
 
 	return nil

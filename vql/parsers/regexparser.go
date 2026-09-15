@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,7 +26,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -50,12 +49,6 @@ func _ParseFile(
 	scope vfilter.Scope,
 	arg *_ParseFileWithRegexArgs,
 	output_chan chan vfilter.Row) {
-
-	err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("parse_records_with_regex: %s", err)
-		return
-	}
 
 	accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 	if err != nil {
@@ -144,7 +137,7 @@ func (self _ParseFileWithRegex) Call(
 	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
-	defer vql_subsystem.RegisterMonitor("parse_records_with_regex", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_records_with_regex", args)()
 
 	arg := &_ParseFileWithRegexArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -175,6 +168,7 @@ func (self _ParseFileWithRegex) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_records_with_regex", args)()
 
 		for _, filename := range arg.Filenames {
 			_ParseFile(ctx, filename, scope, arg, output_chan)
@@ -189,7 +183,7 @@ func (self _ParseFileWithRegex) Info(scope vfilter.Scope, type_map *vfilter.Type
 		Name:     "parse_records_with_regex",
 		Doc:      "Parses a file with a set of regexp and yields matches as records.",
 		ArgType:  type_map.AddType(scope, &_ParseFileWithRegexArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -204,7 +198,7 @@ func (self *_ParseStringWithRegexFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) (result vfilter.Any) {
 
-	defer vql_subsystem.RegisterMonitor("parse_string_with_regex", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_string_with_regex", args)()
 
 	arg := &_ParseStringWithRegexFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -278,7 +272,7 @@ func (self _RegexReplace) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("regex_replace", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "regex_replace", args)()
 
 	arg := &_RegexReplaceArg{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -327,6 +321,7 @@ func (self _RegexReplace) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *
 		Doc: "Search and replace a string with a regexp. " +
 			"Note you can use $1 to replace the capture string.",
 		ArgType: type_map.AddType(scope, &_RegexReplaceArg{}),
+		Version: 2,
 	}
 }
 
@@ -348,7 +343,7 @@ func (self _RegexMap) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("regex_transform", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "regex_transform", args)()
 
 	arg := &_RegexMapArg{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -367,8 +362,9 @@ func (self _RegexMap) Call(
 	regex_map := vql_subsystem.CacheGet(scope, key)
 	if utils.IsNil(regex_map) {
 		// Make a new set of transforms
-		for _, search := range arg.Map.Keys() {
-			replace, _ := arg.Map.GetString(search)
+		for _, i := range arg.Map.Items() {
+			search := i.Key
+			replace := utils.ToString(i.Value)
 
 			re, err := regexp.Compile("(?i)" + search)
 			if err != nil {

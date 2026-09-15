@@ -2,15 +2,20 @@ package test_utils
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/Velocidex/yaml/v2"
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	"www.velocidex.com/golang/velociraptor/config"
@@ -31,16 +36,22 @@ var (
 name: Server.Internal.HuntModification
 type: INTERNAL
 `, `
+name: Server.Audit.Logs
+type: INTERNAL
+`, `
 name: Server.Internal.ClientInfoSnapshot
 type: INTERNAL
 `, `
 name: Server.Internal.ClientInfo
-type: INTERNAL
+type: CLIENT_EVENT
 `, `
 name: Server.Internal.ClientDelete
-type: INTERNAL
+type: SERVER_EVENT
 `, `
 name: Server.Internal.Label
+type: INTERNAL
+`, `
+name: Server.Internal.UserManager
 type: INTERNAL
 `, `
 name: Server.Internal.Notifications
@@ -67,6 +78,9 @@ type: INTERNAL
 name: Server.Monitor.Health
 type: SERVER_EVENT
 `, `
+name: Windows.Remediation.QuarantineMonitor
+type: CLIENT_EVENT
+`, `
 name: Generic.Client.Stats
 type: CLIENT_EVENT
 `, `
@@ -74,7 +88,7 @@ name: System.Hunt.Participation
 type: INTERNAL
 `, `
 name: System.Upload.Completion
-type: SERVER
+type: CLIENT_EVENT
 `, `
 name: Server.Internal.Enrollment
 type: INTERNAL
@@ -95,6 +109,12 @@ sources:
 - precondition: SELECT * FROM info()
   query: SELECT * FROM info()
   name: Users
+`, `
+name: Artifact.With.Parameters
+parameters:
+- name: Param1
+sources:
+- query: SELECT * FROM info()
 `,
 	}
 )
@@ -110,10 +130,46 @@ type TestSuite struct {
 	Services *orgs.ServiceContainer
 }
 
+func (self *TestSuite) CreateClient(client_id string) {
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	err = client_info_manager.Set(self.Ctx, &services.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
+			ClientId: client_id,
+		}})
+	assert.NoError(self.T(), err)
+}
+
+func (self *TestSuite) CreateFlow(client_id, flow_id string) {
+	defer utils.SetFlowIdForTests(flow_id)()
+
+	launcher, err := services.GetLauncher(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	manager, err := services.GetRepositoryManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	repository, err := manager.GetGlobalRepository(self.ConfigObj)
+	require.NoError(self.T(), err)
+
+	_, err = launcher.ScheduleArtifactCollection(
+		self.Ctx,
+		self.ConfigObj,
+		acl_managers.NullACLManager{},
+		repository,
+		&flows_proto.ArtifactCollectorArgs{
+			ClientId:  client_id,
+			Artifacts: []string{"Generic.Client.Info"},
+		}, nil)
+	assert.NoError(self.T(), err)
+}
+
 func (self *TestSuite) LoadConfig() *config_proto.Config {
-	os.Setenv("VELOCIRAPTOR_CONFIG", SERVER_CONFIG)
+	os.Setenv(constants.VELOCIRAPTOR_LITERAL_CONFIG, SERVER_CONFIG)
 	config_obj, err := new(config.Loader).
-		WithEnvLiteralLoader("VELOCIRAPTOR_CONFIG").WithRequiredFrontend().
+		WithEnvLiteralLoader(constants.VELOCIRAPTOR_LITERAL_CONFIG).
+		WithRequiredFrontend().
 		WithWriteback().WithVerbose(true).
 		LoadAndValidate()
 	require.NoError(self.T(), err)
@@ -130,8 +186,9 @@ func (self *TestSuite) SetupTest() {
 		self.ConfigObj = self.LoadConfig()
 	}
 
-	datastore.SetGlobalDatastore(context.Background(),
+	err := datastore.SetGlobalDatastore(context.Background(),
 		self.ConfigObj.Datastore.Implementation, self.ConfigObj)
+	assert.NoError(self.T(), err)
 
 	self.LoadArtifactsIntoConfig(definitions)
 
@@ -140,7 +197,7 @@ func (self *TestSuite) SetupTest() {
 	self.Sm = services.NewServiceManager(self.Ctx, self.ConfigObj)
 	self.Wg = &sync.WaitGroup{}
 
-	err := orgs.StartTestOrgManager(
+	err = orgs.StartTestOrgManager(
 		self.Ctx, self.Wg, self.ConfigObj, self.Services)
 	require.NoError(self.T(), err)
 
@@ -175,6 +232,7 @@ func (self *TestSuite) LoadArtifactsIntoConfig(definitions []string) {
 
 	existing_artifacts := make(map[string]*artifacts_proto.Artifact)
 	for _, def := range self.ConfigObj.Autoexec.ArtifactDefinitions {
+		def.Raw = ""
 		existing_artifacts[def.Name] = def
 	}
 
@@ -192,7 +250,12 @@ func (self *TestSuite) LoadArtifactsIntoConfig(definitions []string) {
 		artifacts = append(artifacts, v)
 	}
 
+	// Sort for stability
+	sort.Slice(artifacts, func(i, j int) bool {
+		return artifacts[i].Name < artifacts[j].Name
+	})
 	self.ConfigObj.Autoexec.ArtifactDefinitions = artifacts
+
 }
 
 func (self *TestSuite) LoadArtifactFiles(paths ...string) {
@@ -204,7 +267,7 @@ func (self *TestSuite) LoadArtifactFiles(paths ...string) {
 		fd, err := os.Open(p)
 		assert.NoError(self.T(), err)
 
-		def, err := ioutil.ReadAll(fd)
+		def, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
 		assert.NoError(self.T(), err)
 
 		_, err = global_repo.LoadYaml(string(def),
@@ -223,11 +286,25 @@ func (self *TestSuite) TearDownTest() {
 		self.Sm.Close()
 	}
 
+	file_store.FlushFilestore(self.ConfigObj)
+
 	// These may not be memory based in the test switched to other
 	// data stores.
 	file_store_factory, ok := file_store.GetFileStore(
 		self.ConfigObj).(*memory.MemoryFileStore)
 	if ok {
+		// Make sure all the files were closed
+		stats := file_store_factory.Locker.Stats()
+		if stats.InProgress != 0 {
+			// Wait a bit for any goroutines to cleanup
+			vtesting.WaitUntil(time.Second, self.T(), func() bool {
+				stats = file_store_factory.Locker.Stats()
+				return stats.InProgress == 0
+			})
+		}
+
+		assert.Equal(self.T(), 0, stats.InProgress,
+			"Error: Not all files are closed %#v", stats)
 		file_store_factory.Clear()
 	}
 

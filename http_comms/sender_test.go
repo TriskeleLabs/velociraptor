@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -20,7 +20,6 @@ package http_comms
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
@@ -38,6 +37,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 )
 
@@ -79,12 +79,12 @@ func (self *MockHTTPConnector) Post(ctx context.Context,
 		return nil, errors.New("Unavailable")
 	}
 
-	// Decreasse the wg when the message arrives.
+	// Decrease the wg when the message arrives.
 	defer self.wg.Done()
 
 	manager := crypto_test.NullCryptoManager{}
 
-	message_info, err := manager.Decrypt(data)
+	message_info, err := manager.Decrypt(ctx, data)
 	require.NoError(self.t, err)
 
 	message_info.IterateJobs(context.Background(), self.config_obj,
@@ -217,14 +217,14 @@ func TestSender(t *testing.T) {
 
 	// Make the ring buffer 10 bytes - this is enough for one
 	// message but no more.
-	flow_manager := responder.NewFlowManager(ctx, config_obj)
-	rb := NewRingBuffer(config_obj, flow_manager, 10)
+	flow_manager := responder.NewFlowManager(ctx, config_obj, "")
+	rb := NewRingBuffer(config_obj, flow_manager, 10, "Sender")
 	testRingBuffer(ctx, rb, config_obj, "0123456789", t)
 }
 
 func TestSenderWithFileBuffer(t *testing.T) {
 	config_obj := config.GetDefaultConfig()
-	tmpfile, err := ioutil.TempFile("", "test")
+	tmpfile, err := tempfile.TempFile("test")
 	require.NoError(t, err)
 	defer os.Remove(tmpfile.Name())
 
@@ -244,7 +244,7 @@ func TestSenderWithFileBuffer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	flow_manager := responder.NewFlowManager(ctx, config_obj)
+	flow_manager := responder.NewFlowManager(ctx, config_obj, "")
 	local_buffer_name := getLocalBufferName(config_obj)
 	rb, err := NewFileBasedRingBuffer(ctx, config_obj,
 		local_buffer_name, flow_manager, logger)

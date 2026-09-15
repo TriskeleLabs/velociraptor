@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/result_sets"
@@ -44,12 +46,12 @@ import (
 type TimedResultSetReader struct {
 	mu sync.Mutex
 
-	files              []*api.ResultSetFileProperties
-	current_files_idx  int
-	current_reader     *timelines.TimelineReader
-	start              time.Time
-	end                time.Time
-	file_store_factory api.FileStore
+	files             []*api.ResultSetFileProperties
+	current_files_idx int
+	current_reader    *timelines.TimelineReader
+	start             time.Time
+	end               time.Time
+	config_obj        *config_proto.Config
 }
 
 func (self *TimedResultSetReader) GetAvailableFiles(
@@ -149,10 +151,12 @@ func (self *TimedResultSetReader) getReader() (*timelines.TimelineReader, error)
 			return nil, io.EOF
 		}
 
+		reader_factory := timelines.TimelineReader{}
+
 		path_manager := paths.NewTimelinePathManager(
 			"", current_file.Path)
-		reader, err := timelines.NewTimelineReader(
-			self.file_store_factory, path_manager)
+		reader, err := reader_factory.New(
+			self.config_obj, timelines.UnitTransformer, path_manager)
 		if err != nil {
 			// Try to upgrade the index from older
 			// versions.
@@ -173,8 +177,9 @@ func (self *TimedResultSetReader) maybeUpgradeIndex(
 	path_manager paths.TimelinePathManagerInterface) (
 	*timelines.TimelineReader, error) {
 
+	file_store_factory := file_store.GetFileStore(self.config_obj)
 	reader, err := result_sets.NewResultSetReader(
-		self.file_store_factory, path_manager.Path())
+		file_store_factory, path_manager.Path())
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +195,7 @@ func (self *TimedResultSetReader) maybeUpgradeIndex(
 	// Write the tmp file synchronously and then read it again with
 	// the benefit of the index.
 	tmp_writer, err := timelines.NewTimelineWriter(
-		self.file_store_factory, tmp_path_manager,
+		self.config_obj, tmp_path_manager,
 		utils.SyncCompleter, result_sets.TruncateMode)
 	if err != nil {
 		return nil, err
@@ -199,7 +204,11 @@ func (self *TimedResultSetReader) maybeUpgradeIndex(
 	for row := range reader.Rows(ctx) {
 		ts, pres := row.GetInt64("_ts")
 		if pres {
-			tmp_writer.Write(time.Unix(ts, 0), row)
+			err := tmp_writer.Write(time.Unix(ts, 0), row)
+			if err != nil {
+				tmp_writer.Close()
+				return nil, err
+			}
 		}
 	}
 
@@ -207,12 +216,16 @@ func (self *TimedResultSetReader) maybeUpgradeIndex(
 
 	// Update the json file itself, and leave the new index
 	// around.
-	self.file_store_factory.Move(tmp_path_manager.Path(),
-		path_manager.Path())
+	err = file_store_factory.Move(tmp_path_manager.Path(), path_manager.Path())
+	if err != nil {
+		return nil, err
+	}
+
+	reader_factory := timelines.TimelineReader{}
 
 	// Try to open the file again.
-	return timelines.NewTimelineReader(
-		self.file_store_factory, path_manager)
+	return reader_factory.New(
+		self.config_obj, timelines.UnitTransformer, path_manager)
 }
 
 func (self *TimedResultSetReader) Rows(

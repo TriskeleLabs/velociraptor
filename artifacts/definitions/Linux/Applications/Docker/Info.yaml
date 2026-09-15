@@ -1,10 +1,17 @@
 name: Linux.Applications.Docker.Info
-description: Get Dockers info by connecting to its socket.
+description: |
+  Connects to the Docker socket and retrieves daemon information
+  including containers, images, and driver settings.
+
 parameters:
   - name: dockerSocket
     description: |
       Docker server socket. You will normally need to be root to connect.
     default: /var/run/docker.sock
+
+implied_permissions:
+- NETWORK
+
 sources:
   - precondition: |
       SELECT OS From info() where OS = 'linux'

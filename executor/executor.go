@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -60,7 +60,7 @@ type Executor interface {
 	Nanny() *NannyService
 }
 
-// A concerete implementation of a client executor.
+// A concrete implementation of a client executor.
 
 type ClientExecutor struct {
 	client_id string
@@ -156,6 +156,11 @@ func (self *ClientExecutor) processRequestPlugin(
 		return
 	}
 
+	if req.ResumeTransactions != nil {
+		self.ResumeTransactions(ctx, config_obj, req)
+		return
+	}
+
 	if req.UpdateEventTable != nil {
 		self.event_manager.UpdateEventTable(
 			self.ctx, self.wg, config_obj,
@@ -204,7 +209,7 @@ func NewClientExecutor(
 		concurrency:  utils.NewConcurrencyControl(level, time.Hour),
 		wg:           wg,
 		config_obj:   config_obj,
-		flow_manager: responder.NewFlowManager(ctx, config_obj),
+		flow_manager: responder.NewFlowManager(ctx, config_obj, client_id),
 	}
 
 	// Install and initialize the event manager
@@ -241,7 +246,7 @@ func NewClientExecutor(
 				// The server sets both VQLClientAction and
 				// FlowRequest members on some messages for backwards
 				// compatibility. We strip the old VQLClientAction
-				// because we dont use it.
+				// because we don't use it.
 
 				// This message has VQLClientAction and no FlowRequest
 				// - we can not use it - it is for the old clients.

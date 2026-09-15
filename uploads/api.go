@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -23,9 +24,55 @@ type UploadResponse struct {
 	Reference  string   `json:"Reference,omitempty"`
 	Components []string `json:"Components,omitempty"`
 	Accessor   string   `json:"Accessor,omitempty"`
+	ID         int64    `json:"UploadId"`
 
 	// The type of upload this is (Currently "idx" is an index file)
 	Type string `json:"Type,omitempty"`
+}
+
+func (self *UploadResponse) AsDict() *ordereddict.Dict {
+	res := ordereddict.NewDict().
+		Set("Path", self.Path).
+		Set("Size", self.Size).
+		Set("UploadId", self.ID)
+
+	if self.StoredSize > 0 {
+		res.Set("StoredSize", self.StoredSize)
+	}
+
+	if self.Error != "" {
+		res.Set("Error", self.Error)
+	}
+
+	if self.Sha256 != "" {
+		res.Set("sha256", self.Sha256)
+	}
+
+	if self.Md5 != "" {
+		res.Set("md5", self.Md5)
+	}
+
+	if self.StoredName != "" {
+		res.Set("StoredName", self.StoredName)
+	}
+
+	if self.Reference != "" {
+		res.Set("Reference", self.Reference)
+	}
+
+	if len(self.Components) > 0 {
+		res.Set("Components", append([]string{}, self.Components...))
+	}
+
+	if self.Accessor != "" {
+		res.Set("Accessor", self.Accessor)
+	}
+
+	if self.Type != "" {
+		res.Set("Type", self.Type)
+	}
+
+	return res
 }
 
 // Provide an uploader capable of uploading any reader object.
@@ -41,7 +88,7 @@ type Uploader interface {
 		ctime time.Time,
 		btime time.Time,
 		mode os.FileMode,
-		reader io.Reader) (*UploadResponse, error)
+		reader io.ReadSeeker) (*UploadResponse, error)
 }
 
 // A generic interface for reporting file ranges. Implementations will

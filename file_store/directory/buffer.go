@@ -8,7 +8,6 @@ package directory
 import (
 	"encoding/binary"
 	"errors"
-	"io/ioutil"
 	"os"
 	"sync"
 
@@ -270,7 +269,7 @@ func (self *FileBasedRingBuffer) getFd() (*os.File, error) {
 		ReadPointer:  FirstRecordOffset,
 	}
 
-	fd, err := ioutil.TempFile("", self.base_name)
+	fd, err := utils_tempfile.TempFile(self.base_name)
 	if err != nil {
 		return nil, err
 	}

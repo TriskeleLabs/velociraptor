@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,7 +24,7 @@ import (
 	"github.com/clbanning/mxj"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/vql"
+
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -41,18 +41,12 @@ func (self _ParseXMLFunction) Call(
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("parse_xml", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_xml", args)()
 
 	arg := &_ParseXMLFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("parse_xml: %s", err.Error())
-		return vfilter.Null{}
-	}
-
-	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("parse_xml: %v", err)
 		return vfilter.Null{}
 	}
 
@@ -68,7 +62,6 @@ func (self _ParseXMLFunction) Call(
 	}
 	defer file.Close()
 
-	mxj.SetAttrPrefix("Attr")
 	result, err := mxj.NewMapXmlReader(file)
 	if err != nil {
 		scope.Log("NewMapXmlReader: %v", err)
@@ -83,10 +76,12 @@ func (self _ParseXMLFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:     "parse_xml",
 		Doc:      "Parse an XML document into a map.",
 		ArgType:  type_map.AddType(scope, &_ParseXMLFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 
 func init() {
+	mxj.SetAttrPrefix("Attr")
 	vql_subsystem.RegisterFunction(&_ParseXMLFunction{})
 }

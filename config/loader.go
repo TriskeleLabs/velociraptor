@@ -7,7 +7,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"runtime"
 
 	"github.com/Velocidex/yaml/v2"
 	"github.com/go-errors/errors"
@@ -15,11 +14,11 @@ import (
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 )
 
 var (
-	noEmbeddedConfig = errors.New(
-		"No embedded config - you can pack one with the `config repack` command")
+	silentError = errors.New("Silent")
 
 	embedded_re = regexp.MustCompile(`#{3}<Begin Embedded Config>\r?\n`)
 
@@ -72,30 +71,13 @@ func (self *Loader) WithTempdir(tmpdir string) *Loader {
 			// Expand the tmpdir if needed.
 			tmpdir = utils.ExpandEnv(tmpdir)
 
-			// Try to create a file in the directory to make sure
-			// we have permissions and the directory exists.
-			tmpfile, err := ioutil.TempFile(tmpdir, "tmp")
+			err := tempfile.SetTempDir(tmpdir)
 			if err != nil {
-				// No we dont have permission there, fall back
-				// to system default.
-				self.Log("Can not write in temp directory to <red>%v</red> - falling back to default %v",
-					tmpdir, os.Getenv("TMP"))
-				return nil
-			}
-			tmpfile.Close()
-
-			defer os.Remove(tmpfile.Name())
-
-			switch runtime.GOOS {
-			case "windows":
-				os.Setenv("TMP", tmpdir)
-				os.Setenv("TEMP", tmpdir)
-			case "linux", "darwin":
-				os.Setenv("TMP", tmpdir)
-				os.Setenv("TMPDIR", tmpdir)
+				self.Log("Can not write in temp directory to <red>%v</red>",
+					tmpdir)
+				return err
 			}
 			self.Log("Setting temp directory to <green>%v", tmpdir)
-
 			return nil
 		}})
 	return self
@@ -124,7 +106,7 @@ func (self *Loader) WithRequiredFrontend() *Loader {
 	self.validators = append(self.validators, validatorFunction{
 		name: "WithRequiredFrontend",
 		validator: func(self *Loader, config_obj *config_proto.Config) error { //
-			if config_obj.Frontend == nil {
+			if !IsFrontend(config_obj) {
 				return errors.New("Frontend config is required")
 			}
 			return nil
@@ -137,7 +119,7 @@ func (self *Loader) WithRequiredClient() *Loader {
 	self.validators = append(self.validators, validatorFunction{
 		name: "WithRequiredClient",
 		validator: func(self *Loader, config_obj *config_proto.Config) error {
-			if config_obj.Client == nil {
+			if !IsClient(config_obj) {
 				return errors.New("Client config is required")
 			}
 			return nil
@@ -247,23 +229,51 @@ func (self *Loader) WithNullLoader() *Loader {
 }
 
 func (self *Loader) WithFileLoader(filename string) *Loader {
-	if filename != "" {
-		self = self.Copy()
-		self.loaders = append(self.loaders, loaderFunction{
-			name: "WithFileLoader",
-			loader_func: func(self *Loader) (*config_proto.Config, error) {
-				self.Log("Loading config from file %v", filename)
-				result, err := read_config_from_file(filename)
-				if err != nil {
-					// If a filename is specified but it
-					// does not exist or invalid stop
-					// searching immediately.
-					return result, HardError{err}
-				}
-				return result, nil
-
-			}})
+	if filename == "" {
+		return self
 	}
+
+	self = self.Copy()
+	self.loaders = append(self.loaders, loaderFunction{
+		name: "WithFileLoader",
+		loader_func: func(self *Loader) (*config_proto.Config, error) {
+			self.Log("Loading config from file %v", filename)
+			result, err := read_config_from_file(filename)
+			if err != nil {
+				// If a filename is specified but it
+				// does not exist or invalid stop
+				// searching immediately.
+				return result, HardError{
+					fmt.Errorf("FileLoader: %w", err),
+				}
+			}
+			return result, nil
+		}})
+
+	return self
+}
+
+// Try to load it from the filename if it exists.
+func (self *Loader) WithOptionalFileLoader(filename string) *Loader {
+	if filename == "" {
+		return self
+	}
+
+	_, err := os.Lstat(filename)
+	if err != nil {
+		return self
+	}
+
+	self = self.Copy()
+	self.loaders = append(self.loaders, loaderFunction{
+		name: "WithOptionalFileLoader",
+		loader_func: func(self *Loader) (*config_proto.Config, error) {
+			res, err := read_config_from_file(filename)
+			if err == nil {
+				self.Log("Loaded config from file %v", filename)
+			}
+			return res, err
+		}})
 
 	return self
 }
@@ -278,7 +288,9 @@ func (self *Loader) WithLiteralLoader(serialized []byte) *Loader {
 				result := &config_proto.Config{}
 				err := yaml.UnmarshalStrict(serialized, result)
 				if err != nil {
-					return nil, errors.Wrap(err, 0)
+					return nil, HardError{
+						fmt.Errorf("LiteralLoader: %w", err),
+					}
 				}
 				return result, nil
 			}})
@@ -295,7 +307,13 @@ func (self *Loader) WithEnvLoader(env_var string) *Loader {
 			env_config := os.Getenv(env_var)
 			if env_config != "" {
 				self.Log("Loading config from env %v (%v)", env_var, env_config)
-				return read_config_from_file(env_config)
+				result, err := read_config_from_file(env_config)
+				if err != nil {
+					return result, HardError{
+						fmt.Errorf("EnvLoader: %w", err),
+					}
+				}
+				return result, nil
 			}
 			return nil, fmt.Errorf("Env var %v is not set", env_var)
 		}})
@@ -314,7 +332,9 @@ func (self *Loader) WithEnvLiteralLoader(env_var string) *Loader {
 				result := &config_proto.Config{}
 				err := yaml.UnmarshalStrict([]byte(env_config), result)
 				if err != nil {
-					return nil, errors.Wrap(err, 0)
+					return nil, HardError{
+						fmt.Errorf("EnvLiteralLoader: %w", err),
+					}
 				}
 				return result, nil
 			}
@@ -329,17 +349,23 @@ func (self *Loader) WithEmbedded(embedded_file string) *Loader {
 	self.loaders = append(self.loaders, loaderFunction{
 		name: "WithEmbedded",
 		loader_func: func(self *Loader) (*config_proto.Config, error) {
+			// Try to get the embedded config inside the binary.
 			if embedded_file == "" {
 				result, err := read_embedded_config()
 				if err != nil {
-					return nil, err
+					// not a critical error - the binary does not have
+					// to have an embedded config
+					return nil, silentError
 				}
 
-				self.Log("Loaded embedded config")
+				self.Log("Loaded embedded config from binary")
 
+				// Set the EmbeddedFile for the "me" accessor- we will
+				// get binaries from this file.
 				EmbeddedFile, err = os.Executable()
 				return result, err
 			}
+
 			// Ensure the "me" accessor uses this file for embedded zip.
 			full_path, err := filepath.Abs(embedded_file)
 			if err != nil {
@@ -351,9 +377,11 @@ func (self *Loader) WithEmbedded(embedded_file string) *Loader {
 			result, err := ExtractEmbeddedConfig(full_path)
 			if err == nil {
 				self.Log("Loaded embedded config from %v", full_path)
+				return result, nil
 			}
-			return result, err
 
+			self.Log("Unable to parse embedded config from %v: %v", full_path, err.Error())
+			return result, HardError{err}
 		}})
 	return self
 }
@@ -368,10 +396,15 @@ func (self *Loader) WithApiLoader(filename string) *Loader {
 		name: "WithApiLoader",
 		loader_func: func(self *Loader) (*config_proto.Config, error) {
 			result, err := read_api_config_from_file(filename)
-			if err == nil {
-				self.Log("Loaded api config from %v", filename)
+			if err != nil {
+				// This is a hard error since the user specified an api
+				// file but we could not load it.
+				return result, HardError{
+					fmt.Errorf("ApiLoader: %w", err),
+				}
 			}
-			return result, err
+			self.Log("Loaded api config from %v", filename)
+			return result, nil
 		}})
 	return self
 }
@@ -384,7 +417,12 @@ func (self *Loader) WithEnvApiLoader(env_var string) *Loader {
 			env_config := os.Getenv(env_var)
 			if env_config != "" {
 				self.Log("Loading config from env %v (%v)", env_var, env_config)
-				return read_api_config_from_file(env_config)
+				result, err := read_api_config_from_file(env_config)
+				if err != nil {
+					return result, HardError{
+						fmt.Errorf("EnvApiLoader: %w", err),
+					}
+				}
 			}
 			return nil, fmt.Errorf("Env var %v is not set", env_var)
 		}})
@@ -436,7 +474,7 @@ func (self *Loader) Validate(config_obj *config_proto.Config) error {
 			return err
 		}
 	} else {
-		// Logging is not required so if it fails we dont
+		// Logging is not required so if it fails we don't
 		// care.
 		_ = logging.InitLogging(config_obj)
 	}
@@ -487,7 +525,9 @@ func (self *Loader) Validate(config_obj *config_proto.Config) error {
 		// directive when they prepare the config loader.
 		if self.use_writeback {
 			writeback_service := writeback.GetWritebackService()
-			writeback_service.LoadWriteback(config_obj)
+
+			// It is ok if writeback is not readable - we will create
+			_ = writeback_service.LoadWriteback(config_obj)
 		}
 		err := ValidateClientConfig(config_obj)
 		if err != nil {
@@ -507,11 +547,13 @@ func (self *Loader) LoadAndValidate() (*config_proto.Config, error) {
 		}
 
 		// Stop on hard errors.
-		_, ok := err.(HardError)
+		he, ok := err.(HardError)
 		if ok {
-			return nil, err
+			return nil, he.Err
 		}
-		self.Log("%v", err)
+		if err != silentError {
+			self.Log("%v", err)
+		}
 	}
 	return nil, errors.New("Unable to load config from any source.")
 }
@@ -547,7 +589,5 @@ func read_api_config_from_file(filename string) (*config_proto.Config, error) {
 }
 
 func debug(message string, args ...interface{}) {
-	return
-
-	logging.Prelog(message, args...)
+	// logging.Prelog(message, args...)
 }

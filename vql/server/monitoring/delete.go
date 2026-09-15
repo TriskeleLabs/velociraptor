@@ -7,7 +7,6 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -33,6 +32,7 @@ func (self DeleteEventsPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "delete_events", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.DELETE_RESULTS)
 		if err != nil {
@@ -81,7 +81,9 @@ func (self DeleteEventsPlugin) Call(
 
 		responses, err := launcher.DeleteEvents(ctx, config_obj,
 			principal, arg.Artifact, arg.ClientId,
-			arg.StartTime, arg.EndTime, arg.ReallyDoIt)
+			arg.StartTime, arg.EndTime, services.DeleteFlowOptions{
+				ReallyDoIt: arg.ReallyDoIt,
+			})
 		if err != nil {
 			scope.Log("delete_events: %v", err)
 			return
@@ -104,7 +106,7 @@ func (self DeleteEventsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeM
 		Name:     "delete_events",
 		Doc:      "Delete all the files that make up a flow.",
 		ArgType:  type_map.AddType(scope, &DeleteEventsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.DELETE_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.DELETE_RESULTS).Build(),
 	}
 }
 

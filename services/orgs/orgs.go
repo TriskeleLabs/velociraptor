@@ -3,7 +3,6 @@ package orgs
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -40,15 +39,12 @@ type OrgContext struct {
 type OrgManager struct {
 	mu sync.Mutex
 
-	// Sync the scan
-	scan_mu sync.Mutex
-
 	// The root org's ctx and wg
 	ctx context.Context
 
 	// We keep track of each org's services using its own wg and
 	// control overall lifetime using our parent's wg. This allows us
-	// to cancel each org's sevices independently.
+	// to cancel each org's services independently.
 	parent_wg *sync.WaitGroup
 
 	// The base global config object
@@ -134,7 +130,7 @@ func (self *OrgManager) OrgIdByNonce(nonce string) (string, error) {
 	return result, nil
 }
 
-func (self *OrgManager) CreateNewOrg(name, id string) (
+func (self *OrgManager) CreateNewOrg(name, id, nonce string) (
 	*api_proto.OrgRecord, error) {
 
 	if id == "" {
@@ -148,10 +144,14 @@ func (self *OrgManager) CreateNewOrg(name, id string) (
 		return nil, errors.New("CreateNewOrg: Org ID already in use")
 	}
 
+	if nonce == services.RandomNonce {
+		nonce = NewNonce()
+	}
+
 	org_record := &api_proto.OrgRecord{
 		Name:  name,
 		Id:    id,
-		Nonce: NewNonce(),
+		Nonce: nonce,
 	}
 
 	// Check if the org already exists
@@ -184,7 +184,12 @@ func (self *OrgManager) CreateNewOrg(name, id string) (
 func (self *OrgManager) makeNewConfigObj(
 	record *api_proto.OrgRecord) *config_proto.Config {
 
-	result := proto.Clone(self.config_obj).(*config_proto.Config)
+	// The root org carries the real global config, but other orgs'
+	// config will be derived from the root org.
+	result := self.config_obj
+	if !utils.IsRootOrg(record.Id) {
+		result = proto.Clone(self.config_obj).(*config_proto.Config)
+	}
 
 	result.OrgId = utils.NormalizedOrgId(record.Id)
 	result.OrgName = record.Name
@@ -201,9 +206,9 @@ func (self *OrgManager) makeNewConfigObj(
 	// The root location remains at the top level but suborgs will
 	// live in <fs>/orgs/<orgid>
 	if result.Datastore != nil && !utils.IsRootOrg(record.Id) {
-		result.Datastore.Location = filepath.Join(
+		result.Datastore.Location = utils.Join(
 			result.Datastore.Location, "orgs", record.Id)
-		result.Datastore.FilestoreDirectory = filepath.Join(
+		result.Datastore.FilestoreDirectory = utils.Join(
 			result.Datastore.FilestoreDirectory, "orgs", record.Id)
 	}
 
@@ -294,13 +299,19 @@ func (self *OrgManager) Start(
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 	logger.Info("<green>Starting</> Org Manager service.")
 
+	err := datastore.StartDatastore(
+		ctx, wg, config_obj)
+	if err != nil {
+		return err
+	}
+
 	nonce := ""
 	if config_obj.Client != nil {
 		nonce = config_obj.Client.Nonce
 	}
 
 	// First start all services for the root org
-	err := self.startOrg(&api_proto.OrgRecord{
+	err = self.startOrg(&api_proto.OrgRecord{
 		Id:    services.ROOT_ORG_ID,
 		Name:  services.ROOT_ORG_NAME,
 		Nonce: nonce,
@@ -310,7 +321,7 @@ func (self *OrgManager) Start(
 	}
 
 	// If a datastore is not configured we are running on the client
-	// or as a tool so we dont need to scan for new orgs.
+	// or as a tool so we don't need to scan for new orgs.
 	if config_obj.Datastore == nil {
 		return nil
 	}
@@ -332,7 +343,10 @@ func (self *OrgManager) Start(
 				return
 
 			case <-time.After(utils.Jitter(10 * time.Second)):
-				self.Scan()
+				err := self.Scan()
+				if err != nil {
+					logger.Error("<red>OrgManager Scan</> %v", err)
+				}
 			}
 		}
 

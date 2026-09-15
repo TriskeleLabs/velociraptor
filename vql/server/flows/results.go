@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,18 +26,28 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/server/hunts"
-	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
+)
+
+type pluginMode int
+
+const (
+	MODE_UNSET pluginMode = iota
+	MODE_FLOW_ARTIFACT
+	MODE_HUNT_ARTIFACT
+	MODE_EVENT_ARTIFACT
+	MODE_NOTEBOOK
 )
 
 // A one stop shop plugin for retrieving result sets collected from
@@ -84,9 +94,79 @@ type SourcePluginArgs struct {
 	NotebookCellTable   int64  `vfilter:"optional,field=notebook_cell_table,doc=A notebook cell can have multiple tables.)"`
 
 	StartRow int64 `vfilter:"optional,field=start_row,doc=Start reading the result set from this row"`
-	Limit    int64 `vfilter:"optional,field=count,doc=Maximum number of clients to fetch (default unlimited)'"`
+	Limit    int64 `vfilter:"optional,field=count,doc=Maximum number of rows to fetch (default unlimited)"`
 
-	OrgIds []string `vfilter:"optional,field=orgs,doc=Run the query over these orgs. If empty use the current org.'"`
+	OrgIds []string `vfilter:"optional,field=orgs,doc=Run the query over these orgs. If empty use the current org."`
+
+	// The source plugin works by providing direct arguments **and**
+	// deducing some arguments from the environment. Depending on
+	// which argument is used the plugin does different things.
+	//
+	// We use the arguments provided directly to decide what mode we
+	// are operating in:
+	//
+	// 1. If the Artifact is provided we are in artifact result
+	//    reading mode.
+	// 2. If the NotebookId is provided directly we are in notebook
+	//    mode - we read the results from another notebook cell.
+	mode pluginMode
+}
+
+func (self *SourcePluginArgs) DetermineMode(
+	ctx context.Context, config_obj *config_proto.Config,
+	scope vfilter.Scope, args *ordereddict.Dict) error {
+
+	if args != nil {
+		_, pres := args.Get("notebook_id")
+		if pres {
+			self.mode = MODE_NOTEBOOK
+			return nil
+		}
+	}
+
+	// This plugin will take parameters from environment
+	// parameters. This allows its use to be more concise in
+	// reports etc where many parameters can be inferred from
+	// context.
+	self.ParseSourceArgsFromScope(scope)
+
+	if self.Artifact != "" {
+		// Normalize the artifact name to include the source
+		if self.Source != "" {
+			self.Artifact = self.Artifact + "/" + self.Source
+			self.Source = ""
+		}
+
+		// Is this a hunt result set?
+		if self.HuntId != "" {
+			self.mode = MODE_HUNT_ARTIFACT
+			return nil
+		}
+
+		// Detect if the artifact is an event artifact
+		is_event, client_id, err := self.isArtifactEvent(scope, ctx, config_obj)
+		if err != nil {
+			return err
+		}
+
+		if is_event {
+			self.ClientId = client_id
+			self.mode = MODE_EVENT_ARTIFACT
+			return nil
+		}
+
+		// Must specify a client id and flow id for regular
+		// collections.
+		if self.FlowId == "" || self.ClientId == "" {
+			return errors.New("source: client_id and flow_id should " +
+				"be specified for non event artifacts.")
+		}
+		self.mode = MODE_FLOW_ARTIFACT
+		return nil
+	}
+
+	return errors.New(
+		"source: One of artifact, flow_id, hunt_id, notebook_id should be specified.")
 }
 
 type SourcePlugin struct{}
@@ -107,6 +187,7 @@ func (self SourcePlugin) Call(
 	err = services.RequireFrontend()
 	if err != nil {
 		scope.Log("uploads: %v", err)
+		close(output_chan)
 		return output_chan
 	}
 
@@ -118,12 +199,6 @@ func (self SourcePlugin) Call(
 		return output_chan
 	}
 
-	// This plugin will take parameters from environment
-	// parameters. This allows its use to be more concise in
-	// reports etc where many parameters can be inferred from
-	// context.
-	ParseSourceArgsFromScope(arg, scope)
-
 	// Allow the plugin args to override the environment scope.
 	err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
@@ -132,10 +207,17 @@ func (self SourcePlugin) Call(
 		return output_chan
 	}
 
+	// Determine the mode based on the args passed.
+	err = arg.DetermineMode(ctx, config_obj, scope, args)
+	if err != nil {
+		scope.Log("source: %v", err)
+		close(output_chan)
+		return output_chan
+	}
+
 	// Hunt mode is just a proxy for the hunt_results()
 	// plugin.
-	if arg.NotebookCellId == "" &&
-		arg.HuntId != "" {
+	if arg.mode == MODE_HUNT_ARTIFACT {
 		new_args := ordereddict.NewDict().
 			Set("hunt_id", arg.HuntId).
 			Set("artifact", arg.Artifact).
@@ -147,34 +229,45 @@ func (self SourcePlugin) Call(
 	}
 
 	// Event artifacts just proxy for the monitoring plugin.
-	if arg.NotebookCellId == "" && arg.Artifact != "" {
-		ok, client_id, _ := isArtifactEvent(scope, ctx, config_obj, arg)
-		if ok {
-			new_args := ordereddict.NewDict().
-				Set("client_id", client_id).
-				Set("artifact", arg.Artifact).
-				Set("source", arg.Source).
-				Set("start_row", arg.StartRow)
+	if arg.mode == MODE_EVENT_ARTIFACT {
+		new_args := ordereddict.NewDict().
+			Set("client_id", arg.ClientId).
+			Set("artifact", arg.Artifact).
+			Set("source", arg.Source).
+			Set("start_row", arg.StartRow)
 
-			if !utils.IsNil(arg.StartTime) {
-				new_args.Set("start_time", arg.StartTime)
-			}
-
-			if !utils.IsNil(arg.EndTime) {
-				new_args.Set("end_time", arg.EndTime)
-			}
-
-			// Just delegate directly to the monitoring plugin.
-			return MonitoringPlugin{}.Call(ctx, scope, new_args)
+		if !utils.IsNil(arg.StartTime) {
+			new_args.Set("start_time", arg.StartTime)
 		}
+
+		if !utils.IsNil(arg.EndTime) {
+			new_args.Set("end_time", arg.EndTime)
+		}
+
+		// Just delegate directly to the monitoring plugin.
+		return MonitoringPlugin{}.Call(ctx, scope, new_args)
 	}
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "source", args)()
 
-		// Depending on the parameters, we need to read from
-		// different places.
-		result_set_reader, err := getResultSetReader(ctx, config_obj, scope, arg)
+		// Depending on the mode, we need to read from different
+		// places.
+		var err error
+		var result_set_reader result_sets.ResultSetReader
+
+		if arg.mode == MODE_NOTEBOOK {
+			result_set_reader, err = getNotebookResultSetReader(ctx, config_obj, scope, arg)
+
+		} else if arg.mode == MODE_FLOW_ARTIFACT {
+			result_set_reader, err = getFlowResultSetReader(ctx, config_obj, scope, arg)
+
+		} else {
+			scope.Log("source: unknown arg mode")
+			return
+		}
+
 		if err != nil {
 			scope.Log("source: %v", err)
 			return
@@ -215,38 +308,34 @@ func (self SourcePlugin) Info(
 		Name:     "source",
 		Doc:      "Retrieve rows from stored result sets. This is a one stop show for retrieving stored result set for post processing.",
 		ArgType:  type_map.AddType(scope, &SourcePluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 
 // Figure out if the artifact is an event artifact based on its
 // definition.
-func isArtifactEvent(
-	scope vfilter.Scope, ctx context.Context, config_obj *config_proto.Config,
-	arg *SourcePluginArgs) (is_event bool, client_id string, err error) {
+func (self *SourcePluginArgs) isArtifactEvent(
+	scope vfilter.Scope, ctx context.Context,
+	config_obj *config_proto.Config) (is_event bool, client_id string, err error) {
 
-	repository, err := vql_utils.GetRepository(scope)
+	mode, err := artifact_paths.GetArtifactMode(ctx, config_obj, self.Artifact)
 	if err != nil {
 		return false, "", err
 	}
 
-	artifact_definition, pres := repository.Get(ctx, config_obj, arg.Artifact)
-	if !pres {
-		return false, "", fmt.Errorf("Artifact %v not known", arg.Artifact)
-	}
-
-	switch artifact_definition.Type {
-	case "client_event":
-		if arg.ClientId == "" {
+	switch mode {
+	case artifact_modes.MODE_CLIENT_EVENT:
+		if self.ClientId == "" {
 			return false, "", fmt.Errorf(
 				"Artifact %v is a client event artifact, "+
 					"therefore a client id is required.",
-				artifact_definition.Name)
+				self.Artifact)
 		}
-		return true, arg.ClientId, nil
+		return true, self.ClientId, nil
 
-	case "server_event":
-		return true, "server", nil
+	case artifact_modes.MODE_SERVER_EVENT:
+		return true, constants.VELOCIRAPTOR_SERVER_CLIENT_ID, nil
 
 	default:
 		return false, "", nil
@@ -289,113 +378,105 @@ func getNotebookResultSetReader(
 		file_store_factory, path_manager.Path())
 }
 
-func getResultSetReader(
+func getFlowResultSetReader(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	scope vfilter.Scope,
 	arg *SourcePluginArgs) (result_sets.ResultSetReader, error) {
 
-	// Is it a notebook?
-	if arg.NotebookId != "" && arg.NotebookCellId != "" {
-		return getNotebookResultSetReader(ctx, config_obj, scope, arg)
-	}
-
 	file_store_factory := file_store.GetFileStore(config_obj)
-	if arg.Artifact != "" {
-		if arg.Source != "" {
-			arg.Artifact = arg.Artifact + "/" + arg.Source
-			arg.Source = ""
-		}
 
-		is_event, _, err := isArtifactEvent(scope, ctx, config_obj, arg)
-		if err != nil {
-			return nil, err
-		}
-
-		// Event result sets can be sliced by time ranges.
-		if is_event {
-			return nil, errors.New("source plugin can not be used for event queries.")
-		}
-
-		// Must specify a client id and flow id for regular
-		// collections.
-		if arg.FlowId == "" || arg.ClientId == "" {
-			return nil, errors.New("source: client_id and flow_id should " +
-				"be specified for non event artifacts.")
-		}
-
-		path_manager, err := artifact_paths.NewArtifactPathManager(ctx,
-			config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
-		if err != nil {
-			return nil, err
-		}
-
-		return result_sets.NewResultSetReader(
-			file_store_factory, path_manager.Path())
-
+	path_manager, err := artifact_paths.NewArtifactPathManager(ctx,
+		config_obj, arg.ClientId, arg.FlowId, arg.Artifact)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, errors.New(
-		"source: One of artifact, flow_id, hunt_id, notebook_id should be specified.")
+	return result_sets.NewResultSetReader(
+		file_store_factory, path_manager.Path())
+
 }
 
 // Override SourcePluginArgs from the scope.
-func ParseSourceArgsFromScope(arg *SourcePluginArgs, scope vfilter.Scope) {
-	client_id, pres := scope.Resolve("ClientId")
-	if pres {
-		arg.ClientId, _ = client_id.(string)
-	}
-
-	flow_id, pres := scope.Resolve("FlowId")
-	if pres {
-		arg.FlowId, _ = flow_id.(string)
-	}
-
-	artifact_name, pres := scope.Resolve("ArtifactName")
-	if pres {
-		artifact, ok := artifact_name.(string)
-		if ok {
-			arg.Artifact = artifact
+func (self *SourcePluginArgs) ParseSourceArgsFromScope(scope vfilter.Scope) {
+	if self.ClientId == "" {
+		client_id, pres := scope.Resolve("ClientId")
+		if pres {
+			self.ClientId, _ = client_id.(string)
 		}
 	}
 
-	start_time, pres := scope.Resolve("StartTime")
-	if pres {
-		arg.StartTime = start_time
+	if self.FlowId == "" {
+		flow_id, pres := scope.Resolve("FlowId")
+		if pres {
+			self.FlowId, _ = flow_id.(string)
+		}
 	}
 
-	end_time, pres := scope.Resolve("EndTime")
-	if pres {
-		arg.EndTime = end_time
+	if self.Artifact == "" {
+		artifact_name, pres := scope.Resolve("ArtifactName")
+		if pres {
+			artifact, ok := artifact_name.(string)
+			if ok {
+				self.Artifact = artifact
+			}
+		}
 	}
 
-	notebook_id, pres := scope.Resolve("NotebookId")
-	if pres {
-		arg.NotebookId, _ = notebook_id.(string)
-	}
-	notebook_cell_id, pres := scope.Resolve("NotebookCellId")
-	if pres {
-		arg.NotebookCellId, _ = notebook_cell_id.(string)
+	if self.StartTime == "" {
+		start_time, pres := scope.Resolve("StartTime")
+		if pres {
+			self.StartTime = start_time
+		}
 	}
 
-	notebook_cell_table, pres := scope.Resolve("NotebookCellTable")
-	if pres {
-		arg.NotebookCellTable, _ = notebook_cell_table.(int64)
+	if self.EndTime == "" {
+		end_time, pres := scope.Resolve("EndTime")
+		if pres {
+			self.EndTime = end_time
+		}
 	}
 
-	start_row, pres := scope.Resolve("StartRow")
-	if pres {
-		arg.StartRow, _ = start_row.(int64)
+	if self.NotebookId == "" {
+		notebook_id, pres := scope.Resolve("NotebookId")
+		if pres {
+			self.NotebookId, _ = notebook_id.(string)
+		}
 	}
 
-	limit, pres := scope.Resolve("Limit")
-	if pres {
-		arg.Limit, _ = limit.(int64)
+	if self.NotebookCellId == "" {
+		notebook_cell_id, pres := scope.Resolve("NotebookCellId")
+		if pres {
+			self.NotebookCellId, _ = notebook_cell_id.(string)
+		}
 	}
 
-	hunt_id, pres := scope.Resolve("HuntId")
-	if pres {
-		arg.HuntId, _ = hunt_id.(string)
+	if self.NotebookCellTable == 0 {
+		notebook_cell_table, pres := scope.Resolve("NotebookCellTable")
+		if pres {
+			self.NotebookCellTable, _ = notebook_cell_table.(int64)
+		}
+	}
+
+	if self.StartRow == 0 {
+		start_row, pres := scope.Resolve("StartRow")
+		if pres {
+			self.StartRow, _ = start_row.(int64)
+		}
+	}
+
+	if self.Limit == 0 {
+		limit, pres := scope.Resolve("Limit")
+		if pres {
+			self.Limit, _ = limit.(int64)
+		}
+	}
+
+	if self.HuntId == "" {
+		hunt_id, pres := scope.Resolve("HuntId")
+		if pres {
+			self.HuntId, _ = hunt_id.(string)
+		}
 	}
 }
 
@@ -415,6 +496,7 @@ func (self FlowResultsPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "flow_results", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -450,7 +532,10 @@ func (self FlowResultsPlugin) Call(
 				return
 			}
 			flow, err := launcher.GetFlowDetails(
-				ctx, config_obj, arg.ClientId, arg.FlowId)
+				ctx, config_obj,
+				// We only need basic flow info
+				services.GetFlowOptions{},
+				arg.ClientId, arg.FlowId)
 			if err != nil {
 				scope.Log("flow_results: %v", err)
 				return
@@ -503,7 +588,7 @@ func (self FlowResultsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:     "flow_results",
 		Doc:      "Retrieve the results of a flow.",
 		ArgType:  type_map.AddType(scope, &FlowResultsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 

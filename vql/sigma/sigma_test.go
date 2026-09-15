@@ -4,21 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
 
-	// For map[string]interface{} protocl
+	// For map[string]interface{} protocol
 	_ "www.velocidex.com/golang/velociraptor/vql/parsers"
 )
 
@@ -51,6 +53,7 @@ type testCase struct {
 	fieldmappings     *ordereddict.Dict
 	rows              []*ordereddict.Dict
 	log_regex         string
+	expected_count    int // 0 = unchecked; >0 asserts exact row count
 	debug             bool
 }
 
@@ -67,6 +70,38 @@ detection:
        - 2
 
   condition: selection
+`
+
+	simpleTemporalCorrelationRule = `
+title: Rule1
+id: r1
+logsource:
+  product: windows # Just for testing
+  service: security
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '\tomcat8.exe'
+    condition: all of selection_*
+---
+title: Rule2
+id: r2
+logsource:
+  product: windows # Just for testing
+  service: security
+detection:
+    selection_method:
+        cs-method: 'POST'
+    condition: all of selection_*
+---
+title: Both rules
+correlation:
+  type: temporal
+  rules:
+    - r1
+    - r2
+  timespan: 10m
+level: high
 `
 
 	testRows = []*ordereddict.Dict{
@@ -117,6 +152,28 @@ detection:
 `,
 			fieldmappings: ordereddict.NewDict(),
 			rows:          testRows,
+		},
+		{
+			description: "Rule With Details with arrays",
+			rule: `
+title: RuleWithDetailsWithArrays
+# Indexes are 1 based - first element is %Data[1]%
+details: This is column Foo=%Data[1]% Bar=%Data[2]% Exceeded=%Data[6]%
+logsource:
+   product: windows
+   service: application
+
+detection:
+  selection:
+     Foo: Bar
+  condition: selection
+`,
+			fieldmappings: ordereddict.NewDict(),
+			rows: []*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Foo", "Bar").
+					Set("Data", []string{"Element1", "Element2"}),
+			},
 		},
 		{
 			description: "Default Details in callback",
@@ -416,6 +473,14 @@ detection:
         - " -param-name "
         - " -f "
 
+  windash_bar:
+     CommandLine|windash|contains:
+        - " -g "
+
+  windash_emdash:
+     CommandLine|windash|contains:
+        - " -h "
+
   windash_all:
      CommandLine|windash|contains|all:
         - " -param-name "
@@ -445,7 +510,8 @@ detection:
 					Set("ip_address2", "192.168.0.2").
 					Set("fieldname", "needle is a needle").
 					Set("fieldname_int", 15).
-					Set("CommandLine", "ping /f ").
+					// This is a horizontal bar ―
+					Set("CommandLine", "ping /f ―g —h ").
 					Set("CommandLineWide", base64.StdEncoding.EncodeToString([]byte("p\x00i\x00n\x00g\x00 \x00"))),
 			},
 		},
@@ -496,6 +562,39 @@ detection:
 					Set("Match", "Should match selection3 with all").
 					Set("Decoded", "kgkrpepsigrgspriteefjefe").
 					Set("Foo", base64.StdEncoding.EncodeToString([]byte("kgkrpepsigrgspriteefjefe"))),
+			},
+		},
+		{
+			description: "One of Condition",
+			rule: `
+title: One Of
+logsource:
+  product: windows
+  service: application
+
+detection:
+  selection1:
+     Foo|base64offset|contains: hello
+  selection2:
+     Foo|base64offset|contains: test
+  selection3:
+    Foo|base64offset|contains|all:
+      - sprite
+      - pepsi
+  selection4:
+    Foo|base64offset|contains:
+      - velo
+      - ciraptorex
+  condition: 1 of selection*
+`,
+			fieldmappings: ordereddict.NewDict().
+				Set("Foo", "x=>x.Foo"),
+			debug: true,
+			rows: []*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Match", "Should match selection1 and selection2 contains single element").
+					Set("Decoded", "jejfjefhellorfriufirtestkdkdg").
+					Set("Foo", base64.StdEncoding.EncodeToString([]byte("jejfjefhellorfriufirtestkdkdg"))),
 			},
 		},
 		{
@@ -552,6 +651,28 @@ detection:
 					Set("Proc", 1),
 			},
 		},
+		{
+			description: "Automatic Field Mappings",
+			rule: `
+title: Automatic Field Mappings
+logsource:
+  product: windows
+  service: application
+
+detection:
+   automaticField:
+      Foo.Bar.Baz|contains: Hello
+
+   condition: automaticField
+`,
+			fieldmappings: ordereddict.NewDict(),
+			rows: []*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Foo", ordereddict.NewDict().
+						Set("Bar", ordereddict.NewDict().
+							Set("Baz", "Hello world"))),
+			},
+		},
 	}
 )
 
@@ -571,7 +692,7 @@ func (self *SigmaTestSuite) TestSigmaModifiers() {
 	plugin := SigmaPlugin{}
 
 	for _, test_case := range sigmaTestCases {
-		if false && test_case.description != "Test Conditions" {
+		if false && test_case.description != "Automatic Field Mappings" {
 			continue
 		}
 
@@ -599,6 +720,14 @@ func (self *SigmaTestSuite) TestSigmaModifiers() {
 		}
 
 		for row := range plugin.Call(ctx, scope, args) {
+			// Ensure the plugin reports the rule that matched and the
+			// match object
+			_, pres := scope.Associative(row, "_Rule")
+			assert.True(self.T(), pres)
+
+			_, pres = scope.Associative(row, "_Match")
+			assert.True(self.T(), pres)
+
 			rows = append(rows, row)
 		}
 
@@ -612,13 +741,457 @@ func (self *SigmaTestSuite) TestSigmaModifiers() {
 
 		if test_case.log_regex != "" {
 			assert.Regexp(self.T(), test_case.log_regex,
-				string(log_collector.Bytes()))
+				log_collector.String())
 		}
 
 		os.Stderr.Write(log_collector.Bytes())
 	}
 
 	goldie.Assert(self.T(), "TestSigma",
+		json.MustMarshalIndent(result))
+}
+
+var (
+	loginEvents = []*ordereddict.Dict{
+		ordereddict.NewDict().
+			Set("Timestamp", "2024-10-10T12:22:00+10").
+			Set("EventID", 4625).
+			Set("TargetDomainName", "Domain").
+			Set("TargetUserName", "A"),
+		ordereddict.NewDict().
+			Set("Timestamp", "2024-10-10T12:23:00+10").
+			Set("EventID", 4625).
+			Set("TargetDomainName", "Domain").
+			Set("TargetUserName", "B"),
+		ordereddict.NewDict().
+			Set("Timestamp", "2024-10-10T12:24:00+10").
+			Set("EventID", 4625).
+			Set("TargetDomainName", "Domain").
+			Set("TargetUserName", "A"),
+	}
+
+	base_rule_Failed_logon = `
+title: Failed logon
+name: failed_logon
+description: Detect when logon is failed
+logsource:
+   product: windows
+   service: security
+detection:
+   selection:
+     EventID: 4625
+   condition: selection
+---
+`
+
+	loginEvents_field_mappings = ordereddict.NewDict().
+		// Default time attribute should be generated by the log source
+		Set("Timestamp", "x=>x.Timestamp").
+		Set("EventID", "x=>x.EventID").
+		Set("SubjectUserName", "x=>x.SubjectUserName").
+		Set("TargetDomainName", "x=>x.TargetDomainName").
+		Set("TargetUserName", "x=>x.TargetUserName")
+
+	high_priv_enum = `
+title: High-privilege group enumeration
+name: privileged_group_enumeration
+status: stable
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4799
+    TargetUserName:
+      - Administrators
+      - Remote Desktop Users
+      - Remote Management Users
+      - Distributed COM Users
+  condition: selection
+level: informational
+falsepositives:
+  - Administrative activity
+  - Directory assessment tools
+---
+`
+
+	sigmaCorrelationTestCases = []testCase{
+		{
+			description: "Correlation Test Too few hits",
+			rule: base_rule_Failed_logon + `
+title: Multiple failed logons for a single user (possible brute force attack)
+correlation:
+    type: event_count
+    rules:
+        - failed_logon # Referenced here
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 3
+`,
+			fieldmappings: loginEvents_field_mappings,
+
+			// Send 2 login events for user A within 5 minutes
+			rows: loginEvents,
+		}, {
+			description: "Correlation Test Right number of hits",
+			rule: base_rule_Failed_logon + `
+title: Multiple failed logons for a single user (possible brute force attack)
+correlation:
+    type: event_count
+    rules:
+        - failed_logon # Referenced here
+    group-by:
+        - TargetUserName
+        - TargetDomainName
+    timespan: 5m
+    condition:
+        gte: 3
+
+# Make sure the details and enrichment comes from the correlation rule.
+details: Detected Multiple Failed Logins
+enrichment: x=>x._Correlations
+`,
+			fieldmappings: loginEvents_field_mappings,
+
+			// Send 3 login events for user A within 5 minutes
+			rows: append(loginEvents, ordereddict.NewDict().
+				Set("Timestamp", "2024-10-10T12:25:00+10").
+				Set("EventID", 4625).
+				Set("TargetDomainName", "Domain").
+				Set("TargetUserName", "A")),
+		}, {
+
+			// Example taken from
+			// https://sigmahq.io/docs/meta/correlations.html#value-count
+			description: "Correlation Test VALUE_COUNT",
+			rule: high_priv_enum + `
+title: Enumeration of multiple high-privilege groups by tools like BloodHound
+status: stable
+correlation:
+  type: value_count
+  rules:
+    - privileged_group_enumeration
+  group-by:
+    - SubjectUserName
+  timespan: 15m
+  condition:
+    gte: 4
+    field: TargetUserName
+level: high
+falsepositives:
+  - Administrative activity
+  - Directory assessment tools
+`,
+			fieldmappings: loginEvents_field_mappings,
+			rows: []*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:22:00+10").
+					Set("EventID", 4799).
+					Set("SubjectUserName", "admin").
+					Set("TargetUserName", "Administrators"),
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:23:00+10").
+					Set("EventID", 4799).
+					Set("SubjectUserName", "admin").
+					Set("TargetUserName", "Remote Desktop Users"),
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:24:00+10").
+					Set("EventID", 4799).
+					Set("SubjectUserName", "admin").
+					Set("TargetUserName", "Remote Management Users"),
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:25:00+10").
+					Set("EventID", 4799).
+					Set("SubjectUserName", "admin").
+					Set("TargetUserName", "Distributed COM Users"),
+			},
+		}, {
+
+			// Example taken from
+			// https://sigmahq.io/docs/meta/correlations.html#temporal
+			description: "Correlation Test TEMPORAL",
+			rule: `
+title: CVE-2023-22518 Exploitation Attempt - Suspicious Confluence Child Process (Windows)
+id: 1ddaa9a4-eb0b-4398-a9fe-7b018f9e23db
+logsource:
+  product: windows # Just for testing
+  service: security
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '\tomcat8.exe'
+            - '\tomcat9.exe'
+            - '\tomcat10.exe'
+        ParentCommandLine|contains: 'confluence'
+    selection_child:
+        # Note: Only children associated with known campaigns
+        - Image|endswith:
+              - '\cmd.exe'
+              - '\powershell.exe'
+        - OriginalFileName:
+              - 'Cmd.Exe'
+              - 'PowerShell.EXE'
+    condition: all of selection_*
+---
+title: CVE-2023-22518 Exploitation Attempt - Vulnerable Endpoint Connection (Webserver)
+id: a902d249-9b9c-4dc4-8fd0-fbe528ef965c
+logsource:
+  product: windows # Just for testing
+  service: security
+detection:
+    selection_method:
+        cs-method: 'POST'
+    selection_uris:
+        cs-uri-query|contains:
+          # Exploitable endpoints
+            - '/json/setup-restore-local.action'
+            - '/json/setup-restore-progress.action'
+            - '/json/setup-restore.action'
+            - '/server-info.action'
+            - '/setup/setupadministrator.action'
+    selection_status:
+        # Response code may be indicative of exploitation success, but is not always the case
+        sc-status:
+            - 200
+            - 302
+            - 405
+    condition: all of selection_*
+---
+title: CVE-2023-22518 Exploit Chain
+correlation:
+  type: temporal
+  rules:
+    - a902d249-9b9c-4dc4-8fd0-fbe528ef965c
+    - 1ddaa9a4-eb0b-4398-a9fe-7b018f9e23db
+  timespan: 10m
+level: high
+`,
+			fieldmappings: ordereddict.NewDict().
+				// Default time attribute should be generated by the log source
+				Set("Timestamp", "x=>x.Timestamp").
+				Set("ParentImage", "x=>x.ParentImage").
+				Set("ParentCommandLine", "x=>x.ParentCommandLine").
+				Set("Image", "x=>x.Image").
+				Set("OriginalFileName", "x=>x.OriginalFileName").
+				Set("cs-method", "x=>x.`cs-method`").
+				Set("cs-uri-query", "x=>x.`cs-uri-query`").
+				Set("sc-status", "x=>x.`sc-status`"),
+			rows: []*ordereddict.Dict{
+				// Should trigger 1ddaa9a4-eb0b-4398-a9fe-7b018f9e23db
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:22:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat9.exe").
+					Set("ParentCommandLine", "confluence").
+					Set("Image", "C:\\Windows\\cmd.exe").
+					Set("OriginalFileName", "Cmd.Exe"),
+
+				// Should trigger a902d249-9b9c-4dc4-8fd0-fbe528ef965c
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:23:00+10").
+					Set("cs-method", "POST").
+					Set("cs-uri-query", "/app//json/setup-restore-local.action").
+					Set("sc-status", 200),
+			},
+		}, {
+			description: "Correlation Test TEMPORAL Partial match should not fire",
+			rule:        simpleTemporalCorrelationRule,
+			fieldmappings: ordereddict.NewDict().
+				Set("ParentImage", "x=>x.ParentImage").
+				Set("cs-method", "x=>x.`cs-method`"),
+			rows: []*ordereddict.Dict{
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:22:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:23:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:24:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+			},
+		},
+		{
+			description: "Correlation Test TEMPORAL Multiple match",
+			rule:        simpleTemporalCorrelationRule,
+			// The _Correlations result should show all 3 r1 matches
+			// and one r2 match
+			fieldmappings: ordereddict.NewDict().
+				Set("ParentImage", "x=>x.ParentImage").
+				Set("cs-method", "x=>x.`cs-method`"),
+			rows: []*ordereddict.Dict{
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:22:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:23:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:24:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r2
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:25:00+10").
+					Set("cs-method", "POST"),
+			},
+		}, {
+			description: "Correlation Test TEMPORAL Expired match should not fire",
+			rule:        simpleTemporalCorrelationRule,
+			fieldmappings: ordereddict.NewDict().
+				Set("ParentImage", "x=>x.ParentImage").
+				Set("cs-method", "x=>x.`cs-method`"),
+			rows: []*ordereddict.Dict{
+				// Should trigger r1
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:22:00+10").
+					Set("ParentImage", "C:\\Windows\\tomcat8.exe"),
+
+				// Should trigger r2 but more than 10 min later
+				ordereddict.NewDict().
+					Set("Timestamp", "2024-10-10T12:35:00+10").
+					Set("cs-method", "POST"),
+			},
+		}, {
+			// Two correlations referencing one source rule must both fire.
+			description: "Correlation Test Multiple correlations share one source rule",
+			rule: `
+title: Marker File Created
+id: 11111111-1111-1111-1111-111111111111
+name: marker_file_created
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 9999
+  condition: selection
+level: low
+---
+title: Correlation A
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+correlation:
+  type: event_count
+  rules:
+    - marker_file_created
+  group-by:
+    - Computer
+  timespan: 10s
+  condition:
+    gte: 1
+level: high
+---
+title: Correlation B
+id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+correlation:
+  type: event_count
+  rules:
+    - marker_file_created
+  group-by:
+    - Computer
+  timespan: 10s
+  condition:
+    gte: 1
+level: high
+`,
+			fieldmappings: ordereddict.NewDict().
+				Set("Timestamp", "x=>x.Timestamp").
+				Set("EventID", "x=>x.EventID").
+				Set("Computer", "x=>x.Computer"),
+			rows: []*ordereddict.Dict{
+				ordereddict.NewDict().
+					Set("Timestamp", "2026-05-18T12:00:00+10:00").
+					Set("EventID", 9999).
+					Set("Computer", "test"),
+			},
+			// One row per correlation rule.
+			expected_count: 2,
+		},
+	}
+)
+
+func (self *SigmaTestSuite) TestSigmaCorrelations() {
+	result := ordereddict.NewDict()
+
+	ctx := context.Background()
+	scope := vql_subsystem.MakeScope().
+		AppendVars(ordereddict.NewDict().Set("ScopeVar", "I'm a scope var:"))
+
+	scope.SetLogger(log.New(os.Stdout, "", 0))
+
+	defer scope.Close()
+
+	plugin := SigmaPlugin{}
+
+	for idx, test_case := range sigmaCorrelationTestCases {
+		fmt.Printf("Running case: %v: %v\n", idx, test_case.description)
+
+		if false && idx != 2 {
+			continue
+		}
+
+		log_collector := &bytes.Buffer{}
+		scope.SetLogger(log.New(log_collector, "", 0))
+
+		rows := []types.Row{}
+		args := ordereddict.NewDict().
+			Set("rules", strings.Split(test_case.rule, "---")).
+			Set("log_sources", &LogSourceProvider{
+				queries: map[string]types.StoredQuery{
+					"*/windows/security": &MockQuery{
+						rows: test_case.rows,
+					},
+				},
+			}).
+			Set("field_mapping", test_case.fieldmappings)
+
+		if test_case.debug {
+			args.Set("debug", true)
+		}
+
+		if test_case.default_details != "" {
+			args.Set("default_details", test_case.default_details)
+		}
+
+		for row := range plugin.Call(ctx, scope, args) {
+			rows = append(rows, row)
+		}
+
+		sort.Slice(rows, func(i, j int) bool {
+			serialized1 := json.MustMarshalString(rows[i])
+			serialized2 := json.MustMarshalString(rows[j])
+			return string(serialized1) < string(serialized2)
+		})
+
+		if test_case.expected_count > 0 {
+			assert.Equal(self.T(), test_case.expected_count, len(rows),
+				"%s: expected %d rows, got %d",
+				test_case.description, test_case.expected_count, len(rows))
+		}
+
+		result.Set(test_case.description, rows)
+
+		if test_case.log_regex != "" {
+			assert.Regexp(self.T(), test_case.log_regex,
+				log_collector.String())
+		}
+
+		os.Stderr.Write(log_collector.Bytes())
+	}
+
+	goldie.Assert(self.T(), "TestSigmaCorrelation",
 		json.MustMarshalIndent(result))
 }
 

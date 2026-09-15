@@ -21,6 +21,7 @@ import {CancelToken} from 'axios';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import VeloForm from "../forms/form.jsx";
 import FlowLink from "../flows/flow-link.jsx";
+import {setItem, schema} from '../core/storage.jsx';
 
 import T from '../i8n/i8n.jsx';
 
@@ -30,6 +31,11 @@ import {
   useContextMenu,
 } from "react-contexify";
 
+// If the flow in the running state. Flows can be in several states
+// that mean they are still running for our purposes.
+const is_running_re = new RegExp(
+    "running|waiting|in_progress|unresponsive", "i");
+const is_running = x=>is_running_re.test(x);
 
 const POLL_TIME = 2000;
 
@@ -228,8 +234,11 @@ class VeloFileList extends Component {
         // Update the router with the new path.
         let vfs_path = [...path];
         vfs_path.push(row.Name);
+        let url_path = Join(vfs_path);
+        setItem(schema.CurrentVFSPathKey, url_path);
         this.props.history.push(
-           "/vfs/"+ this.props.client.client_id + EncodePathInURL(Join(vfs_path)));
+            "/vfs/"+ this.props.client.client_id +
+                EncodePathInURL(url_path));
     }
 
     startRecursiveVfsRefreshOperation = () => {
@@ -250,7 +259,9 @@ class VeloFileList extends Component {
             }
 
             // Hold onto the flow id so we can track progress.
-            this.setState({lastRecursiveRefreshFlowId: response.data.flow_id});
+            this.setState({
+                lastRecursiveRefreshFlowId: response.data.flow_id,
+            });
 
             if (this.recursive_interval) {
                 clearInterval(this.recursive_interval);
@@ -268,13 +279,20 @@ class VeloFileList extends Component {
                         return;
                     }
                     let context = response.data.context;
-                    if (context.state === "RUNNING") {
+                    if (is_running(context.state)) {
                         this.setState({lastRecursiveRefreshData: context});
                         return;
                     }
 
                     // The node is refreshed with the correct flow id,
                     // we can stop polling.
+                    clearInterval(this.recursive_interval);
+                    this.recursive_interval = undefined;
+                    this.props.bumpVersion();
+                    this.setState({
+                        lastRecursiveRefreshData: {},
+                        lastRecursiveRefreshFlowId: null});
+                }).catch(e=>{
                     clearInterval(this.recursive_interval);
                     this.recursive_interval = undefined;
                     this.props.bumpVersion();
@@ -340,8 +358,8 @@ class VeloFileList extends Component {
                     client_id: this.props.client.client_id,
                     flow_id: this.state.lastRecursiveDownloadFlowId,
                 }, this.source.token).then((response) => {
-                    let context = response.data.context;
-                    if (!context || context.state === "RUNNING") {
+                    let context = response.data && response.data.context;
+                    if (!context || is_running(context.state)) {
                         this.setState({lastRecursiveDownloadData: context});
                         return;
                     }
@@ -377,6 +395,7 @@ class VeloFileList extends Component {
     // Determine if the recursive SyncDir button should spin.
     shouldSpinRecursiveSyncDir = ()=>{
         return _.isEqual(this.state.current_path, this.props.node.path) &&
+            this.state.lastRecursiveRefreshFlowId &&
             _.isEqual(this.state.recursive_sync_dir_version, this.props.version);
     }
 
@@ -405,6 +424,7 @@ class VeloFileList extends Component {
         this.setState({current_path: this.props.node.path,
                        sync_dir_version: this.props.version});
 
+        console.log(this.props.version);
         let path = this.props.node.path || [];
         api.post("v1/VFSRefreshDirectory", {
             client_id: this.props.client.client_id,
@@ -472,7 +492,7 @@ class VeloFileList extends Component {
                     <Button onClick={this.cancelRecursiveRefresh}
                             variant="default">
                       <FontAwesomeIcon icon="spinner" spin/>
-                      <span className="button-label">Synced {(
+                      <span className="button-label">{T("Synced")} {(
                           this.state.lastRecursiveRefreshData.total_collected_rows || 0) + " files"}
                       </span>
                       <span className="button-label"><FontAwesomeIcon icon="stop"/></span>
@@ -692,6 +712,7 @@ class VeloFileList extends Component {
                   params={{
                       client_id: this.props.client.client_id,
                       flow_id: this.props.node.flow_id,
+                      artifact: "System.VFS.ListDirectory/Listing",
                       vfs_components: this.props.node.path,
                   }}
                   selectRow={ selectRow }

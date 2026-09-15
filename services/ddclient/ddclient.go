@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"strings"
@@ -14,11 +13,9 @@ import (
 	"time"
 
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/logging"
-)
-
-var (
-	ddns_service = "domains.google.com"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type DynDNSService struct {
@@ -153,7 +150,7 @@ func StartDynDNSService(
 	// Set sensible defaults that should work reliably most of the
 	// time.
 	if result.external_ip_url == "" {
-		result.external_ip_url = "https://domains.google.com/checkip"
+		result.external_ip_url = "https://wtfismyip.com/text"
 	}
 
 	if result.dns_server == "" {
@@ -176,7 +173,7 @@ func (self *DynDNSService) GetExternalIp() (string, error) {
 		return "Unable to determine external IP: %v ", err
 	}
 	defer resp.Body.Close()
-	ip, err := ioutil.ReadAll(resp.Body)
+	ip, err := utils.ReadAllWithLimit(resp.Body, constants.MAX_MEMORY)
 	result := strings.TrimSpace(string(ip))
 
 	if err != nil && err != io.EOF {

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/artifacts"
@@ -19,7 +20,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -60,8 +60,7 @@ func (self CollectPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-
-		defer vql_subsystem.RegisterMonitor("collect", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "collect", args)()
 
 		// This plugin allows one to create files (for the output
 		// zip), It is very privileged.
@@ -89,12 +88,22 @@ func (self CollectPlugin) Call(
 		collection_manager.remapping = arg.Remapping
 
 		// Make sure the Close() is called under any circumstances.
-		vql_subsystem.GetRootScope(scope).AddDestructor(func() {
+		err = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
 			collection_manager.Close()
 		})
-		defer collection_manager.Close()
+		if err != nil {
+			scope.Log("collect: %v", err)
+		}
 
-		request, err := self.configureCollection(ctx, collection_manager, arg)
+		defer func() {
+			err := collection_manager.Close()
+			if err != nil {
+				scope.Log("collect: While closing container: %v", err)
+			}
+		}()
+
+		request, err := self.configureCollection(
+			ctx, scope, collection_manager, arg)
 		if err != nil {
 			scope.Log("collect: %v", err)
 			return
@@ -113,8 +122,10 @@ func (self CollectPlugin) Call(
 
 // Configures the collection manager with the provided args.
 func (self CollectPlugin) configureCollection(
-	ctx context.Context, manager *collectionManager, arg *CollectPluginArgs) (
-	*flows_proto.ArtifactCollectorArgs, error) {
+	ctx context.Context,
+	scope vfilter.Scope,
+	manager *collectionManager,
+	arg *CollectPluginArgs) (*flows_proto.ArtifactCollectorArgs, error) {
 
 	format, err := reporting.GetContainerFormat(arg.Format)
 	if err != nil {
@@ -147,6 +158,12 @@ func (self CollectPlugin) configureCollection(
 	// If required create an output container
 	if arg.Output != "" {
 
+		// Make sure we are allowed to write there.
+		err = file.CheckPath(arg.Output)
+		if err != nil {
+			return nil, err
+		}
+
 		// Set any metadata for the container.
 		if !utils.IsNil(arg.Metadata) {
 			manager.SetMetadata(arg.Metadata)
@@ -171,7 +188,8 @@ func (self CollectPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *
 		Name:     "collect",
 		Doc:      "Collect artifacts into a local file.",
 		ArgType:  type_map.AddType(scope, &CollectPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
+		Version:  2,
 	}
 }
 
@@ -355,7 +373,11 @@ func AddSpecProtobuf(
 
 			case "json", "json_array":
 				if !is_str {
-					value_str = json.StringIndent(value_any)
+					value, err := json.MarshalIndent(value_any)
+					if err != nil {
+						return err
+					}
+					value_str = string(value)
 				}
 			}
 
@@ -380,9 +402,9 @@ func CheckArtifactModification(
 	var ok bool
 	var err error
 
-	acl_manager, ok := artifacts.GetACLManager(scope)
-	if !ok {
-		return nil
+	acl_manager, err := artifacts.GetACLManager(scope)
+	if err != nil {
+		return err
 	}
 
 	switch strings.ToUpper(artifact.Type) {
@@ -413,9 +435,9 @@ func CheckArtifactCollection(
 	var ok bool
 	var err error
 
-	acl_manager, ok := artifacts.GetACLManager(scope)
-	if !ok {
-		return nil
+	acl_manager, err := artifacts.GetACLManager(scope)
+	if err != nil {
+		return err
 	}
 
 	switch strings.ToUpper(artifact.Type) {

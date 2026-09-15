@@ -154,9 +154,7 @@ class VeloFileStats extends Component {
                                             fs_components: selectedRow.Download.components,
                                             vfs_path: selectedRow.Name,
                                             zip: !no_password,
-                                        }, {
-                                            internal: true,
-                                            arrayFormat: 'brackets'})}>
+                                        })}>
                                   { !no_password &&
                                     <div className="velo-icon">
                                       <FontAwesomeIcon icon="lock" />

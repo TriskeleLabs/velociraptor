@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 func (self SanityChecks) CheckForLockdown(
@@ -17,22 +20,32 @@ func (self SanityChecks) CheckForLockdown(
 	}
 
 	lockdown_token := &acl_proto.ApiClientACL{
-		ArtifactWriter:       true,
+		ArtifactWriter: true,
+
+		// Labeling clients can move them between label groups which
+		// may cause new artifacts to be collected automatically
+		// (e.g. Quarantine).
+		LabelClients:         true,
 		ServerArtifactWriter: true,
 		CollectClient:        true,
 		CollectServer:        true,
 		StartHunt:            true,
 		Execve:               true,
 		ServerAdmin:          true,
+		Network:              true,
 		FilesystemWrite:      true,
 		FilesystemRead:       true,
 		MachineState:         true,
+		CollectBasic:         true,
+
+		Impersonation: true,
+		OrgAdmin:      true,
 	}
 
-	if config_obj.Defaults != nil &&
-		len(config_obj.Defaults.LockdownDeniedPermissions) > 0 {
+	if config_obj.Security != nil &&
+		len(config_obj.Security.LockdownDeniedPermissions) > 0 {
 		lockdown_token = &acl_proto.ApiClientACL{}
-		for _, perm_name := range config_obj.Defaults.LockdownDeniedPermissions {
+		for _, perm_name := range config_obj.Security.LockdownDeniedPermissions {
 			err := acls.SetTokenPermission(lockdown_token, perm_name)
 			if err != nil {
 				return fmt.Errorf("Invalid permission %v while parsing lockdown_denied_permissions",
@@ -42,8 +55,20 @@ func (self SanityChecks) CheckForLockdown(
 	}
 
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-	logger.Info("<red>Server is in lockdown!</> The following permissions are denied: %v",
+	msg := fmt.Sprintf("<red>Server is in lockdown!</> The following permissions are denied: %v",
 		acls.DescribePermissions(lockdown_token))
+	logger.Info("%v", msg)
+
+	err := services.MessageAllUsers(ctx,
+		utils.GetSuperuserName(config_obj),
+		[]string{config_obj.OrgId},
+		ordereddict.NewDict().
+			Set("Error", "Lockdown").
+			Set("Message", msg),
+	)
+	if err != nil {
+		return err
+	}
 
 	acls.SetLockdownToken(lockdown_token)
 	return nil

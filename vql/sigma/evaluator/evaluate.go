@@ -3,20 +3,30 @@ package evaluator
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/bradleyjkemp/sigma-go"
+	"github.com/Velocidex/sigma-go"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
 )
 
 type Result struct {
-	Match            bool            // whether this event matches the Sigma rule
-	SearchResults    map[string]bool // For each Search, whether it matched the event
-	ConditionResults []bool          // For each Condition, whether it matched the event
+	// whether this event matches the Sigma rule
+	Match bool `json:"match,omitempty"`
+
+	// For each Search, whether it matched the event
+	SearchResults map[string]bool `json:"search_results,omitempty"`
+
+	// For each Condition, whether it matched the event
+	ConditionResults []bool `json:"condition_results,omitempty"`
+
+	CorrelationHits []*Event `json:"correlation_hits,omitempty"`
 }
 
 type VQLRuleEvaluator struct {
+	hit_count uint64
+
 	sigma.Rule
 	scope types.Scope
 
@@ -25,18 +35,46 @@ type VQLRuleEvaluator struct {
 	lambda      *vfilter.Lambda
 	lambda_args *ordereddict.Dict
 
-	fieldmappings []FieldMappingRecord
+	// Rule may specify an enrichment lambda - this is applied after
+	// matching and just adds additional information for reporting.
+	enrichment *vfilter.Lambda
+
+	fieldmappings *FieldMappingResolver
+
+	// If this rule has correlators, then forward the match to each of
+	// them. A source rule may be referenced by more than one correlation.
+	Correlators []*SigmaCorrelator `json:"correlators,omitempty" yaml:"correlators,omitempty"`
 }
 
-type FieldMappingRecord struct {
-	Name   string
-	Lambda *vfilter.Lambda
+func (self *VQLRuleEvaluator) GetCorrelatorRule() *VQLRuleEvaluator {
+	if len(self.Correlators) == 0 {
+		return self
+	}
+
+	res := &VQLRuleEvaluator{
+		Rule:          self.Correlators[0].Rule,
+		fieldmappings: self.fieldmappings,
+		scope:         self.scope,
+	}
+
+	err := res.CheckRule()
+	if err != nil {
+		return self
+	}
+
+	return res
+}
+
+func (self *VQLRuleEvaluator) Stats(in *ordereddict.Dict) *ordereddict.Dict {
+	hit_count := atomic.LoadUint64(&self.hit_count)
+
+	return in.Set("RuleTitle", self.Rule.Title).Set("Hits", hit_count)
 }
 
 func NewVQLRuleEvaluator(
 	scope types.Scope,
 	rule sigma.Rule,
-	fieldmappings []FieldMappingRecord) *VQLRuleEvaluator {
+	fieldmappings *FieldMappingResolver) *VQLRuleEvaluator {
 	result := &VQLRuleEvaluator{
 		scope:         scope,
 		Rule:          rule,
@@ -50,6 +88,28 @@ func (self *VQLRuleEvaluator) evaluateAggregationExpression(
 	ctx context.Context, conditionIndex int,
 	aggregation sigma.AggregationExpr, event *Event) (bool, error) {
 	return false, nil
+}
+
+// A rule may specify an enrichment lambda. This is filled **after**
+// the rule matches and just adds additional information for
+// reporting.
+
+// This is an optimization - additional fields are only calculated for
+// matching rules instead of every field.
+func (self *VQLRuleEvaluator) MaybeEnrichForReporting(
+	ctx context.Context, scope types.Scope, event *Event) *Event {
+	// No enrichment - pass through
+	if self.enrichment == nil {
+		return event
+	}
+
+	subscope := scope.Copy().AppendVars(self.lambda_args)
+	defer subscope.Close()
+
+	// Update the row now so the details can refer to enriched fields.
+	enrichment := self.enrichment.Reduce(ctx, subscope, []vfilter.Any{event.Copy()})
+
+	return NewEvent(event.Set("Enrichment", enrichment))
 }
 
 func (self *VQLRuleEvaluator) MaybeEnrichWithVQL(
@@ -74,12 +134,7 @@ func (self *VQLRuleEvaluator) MaybeEnrichWithVQL(
 }
 
 func (self *VQLRuleEvaluator) Match(ctx context.Context,
-	scope types.Scope, event *Event) (Result, error) {
-	subscope := scope.Copy().AppendVars(
-		ordereddict.NewDict().
-			Set("Event", event).
-			Set("Rule", self.Rule))
-	defer subscope.Close()
+	scope types.Scope, event *Event) (*Result, error) {
 
 	result := Result{
 		Match:            false,
@@ -92,9 +147,9 @@ func (self *VQLRuleEvaluator) Match(ctx context.Context,
 	for identifier, search := range self.Detection.Searches {
 		var err error
 
-		eval_result, err := self.evaluateSearch(ctx, subscope, search, event)
+		eval_result, err := self.evaluateSearch(ctx, scope, search, event)
 		if err != nil {
-			return Result{}, fmt.Errorf("error evaluating search %s: %w", identifier, err)
+			return nil, fmt.Errorf("error evaluating search %s: %w", identifier, err)
 		}
 		result.SearchResults[identifier] = eval_result
 	}
@@ -118,7 +173,7 @@ func (self *VQLRuleEvaluator) Match(ctx context.Context,
 		case searchMatches && condition.Aggregation != nil:
 			aggregationMatches, err := self.evaluateAggregationExpression(ctx, conditionIndex, condition.Aggregation, event)
 			if err != nil {
-				return Result{}, err
+				return nil, err
 			}
 			if aggregationMatches {
 				result.Match = true
@@ -128,5 +183,22 @@ func (self *VQLRuleEvaluator) Match(ctx context.Context,
 		}
 	}
 
-	return result, nil
+	// If we get here the base rule would have matched. When there are
+	// correlators the pool dispatches the event to each of them and
+	// emits one row per fired correlation.
+	if result.Match && len(self.Correlators) > 0 {
+		// Tag the event with the rule that actually matched it. This
+		// makes it easy to see which rule from the correlation
+		// matched each event.
+		event.Set("_MatchingRule", self.Rule.Title)
+
+		return &result, nil
+	}
+
+	// Record the total hits
+	if result.Match {
+		atomic.AddUint64(&self.hit_count, 1)
+	}
+
+	return &result, nil
 }

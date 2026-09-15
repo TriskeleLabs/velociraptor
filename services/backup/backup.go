@@ -16,8 +16,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/utils"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -27,7 +27,48 @@ type BackupService struct {
 	wg         *sync.WaitGroup
 	config_obj *config_proto.Config
 
+	delay         time.Duration
+	last_run      time.Time
 	registrations []services.BackupProvider
+	stats         []*BackupTrackerStats
+}
+
+func (self *BackupService) Start() {
+	defer self.wg.Done()
+
+	logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+	logger.Info("Starting <green>Backup Services</> for %v every %v",
+		services.GetOrgName(self.config_obj), self.delay)
+
+	for {
+		self.mu.Lock()
+		last_run := self.last_run
+		self.mu.Unlock()
+
+		select {
+		case <-self.ctx.Done():
+			return
+
+		case <-utils.GetTime().After(utils.Jitter(self.delay)):
+			// Avoid doing backups too quickly. This is mainly for
+			// tests where the time is mocked for the After(delay)
+			// above does not work.
+			if utils.GetTime().Now().Sub(last_run) < time.Second {
+				if !utils.SleepWithCtx(self.ctx, time.Minute) {
+					return
+				}
+				continue
+			}
+
+			export_path := paths.NewBackupPathManager().BackupFile()
+			_, err := self.CreateBackup(export_path)
+			if err != nil {
+				logger := logging.GetLogger(
+					self.config_obj, &logging.FrontendComponent)
+				logger.Error("Backup Service: CreateBackup: %v", err)
+			}
+		}
+	}
 }
 
 func (self *BackupService) CreateBackup(
@@ -37,7 +78,17 @@ func (self *BackupService) CreateBackup(
 	defer self.mu.Unlock()
 
 	logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
-	start := utils.GetTime().Now()
+	self.last_run = utils.GetTime().Now()
+
+	tracker_stats := NewBackupTrackerStats(export_path)
+	defer func() {
+		tracker_stats.Stats = append([]services.BackupStat{}, stats...)
+
+		self.stats = append(self.stats, tracker_stats)
+		if len(self.stats) > 10 {
+			self.stats = self.stats[len(self.stats)-10:]
+		}
+	}()
 
 	// Create a container to hold the backup
 	file_store_factory := file_store.GetFileStore(self.config_obj)
@@ -50,11 +101,14 @@ func (self *BackupService) CreateBackup(
 		return nil, err
 	}
 
-	fd.Truncate()
+	err = fd.Truncate()
+	if err != nil {
+		return nil, err
+	}
 
 	// Create a container with the file.
 	container, err := reporting.NewContainerFromWriter(
-		self.config_obj, fd, "", 5, nil)
+		export_path.String(), self.config_obj, fd, "", 5, nil)
 	if err != nil {
 		fd.Close()
 		return nil, err
@@ -65,29 +119,74 @@ func (self *BackupService) CreateBackup(
 
 		logger.Info("BackupService: <green>Completed Backup to %v (size %v) in %v</>",
 			export_path.String(), zip_stats.TotalCompressedBytes,
-			utils.GetTime().Now().Sub(start))
+			utils.GetTime().Now().Sub(self.last_run))
 
 		stats = append(stats, services.BackupStat{
 			Name: "BackupService",
 			Message: fmt.Sprintf("Completed Backup to %v (size %v) in %v",
 				export_path.String(), zip_stats.TotalCompressedBytes,
-				utils.GetTime().Now().Sub(start)),
+				utils.GetTime().Now().Sub(self.last_run)),
 		})
 
 	}()
 
 	defer container.Close()
 
-	// Now we can dump all providers into the file.
-	scope := vql_subsystem.MakeScope()
+	org_container := &containerDelegate{
+		Container: container,
+	}
 
-	for _, provider := range self.registrations {
-		dest := strings.Join(provider.Name(), "/")
-		stat := services.BackupStat{
-			Name: provider.ProviderName(),
+	// The root org is responsible for dumping all child orgs as well.
+	if utils.IsRootOrg(self.config_obj.OrgId) {
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			return stats, err
 		}
 
-		rows, err := provider.BackupResults(self.ctx, self.wg)
+		// Ask all the other orgs to also write their backups in this
+		// container.
+		for _, org := range org_manager.ListOrgs() {
+			backup, err := org_manager.Services(org.Id).BackupService()
+			if err != nil {
+				continue
+			}
+
+			prefix := fmt.Sprintf("orgs/%v", org.Id)
+			org_container := &containerDelegate{
+				Container: container,
+				prefix:    prefix,
+			}
+			org_stats, _ := backup.(*BackupService).writeBackups(
+				org_container, prefix)
+			stats = append(stats, org_stats...)
+		}
+
+		// Not the root org, just backup this org only.
+	} else if !utils.IsRootOrg(self.config_obj.OrgId) {
+		prefix := fmt.Sprintf("orgs/%v", utils.GetOrgId(self.config_obj))
+		org_stats, _ := self.writeBackups(org_container, prefix)
+		stats = append(stats, org_stats...)
+	}
+
+	return stats, err
+}
+
+// Invoke each provider to produce the backup rows.
+func (self *BackupService) writeBackups(
+	container services.BackupContainerWriter,
+	prefix string) (stats []services.BackupStat, err error) {
+
+	// Now we can dump all providers into the file.
+	logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+
+	for _, provider := range self.registrations {
+		dest := strings.Join(append([]string{prefix}, provider.Name()...), "/")
+		stat := services.BackupStat{
+			Name:  provider.ProviderName(),
+			OrgId: utils.GetOrgId(self.config_obj),
+		}
+
+		rows, err := provider.BackupResults(self.ctx, self.wg, container)
 		if err != nil {
 			logger.Info("BackupService: <red>Error writing to %v: %v",
 				dest, err)
@@ -98,8 +197,8 @@ func (self *BackupService) CreateBackup(
 		}
 
 		// Write the results to the container now
-		total_rows, err := container.WriteResultSet(self.ctx, self.config_obj,
-			scope, reporting.ContainerFormatJson, dest, rows)
+		total_rows, err := container.WriteResultSet(
+			self.ctx, self.config_obj, dest, rows)
 		if err != nil {
 			logger.Info("BackupService: <red>Error writing to %v: %v",
 				dest, err)
@@ -117,7 +216,8 @@ func (self *BackupService) CreateBackup(
 
 // Opens a backup file and recovers all the data in it.
 func (self *BackupService) RestoreBackup(
-	export_path api.FSPathSpec) (stats []services.BackupStat, err error) {
+	export_path api.FSPathSpec,
+	opts services.BackupRestoreOptions) (stats []services.BackupStat, err error) {
 	// Create a container to hold the backup
 	file_store_factory := file_store.GetFileStore(self.config_obj)
 
@@ -141,14 +241,28 @@ func (self *BackupService) RestoreBackup(
 
 	logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
 
+	prefix := opts.Prefix
+	if prefix == "" {
+		prefix = fmt.Sprintf("orgs/%v", utils.GetOrgId(self.config_obj))
+	}
+
 	for _, provider := range self.registrations {
-		stat, err := self.feedProvider(provider, zip_reader)
+		if opts.ProviderRegex != nil && !opts.ProviderRegex.MatchString(
+			provider.ProviderName()) {
+			continue
+		}
+
+		stat, err := self.feedProvider(provider, zipDelegate{
+			Reader: zip_reader,
+			prefix: prefix,
+		})
 		if err != nil {
 			dest := strings.Join(provider.Name(), "/")
 			logger.Info("BackupService: <red>Error restoring to %v: %v",
 				dest, err)
 			stat.Name = provider.ProviderName()
 			stat.Error = err
+			stat.OrgId = utils.GetOrgId(self.config_obj)
 		}
 		stats = append(stats, stat)
 	}
@@ -156,9 +270,10 @@ func (self *BackupService) RestoreBackup(
 	return stats, nil
 }
 
+// Feed the provider from backup rows so it can restore the state.
 func (self *BackupService) feedProvider(
 	provider services.BackupProvider,
-	container *zip.Reader) (stat services.BackupStat, err error) {
+	container services.BackupContainerReader) (stat services.BackupStat, err error) {
 
 	dest := strings.Join(provider.Name(), "/")
 	member, err := container.Open(dest)
@@ -180,6 +295,8 @@ func (self *BackupService) feedProvider(
 		// Wait here until the provider is done.
 		stat = <-results
 		stat.Name = provider.ProviderName()
+		stat.OrgId = utils.GetOrgId(self.config_obj)
+
 		if stat.Error != nil {
 			err = stat.Error
 		}
@@ -198,12 +315,12 @@ func (self *BackupService) feedProvider(
 		defer close(results)
 
 		// Preserve the provider error as our return
-		stat, err := provider.Restore(sub_ctx, output)
+		stat, err := provider.Restore(sub_ctx, container, output)
 		if err != nil {
 			stat.Error = err
 		}
 
-		// Stop new rows to be written - we dont care any more.
+		// Stop new rows to be written - we don't care any more.
 		cancel()
 
 		// Pass the result to the main routine.
@@ -239,10 +356,12 @@ func NewBackupService(
 		ctx:        ctx,
 		wg:         wg,
 		config_obj: config_obj,
+		delay:      time.Hour * 24,
+		last_run:   utils.GetTime().Now(),
 	}
 
 	// Every day
-	delay := time.Hour * 24
+
 	if config_obj.Defaults != nil {
 		// Backups are disabled.
 		if config_obj.Defaults.BackupPeriodSeconds < 0 {
@@ -250,41 +369,21 @@ func NewBackupService(
 		}
 
 		if config_obj.Defaults.BackupPeriodSeconds > 0 {
-			delay = time.Duration(
+			result.delay = time.Duration(
 				config_obj.Defaults.BackupPeriodSeconds) * time.Second
 		}
 	}
 
-	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-	logger.Info("Starting <green>Backup Services</> for %v every %v",
-		services.GetOrgName(config_obj), delay)
-
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	go result.Start()
 
-		last_run := utils.GetTime().Now()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-
-			case <-utils.GetTime().After(utils.Jitter(delay)):
-				// Avoid doing backups too quickly. This is mainly for
-				// tests where the time is mocked for the After(delay)
-				// above does not work.
-				if utils.GetTime().Now().Sub(last_run) < time.Second {
-					utils.SleepWithCtx(ctx, time.Minute)
-					continue
-				}
-
-				export_path := paths.NewBackupPathManager().BackupFile()
-				result.CreateBackup(export_path)
-				last_run = utils.GetTime().Now()
-			}
-		}
-	}()
+	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
+		Name:          "Backups " + utils.GetOrgId(config_obj),
+		Description:   "Show recent backup operations",
+		ProfileWriter: result.ProfileWriter,
+		Categories: []string{"Org", services.GetOrgName(config_obj),
+			"Services"},
+	})
 
 	return result
 }

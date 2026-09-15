@@ -2,44 +2,32 @@ Queries:
   - SELECT mock(plugin='info', results=[dict(OS='windows'), dict(OS='windows')] )
     FROM scope()
 
-  # Test semantics around listing registry keys with default
-  # values. The 0 key actually has a default value. In the glob model
-  # it is a directory (since it is a Key) as well as a file (because
-  # it also is a value).  Velociraptor's glob model can not deal with
-  # directories which are also files (most artifacts test for IsDir to
-  # avoid reading directories.).
-
-  # Therefore we separate the value out into a default value called
-  # "@" within the key/directory. Globbing the parent directory will
-  # only show keys, while Globbing the keys will show the default
-  # value of the key as @.
-
-  # Just a regular key
-  - SELECT OSPath.Path AS Key, Data FROM glob(globs="*", accessor="raw_reg", root=pathspec(
+  # Test listing a direcctory with Key named the same as a value. This
+  # should show both key and value as separate entities with the same
+  # name. Glob should be able to handle this because raw registry
+  # accessor presents the UniqueName() interface to allow Globs to see
+  # them as different entities.
+  - SELECT OSPath.Path AS Key, Data, Data.type AS Type
+    FROM glob(globs="*", accessor="raw_reg", root=pathspec(
        Path="/Local Settings/Software/Microsoft/Windows/Shell/BagMRU",
        DelegatePath=srcDir+"/artifacts/testdata/files/UsrClass.dat"))
     WHERE OSPath.Basename =~ "0"
+    ORDER BY Type
 
-  # A value with name @
-  - SELECT OSPath.Path AS Key, Data FROM glob(globs="*", accessor="raw_reg", root=pathspec(
-       Path="/Local Settings/Software/Microsoft/Windows/Shell/BagMRU/0",
-       DelegatePath=srcDir+"/artifacts/testdata/files/UsrClass.dat"))
-    WHERE OSPath.Basename =~ "@"
-
-  # Now test read_file on values
+  # Now test read_file on values. If there is a value and a key of the
+  # same name an Open() will prefer the value.
   - SELECT format(format="%02x", args=read_file(accessor='raw_reg', filename=pathspec(
-       Path="/Local Settings/Software/Microsoft/Windows/Shell/BagMRU/0/@",
+       Path="/Local Settings/Software/Microsoft/Windows/Shell/BagMRU/0",
        DelegatePath=srcDir+"/artifacts/testdata/files/UsrClass.dat"))) AS ValueContent
     FROM scope()
 
   # This artifact uses the raw registry parser.
-  - SELECT LastModified, Binary, Name, Size, ProductName, Publisher, BinFileVersion
-    FROM Artifact.Windows.System.Amcache(
-       source="InventoryApplicationFile",
+  - SELECT *
+    FROM Artifact.Windows.Forensics.Amcache(
        amCacheGlob=srcDir+"/artifacts/testdata/files/Amcache.hve") LIMIT 5
 
   # Test the shell bags artifact
-  - SELECT ModTime, basename(path=Hive), KeyPath, Description, Path, _Parsed
+  - SELECT ModTime, basename(path=Hive), KeyPath, Slot, Description, _Parsed
     FROM Artifact.Windows.Forensics.Shellbags(SearchSpecs=[
       dict(
          HiveGlob=srcDir+"/artifacts/testdata/files/UsrClass.dat",
@@ -52,6 +40,25 @@ Queries:
 
   - SELECT * FROM Artifact.Windows.Forensics.SAM(
        SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="CreateTimes")
+
+  # Test Windows.Forensics.SAM.Enriched's sources.
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="Users")
+
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="GroupMembers")
+
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="Aliases")
+
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="Groups")
+
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="MachineSID")
+
+  - SELECT * FROM Artifact.Windows.Forensics.SAM.Enriched(
+       SAMPath=srcDir+"/artifacts/testdata/files/SAM", source="AccountPolicy")
 
   # Check raw reg can read values as files - REG_SZ.
   - SELECT utf16(string=read_file(filename=pathspec(

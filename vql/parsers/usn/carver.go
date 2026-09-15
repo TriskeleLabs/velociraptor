@@ -12,7 +12,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors/ntfs/readers"
 	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -93,23 +92,8 @@ func (self *CarveUSNPluginArgs) GetStreams(scope types.Scope) (
 
 		mft_source = self.MFTFilename
 
-		// Failing this we add an empty MFT - this helps to resolve
-		// some names in the case of just a USN journal $J dump.
-	} else {
-		ntfs_ctx = ntfs.GetNTFSContextFromRawMFT(
-			bytes.NewReader(nil), 0x200, 0x200)
-
-		if self.USNFilename == nil || len(self.USNFilename.Components) == 0 {
-			return nil, nil, 0,
-				errors.New("Must specify usn_filename when not mft source is specified.")
-		}
-
-		mft_source = accessors.MustNewGenericOSPath("")
-		self.disable_full_path_resolution = true
-	}
-
-	// The USN stream to carve may be given as a separate file.
-	if self.USNFilename != nil && len(self.USNFilename.Components) > 0 {
+		// The USN stream to carve may be given as a separate file.
+	} else if self.USNFilename != nil && len(self.USNFilename.Components) > 0 {
 		accessor, err := accessors.GetAccessor(self.Accessor, scope)
 		if err != nil {
 			return nil, nil, 0, err
@@ -131,7 +115,21 @@ func (self *CarveUSNPluginArgs) GetStreams(scope types.Scope) (
 		usn_source = self.USNFilename
 
 		// Otherwise we carve the disk from the ntfs context.
+
+		// Failing this we add an empty MFT - this helps to resolve
+		// some names in the case of just a USN journal $J dump.
 	} else {
+		ntfs_ctx = ntfs.GetNTFSContextFromRawMFT(
+			bytes.NewReader(nil), 0x200, 0x200)
+
+		if self.USNFilename == nil || len(self.USNFilename.Components) == 0 {
+			return nil, nil, 0,
+				errors.New("Must specify usn_filename when not mft source is specified.")
+		}
+
+		mft_source = accessors.MustNewGenericOSPath("")
+		self.disable_full_path_resolution = true
+
 		usn_stream = ntfs_ctx.DiskReader
 		usn_source = mft_source
 	}
@@ -157,7 +155,7 @@ func (self CarveUSNPlugin) Call(
 	go func() {
 		defer close(output_chan)
 		defer utils.RecoverVQL(scope)
-		defer vql_subsystem.RegisterMonitor("carve_usn", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "carve_usn", args)()
 
 		arg := &CarveUSNPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -196,7 +194,7 @@ func (self CarveUSNPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Doc:      "Carve for the USN journal entries from a device.",
 		ArgType:  type_map.AddType(scope, &CarveUSNPluginArgs{}),
 		Version:  2,
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

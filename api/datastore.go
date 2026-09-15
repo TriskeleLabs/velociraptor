@@ -1,9 +1,9 @@
 package api
 
 import (
+	"context"
 	"sync"
 
-	context "golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -21,6 +21,8 @@ import (
 func (self *ApiServer) GetSubject(
 	ctx context.Context,
 	in *api_proto.DataRequest) (*api_proto.DataResponse, error) {
+
+	defer Instrument("GetSubject")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -73,6 +75,8 @@ func (self *ApiServer) GetSubject(
 func (self *ApiServer) SetSubject(
 	ctx context.Context,
 	in *api_proto.DataRequest) (*api_proto.DataResponse, error) {
+
+	defer Instrument("SetSubject")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -138,6 +142,8 @@ func (self *ApiServer) ListChildren(
 	ctx context.Context,
 	in *api_proto.DataRequest) (*api_proto.ListChildrenResponse, error) {
 
+	defer Instrument("ListChildren")()
+
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
 	if err != nil {
@@ -156,7 +162,7 @@ func (self *ApiServer) ListChildren(
 			"User is not allowed to access datastore.")
 	}
 
-	// The call can access the datastore from any org becuase it is a
+	// The call can access the datastore from any org because it is a
 	// server->server call.
 	if token.SuperUser && org_config_obj.OrgId != in.OrgId {
 		org_manager, err := services.GetOrgManager()
@@ -196,6 +202,8 @@ func (self *ApiServer) ListChildren(
 func (self *ApiServer) DeleteSubject(
 	ctx context.Context,
 	in *api_proto.DataRequest) (*emptypb.Empty, error) {
+
+	defer Instrument("DeleteSubject")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)

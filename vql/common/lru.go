@@ -2,12 +2,14 @@ package common
 
 import (
 	"context"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/Velocidex/ttlcache/v2"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 type LRUCache struct {
@@ -16,7 +18,22 @@ type LRUCache struct {
 
 // Setter protocol allows VQL set() to be used
 func (self *LRUCache) Set(key string, value interface{}) {
-	self.lru.Set(key, value)
+	_ = self.lru.Set(key, value)
+}
+
+func (self *LRUCache) Len() int {
+	return int(self.lru.GetMetrics().Size)
+}
+
+func (self *LRUCache) Dump() *ordereddict.Dict {
+	res := ordereddict.NewDict()
+	for _, key := range self.lru.GetKeys() {
+		v, err := self.lru.Get(key)
+		if err == nil {
+			res.Set(key, v)
+		}
+	}
+	return res
 }
 
 type LRUFunctionArgs struct {
@@ -33,11 +50,7 @@ func (self LRUFunction) Applicable(a vfilter.Any, b vfilter.Any) bool {
 	}
 
 	_, b_ok := b.(string)
-	if !b_ok {
-		return false
-	}
-
-	return true
+	return b_ok
 }
 
 func (self LRUFunction) Associative(
@@ -52,6 +65,16 @@ func (self LRUFunction) Associative(
 	key, b_ok := b.(string)
 	if !b_ok {
 		return vfilter.Null{}, false
+	}
+
+	// Support accessing some cache methods.
+	switch b {
+	case "@Dump":
+		return cache.Dump(), true
+	case "@Len":
+		return cache.Len(), true
+	case "@Metrics":
+		return cache.lru.GetMetrics(), true
 	}
 
 	res, err := cache.lru.Get(key)
@@ -88,9 +111,15 @@ func (self LRUFunction) Call(ctx context.Context, scope vfilter.Scope,
 	result := &LRUCache{
 		lru: ttlcache.NewCache(),
 	}
-	scope.AddDestructor(func() {
+	result.lru.SetTTL(time.Hour)
+	err = scope.AddDestructor(func() {
 		result.lru.Close()
 	})
+	if err != nil {
+		result.lru.Close()
+		scope.Log("lru: %s", err.Error())
+		return vfilter.Null{}
+	}
 
 	if arg.Size <= 0 {
 		arg.Size = 1000
@@ -100,7 +129,25 @@ func (self LRUFunction) Call(ctx context.Context, scope vfilter.Scope,
 	return result
 }
 
+type _LRUBoolProtocol struct{}
+
+func (self _LRUBoolProtocol) Applicable(a types.Any) bool {
+	_, a_ok := a.(*LRUCache)
+	return a_ok
+}
+
+func (self _LRUBoolProtocol) Bool(ctx context.Context, scope types.Scope,
+	a types.Any) bool {
+	lru, a_ok := a.(*LRUCache)
+	if !a_ok {
+		return false
+	}
+
+	return lru.Len() > 0
+}
+
 func init() {
 	vql_subsystem.RegisterFunction(&LRUFunction{})
 	vql_subsystem.RegisterProtocol(&LRUFunction{})
+	vql_subsystem.RegisterProtocol(&_LRUBoolProtocol{})
 }

@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
-	"os"
+	"net/url"
 	"sync/atomic"
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -16,7 +16,7 @@ import (
 // frontends to spread the load between them.
 
 var (
-	FrontendIsMaster          = fmt.Errorf("FrontendIsMaster: %w", os.ErrNotExist)
+	FrontendIsMaster          = fmt.Errorf("FrontendIsMaster: %w", utils.NotFoundError)
 	NotRunningInFrontendError = utils.Wrap(utils.InvalidConfigError,
 		"Command not available when running without a frontend service. To perform administrative tasks on the command line, connect to the server using the API https://docs.velociraptor.app/docs/server_automation/server_api/")
 
@@ -43,6 +43,12 @@ type FrontendManager interface {
 	// error.
 	GetMasterAPIClient(ctx context.Context) (
 		api_proto.APIClient, func() error, error)
+
+	// Calculates the Base URL to the top of the app
+	GetBaseURL(config_obj *config_proto.Config) (res *url.URL, err error)
+
+	// The URL to the App.html itself
+	GetPublicUrl(config_obj *config_proto.Config) (res *url.URL, err error)
 }
 
 // Are we running on the master node?
@@ -51,6 +57,10 @@ func IsMaster(config_obj *config_proto.Config) bool {
 		return !config_obj.Frontend.IsMinion
 	}
 	return true
+}
+
+func IsClient(config_obj *config_proto.Config) bool {
+	return config_obj.Frontend == nil
 }
 
 func IsMinion(config_obj *config_proto.Config) bool {

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,21 +18,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
+	"strings"
 
 	errors "github.com/go-errors/errors"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 
-	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/api/authenticators"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	api_utils "www.velocidex.com/golang/velociraptor/api/utils"
@@ -41,12 +45,12 @@ import (
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/logging"
-	"www.velocidex.com/golang/velociraptor/server"
+	debug_server "www.velocidex.com/golang/velociraptor/services/debug/server"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 // A Mux for the reverse proxy feature.
-func AddProxyMux(config_obj *config_proto.Config, mux *http.ServeMux) error {
+func AddProxyMux(config_obj *config_proto.Config, mux *api_utils.ServeMux) error {
 	if config_obj.GUI == nil {
 		return errors.New("GUI not configured")
 	}
@@ -64,28 +68,29 @@ func AddProxyMux(config_obj *config_proto.Config, mux *http.ServeMux) error {
 
 		var handler http.Handler
 		if target.Scheme == "file" {
-			handler = http.StripPrefix(reverse_proxy_config.Route,
+			handler = api_utils.StripPrefix(reverse_proxy_config.Route,
 				http.FileServer(http.Dir(target.Path)))
 
 		} else {
-			handler = http.StripPrefix(reverse_proxy_config.Route,
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					r.URL.Host = target.Host
-					r.URL.Scheme = target.Scheme
-					r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
-					r.Host = target.Host
+			handler = api_utils.StripPrefix(reverse_proxy_config.Route,
+				api_utils.HandlerFunc(nil,
+					func(w http.ResponseWriter, r *http.Request) {
+						r.URL.Host = target.Host
+						r.URL.Scheme = target.Scheme
+						r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
+						r.Host = target.Host
 
-					// If we require auth we do
-					// not pass the auth header to
-					// the target of the
-					// proxy. Otherwise we leave
-					// authentication to it.
-					if reverse_proxy_config.RequireAuth {
-						r.Header.Del("Authorization")
-					}
+						// If we require auth we do
+						// not pass the auth header to
+						// the target of the
+						// proxy. Otherwise we leave
+						// authentication to it.
+						if reverse_proxy_config.RequireAuth {
+							r.Header.Del("Authorization")
+						}
 
-					httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
-				}))
+						httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
+					}))
 		}
 
 		if reverse_proxy_config.RequireAuth {
@@ -93,7 +98,8 @@ func AddProxyMux(config_obj *config_proto.Config, mux *http.ServeMux) error {
 			if err != nil {
 				return err
 			}
-			handler = auther.AuthenticateUserHandler(handler)
+			// Minimum level of access should be READ_RESULTS
+			handler = auther.AuthenticateUserHandler(handler, acls.READ_RESULTS)
 		}
 
 		mux.Handle(reverse_proxy_config.Route, handler)
@@ -106,8 +112,7 @@ func AddProxyMux(config_obj *config_proto.Config, mux *http.ServeMux) error {
 func PrepareGUIMux(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	server_obj *server.Server,
-	mux *http.ServeMux) (http.Handler, error) {
+	mux *api_utils.ServeMux) (http.Handler, error) {
 	if config_obj.GUI == nil {
 		return nil, errors.New("GUI not configured")
 	}
@@ -127,7 +132,8 @@ func PrepareGUIMux(
 		return nil, err
 	}
 	if config_obj.GUI != nil && config_obj.GUI.Authenticator != nil {
-		server_obj.Info("GUI will use the %v authenticator", config_obj.GUI.Authenticator.Type)
+		logger := logging.GetLogger(config_obj, &logging.GUIComponent)
+		logger.Info("GUI will use the %v authenticator", config_obj.GUI.Authenticator.Type)
 	}
 
 	// Add the authenticator specific handlers.
@@ -142,54 +148,75 @@ func PrepareGUIMux(
 		return nil, err
 	}
 
-	base := api_utils.GetBasePath(config_obj)
-	mux.Handle(api_utils.Join(base, "/api/"), ipFilter(config_obj,
-		csrfProtect(config_obj,
-			auther.AuthenticateUserHandler(h))))
+	base_path := api_utils.GetBasePath(config_obj)
 
-	mux.Handle(api_utils.Join(base, "/api/v1/DownloadTable"),
-		ipFilter(config_obj, csrfProtect(config_obj,
-			auther.AuthenticateUserHandler(downloadTable()))))
+	mux.Handle(api_utils.GetBasePath(config_obj, "/api/"),
+		ipFilter(config_obj,
+			csrfProtect(config_obj,
+				auther.AuthenticateUserHandler(h, acls.READ_RESULTS))))
 
-	mux.Handle(api_utils.Join(base, "/api/v1/DownloadVFSFile"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/api/v1/DownloadTable"),
 		ipFilter(config_obj, csrfProtect(config_obj,
-			auther.AuthenticateUserHandler(vfsFileDownloadHandler()))))
+			auther.AuthenticateUserHandler(
+				downloadTable(config_obj), acls.READ_RESULTS))))
 
-	mux.Handle(api_utils.Join(base, "/api/v1/UploadTool"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/api/v1/DownloadVFSFile"),
 		ipFilter(config_obj, csrfProtect(config_obj,
-			auther.AuthenticateUserHandler(toolUploadHandler()))))
+			auther.AuthenticateUserHandler(
+				vfsFileDownloadHandler(config_obj), acls.READ_RESULTS))))
 
-	mux.Handle(api_utils.Join(base, "/api/v1/UploadFormFile"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/api/v1/UploadTool"),
 		ipFilter(config_obj, csrfProtect(config_obj,
-			auther.AuthenticateUserHandler(formUploadHandler()))))
+			auther.AuthenticateUserHandler(
+				toolUploadHandler(config_obj), acls.READ_RESULTS))))
+
+	mux.Handle(api_utils.GetBasePath(config_obj, "/api/v1/UploadFormFile"),
+		ipFilter(config_obj, csrfProtect(config_obj,
+			auther.AuthenticateUserHandler(
+				formUploadHandler(config_obj), acls.READ_RESULTS))))
 
 	// Serve prepared zip files.
-	mux.Handle(api_utils.Join(base, "/downloads/"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/downloads/"),
 		ipFilter(config_obj, csrfProtect(config_obj,
 			auther.AuthenticateUserHandler(
-				http.StripPrefix(base,
-					downloadFileStore([]string{"downloads"}))))))
+				api_utils.StripPrefix(base_path,
+					downloadFileStore(config_obj, []string{"downloads"})),
+				acls.READ_RESULTS))))
 
 	// Serve notebook items
-	mux.Handle(api_utils.Join(base, "/notebooks/"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/notebooks/"),
 		ipFilter(config_obj, csrfProtect(config_obj,
 			auther.AuthenticateUserHandler(
-				http.StripPrefix(base,
-					downloadFileStore([]string{"notebooks"}))))))
+				api_utils.StripPrefix(base_path,
+					downloadFileStore(config_obj, []string{"notebooks"})),
+				acls.READ_RESULTS))))
 
 	// Serve files from hunt notebooks
-	mux.Handle(api_utils.Join(base, "/hunts/"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/hunts/"),
 		ipFilter(config_obj, csrfProtect(config_obj,
 			auther.AuthenticateUserHandler(
-				http.StripPrefix(base,
-					downloadFileStore([]string{"hunts"}))))))
+				api_utils.StripPrefix(base_path,
+					downloadFileStore(config_obj, []string{"hunts"})),
+				acls.READ_RESULTS))))
 
 	// Serve files from client notebooks
-	mux.Handle(api_utils.Join(base, "/clients/"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/clients/"),
 		ipFilter(config_obj, csrfProtect(config_obj,
 			auther.AuthenticateUserHandler(
-				http.StripPrefix(base,
-					downloadFileStore([]string{"clients"}))))))
+				api_utils.StripPrefix(base_path,
+					downloadFileStore(config_obj, []string{"clients"})),
+				acls.READ_RESULTS))))
+
+	// Enable debug endpoints but only for users with SERVER_ADMIN on
+	// the root org, because the debug server currently exposes all
+	// org's data. The debug server requires access to the root org!
+	mux.Handle(api_utils.GetBasePath(config_obj, "/debug/"),
+		ipFilter(config_obj, csrfProtect(config_obj,
+			auther.AuthenticateUserHandler(
+				api_utils.StripPrefix(base_path,
+					debug_server.DebugMux(config_obj, base_path).
+						RequireRootOrg()),
+				acls.SERVER_ADMIN))))
 
 	// Assets etc do not need auth.
 	install_static_assets(ctx, config_obj, mux)
@@ -204,15 +231,19 @@ func PrepareGUIMux(
 	if err != nil {
 		return nil, err
 	}
-	mux.Handle(api_utils.Join(base, "/app/index.html"),
+	mux.Handle(api_utils.GetBasePath(config_obj, "/app/index.html"),
 		ipFilter(config_obj,
-			csrfProtect(config_obj, auther.AuthenticateUserHandler(h))))
+			csrfProtect(config_obj,
+				auther.AuthenticateUserHandler(h, acls.READ_RESULTS))))
 
 	// Redirect everything else to the app
 	mux.Handle(api_utils.GetBaseDirectory(config_obj),
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, api_utils.Join(base, "/app/index.html"), 302)
-		}))
+		api_utils.HandlerFunc(nil,
+			func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r,
+					api_utils.GetBasePath(config_obj, "/app/index.html"),
+					http.StatusTemporaryRedirect)
+			}))
 
 	return mux, nil
 }
@@ -258,6 +289,15 @@ func GetAPIHandler(
 
 				return metadata.New(md)
 			}),
+		runtime.WithErrorHandler(grpcErrorHandler),
+
+		// Allow the http client to specify the orgid in a header.
+		runtime.WithIncomingHeaderMatcher(func(in string) (string, bool) {
+			if strings.ToLower(in) == "grpc-metadata-orgid" {
+				return "OrgId", true
+			}
+			return "", false
+		}),
 	)
 
 	// We use a dedicated gw certificate. The gRPC server will
@@ -303,17 +343,27 @@ func GetAPIHandler(
 		grpc.WithTransportCredentials(creds),
 	}
 
+	// Allow the receive limit to be increased.
+	if config_obj.ApiConfig != nil &&
+		config_obj.ApiConfig.MaxGrpcRecvSize > 0 {
+		opts = append(opts,
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(
+				int(config_obj.ApiConfig.MaxGrpcRecvSize))))
+	}
+
 	bind_addr := grpc_client.GetAPIConnectionString(config_obj)
+	logger := logging.GetLogger(config_obj, &logging.GUIComponent)
+	logger.Debug("GRPC Gateway: Connecting to %s", bind_addr)
 	err = api_proto.RegisterAPIHandlerFromEndpoint(
 		ctx, grpc_proxy_mux, bind_addr, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	base := api_utils.GetBasePath(config_obj)
-	reverse_proxy_mux := http.NewServeMux()
-	reverse_proxy_mux.Handle(api_utils.Join(base, "/api/v1/"),
-		http.StripPrefix(base, grpc_proxy_mux))
+	reverse_proxy_mux := api_utils.NewServeMux()
+	reverse_proxy_mux.Handle(api_utils.GetBasePath(config_obj, "/api/v1/"),
+		api_utils.StripPrefix(
+			api_utils.GetBasePath(config_obj), grpc_proxy_mux))
 
 	return reverse_proxy_mux, nil
 }
@@ -321,4 +371,28 @@ func GetAPIHandler(
 func ipFilter(config_obj *config_proto.Config,
 	parent http.Handler) http.Handler {
 	return authenticators.IpFilter(config_obj, parent)
+}
+
+var (
+	rpcSizeError = regexp.MustCompile(`received message larger than max`)
+)
+
+func grpcErrorHandler(ctx context.Context,
+	mux *runtime.ServeMux,
+	marshaler runtime.Marshaler,
+	w http.ResponseWriter, r *http.Request, err error) {
+	st := status.Convert(err)
+	httpStatus := runtime.HTTPStatusFromCode(st.Code())
+
+	message := st.Message()
+	if rpcSizeError.MatchString(message) {
+		message = fmt.Sprintf(
+			"%s: Request %v. Please see "+
+				"https://docs.velociraptor.app/knowledge_base/tips/grpc_errors/",
+			message, r.URL.Path)
+	}
+
+	// Write your own JSON response
+	w.WriteHeader(httpStatus)
+	w.Write([]byte(message))
 }

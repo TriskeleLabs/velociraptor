@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -8,7 +9,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
-	context "golang.org/x/net/context"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -50,48 +51,66 @@ func (self *ApiServer) GetNotebooks(
 		return nil, Status(self.verbose, err)
 	}
 
-	// We want a single notebook metadata.
-	if in.NotebookId != "" {
-		notebook_metadata, err := notebook_manager.GetNotebook(
-			ctx, in.NotebookId, in.IncludeUploads)
-		// Handle the EOF especially: it means there is no such
-		// notebook and return an empty result set.
-		if errors.Is(err, os.ErrNotExist) ||
-			(notebook_metadata != nil && notebook_metadata.NotebookId == "") {
-			return result, nil
-		}
-
+	// List all the timelines
+	if in.IncludeTimelines {
+		// This is only called for global notebooks because client and
+		// hunt notebooks always specify the exact notebook id.
+		notebooks, err := notebook_manager.GetAllNotebooks(ctx,
+			services.NotebookSearchOptions{
+				Username:  principal,
+				Timelines: true,
+			})
 		if err != nil {
-			logging.GetLogger(
-				org_config_obj, &logging.FrontendComponent).
-				Error("Unable to open notebook: %v", err)
 			return nil, Status(self.verbose, err)
 		}
 
-		// Document not owned or collaborated with.
-		if !notebook_manager.CheckNotebookAccess(notebook_metadata, principal) {
-			services.LogAudit(ctx,
-				org_config_obj, principal, "notebook not shared.",
-				ordereddict.NewDict().
-					Set("action", "Access Denied").
-					Set("notebook", in.NotebookId))
+		for _, n := range notebooks {
+			result.Items = append(result.Items,
+				proto.Clone(n).(*api_proto.NotebookMetadata))
 
-			return nil, InvalidStatus("User has no access to this notebook")
+			if uint64(len(result.Items)) > in.Count {
+				break
+			}
 		}
-
-		result.Items = append(result.Items, notebook_metadata)
 		return result, nil
 	}
 
-	// This is only called for global notebooks because client and
-	// hunt notebooks always specify the exact notebook id.
-	notebooks, err := notebook_manager.GetSharedNotebooks(ctx,
-		principal, in.Offset, in.Count)
+	if in.NotebookId == "" {
+		return nil, Status(self.verbose, errors.New("NotebookId must be specified"))
+	}
+
+	notebook_metadata, err := notebook_manager.GetNotebook(
+		ctx, in.NotebookId, in.IncludeUploads)
+	// Handle the EOF especially: it means there is no such
+	// notebook and return an empty result set.
+	if errors.Is(err, os.ErrNotExist) ||
+		(notebook_metadata != nil && notebook_metadata.NotebookId == "") {
+		return result, nil
+	}
+
 	if err != nil {
+		logging.GetLogger(
+			org_config_obj, &logging.FrontendComponent).
+			Error("Unable to open notebook: %v", err)
 		return nil, Status(self.verbose, err)
 	}
 
-	result.Items = notebooks
+	// Document not owned or collaborated with.
+	if !notebook_manager.CheckNotebookAccess(notebook_metadata, principal) {
+		err := services.LogAudit(ctx,
+			org_config_obj, principal, "notebook not shared.",
+			ordereddict.NewDict().
+				Set("action", "Access Denied").
+				Set("notebook", in.NotebookId))
+		if err != nil {
+			logger := logging.GetLogger(org_config_obj, &logging.FrontendComponent)
+			logger.Error("<red>notebook not shared</> %v %v", principal, in.NotebookId)
+		}
+
+		return nil, InvalidStatus("User has no access to this notebook")
+	}
+
+	result.Items = append(result.Items, notebook_metadata)
 	return result, nil
 }
 
@@ -198,6 +217,7 @@ func (self *ApiServer) UpdateNotebook(
 	// When updating an existing notebook only certain fields may
 	// be changed by the user - definitely not the creator, created time or notebookId.
 	in.ModifiedTime = time.Now().Unix()
+	in.Version = old_notebook.Version + 1
 	in.Creator = old_notebook.Creator
 	in.CreatedTime = old_notebook.CreatedTime
 	in.NotebookId = old_notebook.NotebookId
@@ -213,6 +233,52 @@ func (self *ApiServer) UpdateNotebook(
 	in.CellMetadata = cell_metadata
 
 	return in, notebook_manager.UpdateNotebook(ctx, in)
+}
+
+func (self *ApiServer) DeleteNotebook(
+	ctx context.Context,
+	in *api_proto.NotebookMetadata) (*emptypb.Empty, error) {
+
+	defer Instrument("DeleteNotebook")()
+
+	if !strings.HasPrefix(in.NotebookId, "N.") {
+		return nil, InvalidStatus("Invalid NoteboookId")
+	}
+
+	users := services.GetUserManager()
+	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, Status(self.verbose, err)
+	}
+	principal := user_record.Name
+
+	permissions := acls.NOTEBOOK_EDITOR
+	perm, err := services.CheckAccess(org_config_obj, principal, permissions)
+	if !perm || err != nil {
+		return nil, PermissionDenied(err,
+			"User is not allowed to delete notebooks.")
+	}
+
+	// If the notebook is not properly shared with the user they
+	// may not edit it.
+	notebook_manager, err := services.GetNotebookManager(org_config_obj)
+	if err != nil {
+		return nil, Status(self.verbose, err)
+	}
+
+	old_notebook, err := notebook_manager.GetNotebook(ctx, in.NotebookId, SKIP_UPLOADS)
+	if err != nil {
+		return nil, Status(self.verbose, err)
+	}
+
+	if !notebook_manager.CheckNotebookAccess(old_notebook, principal) {
+		return nil, InvalidStatus("Notebook is not shared with user.")
+	}
+
+	err = notebook_manager.DeleteNotebook(ctx, in.NotebookId, nil,
+		true /* really_do_it */)
+
+	return &emptypb.Empty{}, Status(self.verbose, err)
 }
 
 func (self *ApiServer) GetNotebookCell(
@@ -421,8 +487,6 @@ func (self *ApiServer) UploadNotebookAttachment(
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
-
-	res.MimeType = detectMime([]byte(in.Data), true)
 	return res, nil
 }
 
@@ -467,6 +531,9 @@ func (self *ApiServer) CreateNotebookDownloadFile(
 func (self *ApiServer) RemoveNotebookAttachment(
 	ctx context.Context,
 	in *api_proto.NotebookFileUploadRequest) (*emptypb.Empty, error) {
+
+	defer Instrument("RemoveNotebookAttachment")()
+
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
 	if err != nil {

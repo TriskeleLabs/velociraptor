@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,23 +18,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package tables
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
-	context "golang.org/x/net/context"
+	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
+	"www.velocidex.com/golang/velociraptor/constants"
 	file_store "www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/timelines"
 	"www.velocidex.com/golang/velociraptor/utils"
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -45,27 +49,35 @@ import (
 func GetTable(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	in *api_proto.GetTableRequest) (
+	in *api_proto.GetTableRequest,
+	principal string) (
 	*api_proto.GetTableResponse, error) {
 
 	var result *api_proto.GetTableResponse
 	var err error
 
 	// We want an event table.
-	if in.Type == "TIMELINE" {
+	switch in.Type {
+	case "TIMELINE":
 		result, err = getTimeline(ctx, config_obj, in)
 
-	} else if in.Type == "CLIENT_EVENT_LOGS" || in.Type == "SERVER_EVENT_LOGS" {
+	case "CLIENT_EVENT_LOGS", "SERVER_EVENT_LOGS":
 		result, err = getEventTableLogs(ctx, config_obj, in)
 
-	} else if in.Type == "CLIENT_EVENT" || in.Type == "SERVER_EVENT" {
+	case "CLIENT_EVENT", "SERVER_EVENT":
 		result, err = getEventTable(ctx, config_obj, in)
 
-	} else if in.Type == "STACK" {
+	case "STACK":
 		result, err = getStackTable(ctx, config_obj, in)
 
-	} else {
-		result, err = getTable(ctx, config_obj, in)
+	case "USER_MESSAGES":
+		result, err = getUserMessages(ctx, in, principal)
+
+	case "NOTEBOOKS":
+		result, err = getNotebookTable(ctx, config_obj, in, principal)
+
+	default:
+		result, err = getTable(ctx, config_obj, in, principal)
 	}
 
 	if err != nil {
@@ -96,7 +108,8 @@ func GetTable(
 func getTable(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	in *api_proto.GetTableRequest) (
+	in *api_proto.GetTableRequest,
+	principal string) (
 	*api_proto.GetTableResponse, error) {
 
 	if in.Rows == 0 {
@@ -107,7 +120,7 @@ func getTable(
 		ColumnTypes: getColumnTypes(ctx, config_obj, in),
 	}
 
-	path_spec, err := GetPathSpec(ctx, config_obj, in)
+	path_spec, err := GetPathSpec(ctx, config_obj, in, principal)
 	if err != nil {
 		return result, err
 	}
@@ -123,8 +136,13 @@ func getTable(
 		ctx, config_obj,
 		file_store_factory, path_spec, options)
 
-	if err != nil {
+	// if the result does not exist yet, just return an empty result.
+	if errors.Is(err, os.ErrNotExist) {
 		return result, nil
+	}
+
+	if err != nil {
+		return nil, err
 	}
 	defer rs_reader.Close()
 
@@ -170,13 +188,24 @@ func getStackTable(
 		in.Rows = 2000
 	}
 
+	if len(in.StackPath) == 0 ||
+		in.StackPath[len(in.StackPath)-1] != "stack" {
+		return nil, fmt.Errorf("stack_path must be the path to a result set stack")
+	}
+
 	result := &api_proto.GetTableResponse{
 		ColumnTypes: getColumnTypes(ctx, config_obj, in),
 	}
 
 	path_spec := path_specs.NewUnsafeFilestorePath(
-		utils.FilterSlice(in.StackPath)...).
+		utils.FilterSlice(in.StackPath, "")...).
 		SetType(api.PATH_TYPE_FILESTORE_JSON)
+
+	err := file_store_accessor.IsFileAccessible(path_spec)
+	if err != nil {
+		return nil, err
+	}
+
 	file_store_factory := file_store.GetFileStore(config_obj)
 
 	options, err := GetTableOptions(in)
@@ -204,6 +233,17 @@ func getStackTable(
 	// this will not be needed.
 	if result.TotalRows < 0 {
 		in.Rows = 100
+	}
+
+	// The caller asked for rows after the last one. We don't really
+	// know the columns because reading past the end of the table will
+	// give no rows. So for this case we read the first row and return
+	// the columns from there.
+	if in.StartRow > uint64(result.TotalRows) {
+		res := ConvertRowsToTableResponse(
+			rs_reader.Rows(ctx), result, in.Timezone, 1)
+		res.Rows = nil
+		return res, nil
 	}
 
 	// Seek to the row we need.
@@ -268,16 +308,48 @@ func getColumnTypes(
 // stored.
 func GetPathSpec(
 	ctx context.Context, config_obj *config_proto.Config,
-	in *api_proto.GetTableRequest) (api.FSPathSpec, error) {
+	in *api_proto.GetTableRequest, principal string) (api.FSPathSpec, error) {
+
+	res, err := _getPathSpec(config_obj, in, principal)
+	if err != nil {
+		return nil, err
+	}
+
+	// The users area is normally blocked but we need to read the user
+	// messages so bypass any deny blocks.
+	if in.Type == "USER_MESSAGES" {
+		return res, nil
+	}
+
+	// Make sure users are actually allowed to read from this area.
+	err = file_store_accessor.IsFileAccessible(res)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func _getPathSpec(config_obj *config_proto.Config,
+	in *api_proto.GetTableRequest, principal string) (api.FSPathSpec, error) {
 
 	if in.Type == "CLIENT_FLOWS" && in.ClientId != "" {
 		return paths.NewClientPathManager(in.ClientId).FlowIndex(), nil
 	}
 
+	if in.Type == "NOTEBOOKS" {
+		return paths.NewNotebookPathManager("").
+			NotebookIndexForUser(principal), nil
+	}
+
+	if in.Type == "USER_MESSAGES" {
+		return paths.NewUserPathManager(principal).Notifications(), nil
+	}
+
 	if in.FlowId != "" && in.Artifact != "" {
-		mode := paths.MODE_CLIENT
-		if in.ClientId == "server" {
-			mode = paths.MODE_SERVER
+		mode := artifact_modes.MODE_CLIENT
+		if in.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
+			mode = artifact_modes.MODE_SERVER
 		}
 		return artifacts.NewArtifactPathManagerWithMode(
 			config_obj, in.ClientId, in.FlowId, in.Artifact,
@@ -293,6 +365,9 @@ func GetPathSpec(
 
 		case "uploads":
 			return flow_path_manager.UploadMetadata(), nil
+
+		case "upload_transactions":
+			return flow_path_manager.UploadTransactions(), nil
 		}
 
 	} else if in.HuntId != "" && in.Type == "clients" {
@@ -364,32 +439,31 @@ func ConvertRowsToTableResponse(
 	var rows uint64
 	column_known := make(map[string]bool)
 	for row := range in {
-		data := make(map[string]string)
-		for _, key := range row.Keys() {
+		data := make(map[string]interface{})
+		for _, i := range row.Items() {
 			// Do we already know about this column?
-			_, pres := column_known[key]
+			_, pres := column_known[i.Key]
 			if !pres {
-				result.Columns = append(result.Columns, key)
-				column_known[key] = true
+				result.Columns = append(result.Columns, i.Key)
+				column_known[i.Key] = true
 			}
 
-			value, pres := row.Get(key)
-			if pres {
-				data[key] = json.AnyToString(value, opts)
-			} else {
-				data[key] = "null"
-			}
+			data[i.Key] = i.Value
 		}
 
-		row_proto := &api_proto.Row{}
+		json_out := make([]interface{}, 0, len(result.Columns))
 		for _, k := range result.Columns {
-			value, pres := data[k]
-			if !pres {
-				value = "null"
-			}
-			row_proto.Cell = append(row_proto.Cell, value)
+			value := data[k]
+			json_out = append(json_out, value)
 		}
-		result.Rows = append(result.Rows, row_proto)
+		serialized, err := json.MarshalWithOptions(json_out, opts)
+		if err != nil {
+			continue
+		}
+
+		result.Rows = append(result.Rows, &api_proto.Row{
+			Json: string(serialized),
+		})
 
 		rows += 1
 		if rows >= limit {
@@ -413,9 +487,8 @@ func getEventTableWithPathManager(
 
 	result := &api_proto.GetTableResponse{}
 
-	file_store_factory := file_store.GetFileStore(config_obj)
 	rs_reader, err := result_sets.NewTimedResultSetReader(ctx,
-		file_store_factory, path_manager)
+		config_obj, path_manager)
 	if err != nil {
 		return nil, err
 	}
@@ -432,57 +505,6 @@ func getEventTableWithPathManager(
 
 	return ConvertRowsToTableResponse(
 		rs_reader.Rows(ctx), result, in.Timezone, in.Rows), nil
-}
-
-func getTimeline(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	in *api_proto.GetTableRequest) (*api_proto.GetTableResponse, error) {
-
-	if in.NotebookId == "" {
-		return nil, errors.New("NotebookId must be specified")
-	}
-
-	path_manager := paths.NewNotebookPathManager(in.NotebookId).
-		SuperTimeline(in.Timeline)
-	reader, err := timelines.NewSuperTimelineReader(
-		config_obj, path_manager, in.IncludeComponents, in.SkipComponents)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-
-	result := &api_proto.GetTableResponse{
-		Columns:   []string{"_Source", "Time", "Data"},
-		StartTime: int64(in.StartTime),
-	}
-
-	if in.StartTime != 0 {
-		ts := time.Unix(0, int64(in.StartTime))
-		reader.SeekToTime(ts)
-	}
-
-	rows := uint64(0)
-	opts := json.GetJsonOptsForTimezone(in.Timezone)
-	for item := range reader.Read(ctx) {
-		if result.StartTime == 0 {
-			result.StartTime = item.Time.UnixNano()
-		}
-		result.EndTime = item.Time.UnixNano()
-		result.Rows = append(result.Rows, &api_proto.Row{
-			Cell: []string{
-				item.Source,
-				json.AnyToString(item.Time, opts),
-				json.AnyToString(item.Row, opts)},
-		})
-
-		rows += 1
-		if rows > in.Rows {
-			break
-		}
-	}
-
-	return result, nil
 }
 
 func GetTableOptions(in *api_proto.GetTableRequest) (
@@ -513,4 +535,24 @@ func GetTableOptions(in *api_proto.GetTableRequest) (
 	options.EndIdx = in.EndIdx
 
 	return options, nil
+}
+
+func getUserMessages(
+	ctx context.Context,
+	in *api_proto.GetTableRequest,
+	principal string) (
+	*api_proto.GetTableResponse, error) {
+
+	org_manager, err := services.GetOrgManager()
+	if err != nil {
+		return nil, err
+	}
+
+	// User messages live in the root org.
+	root_config_obj, err := org_manager.GetOrgConfig(services.ROOT_ORG_ID)
+	if err != nil {
+		return nil, err
+	}
+
+	return getTable(ctx, root_config_obj, in, principal)
 }

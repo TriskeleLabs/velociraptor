@@ -17,109 +17,11 @@ import Row from 'react-bootstrap/Row';
 import DictEditor from '../forms/dict.jsx';
 import UserForm from '../utils/users.jsx';
 import Form from 'react-bootstrap/Form';
-import Alert from 'react-bootstrap/Alert';
 import ToolTip from '../widgets/tooltip.jsx';
 
 import "./secrets.css";
 
 const POLL_TIME = 5000;
-
-class AddSecretTypeDialog extends Component {
-    static propTypes = {
-        onClose: PropTypes.func.isRequired,
-    }
-
-    componentDidMount = () => {
-        this.source = CancelToken.source();
-    }
-
-    componentWillUnmount = () => {
-        this.source.cancel();
-    }
-
-    addSecretDefinition = () => {
-        // Check the template is ok
-        let template = "";
-        try {
-            template = JSON.parse(this.state.template_json);
-        } catch(e) {
-            this.setState({error: "Secret Template: " + e.toString()});
-            return;
-        };
-
-        this.source.cancel();
-        this.source = CancelToken.source();
-
-        api.post("v1/DefineSecret", {
-            type_name: this.state.type_name,
-            verifier: this.state.verifier,
-            template: template,
-        },  this.source.token).then(response=>{
-            if (response.cancel)
-                return;
-            this.props.onClose();
-        }).catch(e=>{
-            this.setState({error: "Secret Template: " + e.response.data.message});
-        });
-    }
-
-    state = {
-        type_name: "",
-        verifier: "",
-        template_json: "{\"Key\":\"Value\"}",
-        error: "",
-
-    }
-
-    render() {
-        return(
-            <Modal show={true}
-                   size="lg"
-                   enforceFocus={true}
-                   dialogClassName="modal-90w"
-                   onHide={this.props.onClose}>
-              <Modal.Header closeButton>
-                <Modal.Title>{T("Add a new secret")}</Modal.Title>
-              </Modal.Header>
-              <Modal.Body>
-                {T("Add Secret Type")}
-                 <VeloForm
-                   param={{name: T("Secret Type"), description: T("Type of secret to add")}}
-                   value={this.state.type_name}
-                   setValue={x=>this.setState({type_name:x})}
-                 />
-                 <VeloForm
-                   param={{name: T("Secret Verifier"), description: T("A VQL Lambda to verify the secret")}}
-                   value={this.state.verifier}
-                   setValue={x=>this.setState({verifier:x})}
-                 />
-                 <VeloForm
-                   param={{name: T("Template"), description: T("A JSON object which serves as the template for the secret")}}
-                   value={this.state.template_json}
-                   setValue={x=>this.setState({template_json:x})}
-                 />
-
-                {this.state.error &&
-                 <Alert variant="warning">
-                   {this.state.error}
-                 </Alert>
-                }
-              </Modal.Body>
-              <Modal.Footer>
-                <Button variant="secondary"
-                        onClick={this.props.onClose}>
-                  {T("Close")}
-                </Button>
-                <Button variant="primary"
-                        disabled={!this.state.type_name}
-                        onClick={this.addSecretDefinition}>
-                  {T("Do it!")}
-                </Button>
-              </Modal.Footer>
-            </Modal>
-        );
-    }
-}
 
 class EditSecretDialog extends Component {
     static propTypes = {
@@ -129,7 +31,9 @@ class EditSecretDialog extends Component {
 
     componentDidMount = () => {
         this.source = CancelToken.source();
-        this.setState({new_users: this.props.secret.users});
+        this.setState({
+            new_users: this.props.secret.users,
+            visible_to_all_orgs: this.props.secret.visible_to_all_orgs});
     }
 
     componentWillUnmount = () => {
@@ -148,6 +52,7 @@ class EditSecretDialog extends Component {
             type_name: this.props.secret.type_name,
             name: this.props.secret.name,
             add_users: this.state.new_users,
+            visible_to_all_orgs: this.state.visible_to_all_orgs,
             remove_users: this.props.secret.users,
         },  this.source.token).then(response=>{
             if (response.cancel)
@@ -158,11 +63,12 @@ class EditSecretDialog extends Component {
     }
 
     state = {
-        secret: {},
         new_users: [],
     }
 
     render() {
+        let org_id = window.globals.OrgId || "root";
+
         return(
             <Modal show={true}
                    size="lg"
@@ -173,11 +79,23 @@ class EditSecretDialog extends Component {
                 <Modal.Title>{T("Edit Secret properties")}</Modal.Title>
               </Modal.Header>
               <Modal.Body >
-                <h1>{T("Edit Secret")} { this.state.secret.name } </h1>
+                <h1>{T("Edit Secret")} { this.props.secret.name } </h1>
                 {T("Share secret with these users")}
                 <UserForm
+                  includeSuperuser={true}
                   value={this.state.new_users}
                   onChange={users=>this.setState({new_users: users})}/>
+                { org_id == "root" &&
+                  <VeloForm
+                    value={this.state.visible_to_all_orgs}
+                    setValue={x=>this.setState(
+                        {visible_to_all_orgs: x==="Y"})}
+                    param={{
+                        name: T("Visible To All Orgs"),
+                        description: T("Make the secret visible to all sub orgs"),
+                        type: "bool",
+                    }}/>
+                }
 
               </Modal.Body>
               <Modal.Footer>
@@ -233,6 +151,7 @@ class DeleteSecretDialog extends Component {
         secret: {},
         previous_users: [],
         new_users: [],
+        visible_to_all_orgs: false,
     }
 
     render() {
@@ -263,74 +182,6 @@ class DeleteSecretDialog extends Component {
         );
     }
 }
-
-class DeleteSecretTypeDialog extends Component {
-    static propTypes = {
-        secret: PropTypes.object,
-        onClose: PropTypes.func.isRequired,
-    }
-
-    componentDidMount = () => {
-        this.source = CancelToken.source();
-    }
-
-    componentWillUnmount = () => {
-        this.source.cancel();
-    }
-
-    deleteSecret = ()=>{
-        this.source.cancel();
-        this.source = CancelToken.source();
-
-        if(!this.props.secret) {
-            return;
-        }
-
-        api.post("v1/DeleteSecretDefinition", {
-            type_name: this.props.secret.type_name,
-        },  this.source.token).then(response=>{
-            if (response.cancel)
-                return;
-
-            this.props.onClose();
-        });
-    }
-
-    state = {
-        secret: {},
-        previous_users: [],
-        new_users: [],
-    }
-
-    render() {
-        return(
-            <Modal show={true}
-                   size="lg"
-                   enforceFocus={true}
-                   dialogClassName="modal-90w"
-                   onHide={this.props.onClose}>
-              <Modal.Header closeButton>
-                <Modal.Title>{T("Delete secret definition")}</Modal.Title>
-              </Modal.Header>
-              <Modal.Body >
-                <h1>{this.props.secret.name }</h1>
-                {T("This secret type will be permanently deleted")}
-              </Modal.Body>
-              <Modal.Footer>
-                <Button variant="secondary"
-                        onClick={this.props.onClose}>
-                  {T("Close")}
-                </Button>
-                <Button variant="primary"
-                        onClick={this.deleteSecret}>
-                  {T("Do it!")}
-                </Button>
-              </Modal.Footer>
-            </Modal>
-        );
-    }
-}
-
 
 class AddSecretDialog extends Component {
     static propTypes = {
@@ -500,8 +351,15 @@ export default class SecretManager extends Component {
     }
 
     updateTemplate = ()=>{
+        let template = {};
+
+        // Maintain the order of the fields.
+        _.each(this.state.current_definition.fields, x=>{
+            template[x] = this.state.current_definition.template[x] || "";
+        });
+
         this.setState({
-            current_secret: this.state.current_definition.template});
+            current_secret: template});
     }
 
     fetchSecret = (type_name, name) => {
@@ -531,14 +389,6 @@ export default class SecretManager extends Component {
     render() {
         return (
             <Row className="secret-manager">
-              { this.state.showAddSecretTypeDialog &&
-                <AddSecretTypeDialog
-                  onClose={()=>{
-                      this.setState({showAddSecretTypeDialog: false});
-                      this.getSecretDefinitions();
-                  }}
-                />
-              }
               { this.state.showAddSecretDialog &&
                 <AddSecretDialog
                   secret={this.state.current_secret}
@@ -570,15 +420,6 @@ export default class SecretManager extends Component {
                   }}
                 />
               }
-              { this.state.showDeleteSecretTypeDialog &&
-                <DeleteSecretTypeDialog
-                  secret={this.state.current_definition}
-                  onClose={()=>{
-                      this.setState({showDeleteSecretTypeDialog: false});
-                      this.getSecretDefinitions();
-                  }}
-                />
-              }
 
               <Col sm="4">
                 <Container className="selectable user-list">
@@ -587,36 +428,6 @@ export default class SecretManager extends Component {
                       <tr>
                         <th>
                           {T("Secret Types")}
-                          <ToolTip tooltip={T("Delete Secret Type")}>
-                            <Button
-                              onClick={()=>this.setState({
-                                  showDeleteSecretTypeDialog: true
-                              })}
-                              className="new-user-btn"
-                              variant="outline-default"
-                              disabled={_.isEmpty(this.state.current_definition) ||
-                                        this.state.current_definition.built_in}
-                              as="button">
-                              <FontAwesomeIcon icon="trash"/>
-                              <span className="sr-only">
-                                {T("Delete Secret Type")}
-                              </span>
-                            </Button>
-                          </ToolTip>
-                          <ToolTip tooltip={T("Add new type")}>
-                            <Button
-                              onClick={()=>this.setState({
-                                  showAddSecretTypeDialog: true
-                              })}
-                              className="new-user-btn"
-                              variant="outline-default"
-                              as="button">
-                              <FontAwesomeIcon icon="plus"/>
-                              <span className="sr-only">
-                                {T("Add new type")}
-                              </span>
-                            </Button>
-                          </ToolTip>
                         </th>
                       </tr>
                     </thead>

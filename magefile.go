@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/Velocidex/fileb0x/runner"
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
 	"gopkg.in/yaml.v2"
@@ -44,11 +46,11 @@ import (
 )
 
 var (
-	assets = map[string]string{
-		"artifacts/b0x.yaml":        "artifacts/assets/ab0x.go",
-		"config/b0x.yaml":           "config/ab0x.go",
-		"gui/velociraptor/b0x.yaml": "gui/velociraptor/ab0x.go",
-		"crypto/b0x.yaml":           "crypto/ab0x.go",
+	assets = []string{
+		"artifacts/b0x.yaml",
+		"config/b0x.yaml",
+		"gui/velociraptor/b0x.yaml",
+		"crypto/b0x.yaml",
 	}
 
 	index_template = "gui/velociraptor/build/index.html"
@@ -61,8 +63,18 @@ var (
 	musl_xcompiler     = "musl-gcc"
 	name               = "velociraptor"
 	version            = "v" + constants.VERSION
-	base_tags          = " server_vql extras "
+
+	// https://github.com/googleapis/google-cloud-go/issues/11448
+	// google cloud suddenly increased its dependency size by about
+	// 20mb without warning. This little documented tag is used to
+	// remove useless bloat.
+	base_tags = " server_vql extras disable_grpc_modules "
 )
+
+func ReadAllWithLimit(
+	fd io.Reader, limit int) ([]byte, error) {
+	return ioutil.ReadAll(io.LimitReader(fd, int64(limit)))
+}
 
 type Builder struct {
 	goos          string
@@ -74,6 +86,7 @@ type Builder struct {
 	cc            string
 
 	disable_cgo bool
+	sumo        bool
 
 	debug_build bool
 
@@ -83,26 +96,31 @@ type Builder struct {
 	extra_name string
 }
 
-func (self *Builder) Name() string {
-	if self.filename != "" {
-		return self.filename
-	}
+func (self Builder) Name() string {
 
-	if self.goos == "windows" {
-		self.extension = ".exe"
-	}
-
-	name := fmt.Sprintf("%s-%s-%s-%s%s",
+	name := fmt.Sprintf("%s-%s-%s-%s",
 		name, version,
 		self.goos,
-		self.arch,
-		self.extension)
+		self.arch)
+
+	if self.sumo {
+		name += "-sumo"
+	}
 
 	if self.disable_cgo {
 		name += "-nocgo"
 	}
 
 	name += self.extra_name
+
+	if self.filename != "" {
+		name = self.filename
+	}
+
+	// Windows has to have the .exe extension at the end.
+	if self.goos == "windows" {
+		name += ".exe"
+	}
 
 	return name
 }
@@ -157,6 +175,10 @@ func (self Builder) Run() error {
 	}
 
 	tags := base_tags + self.extra_tags
+	if self.sumo {
+		tags += " sumo "
+	}
+
 	args := []string{
 		"build",
 		"-o", filepath.Join("output", self.Name()),
@@ -237,14 +259,40 @@ func Linux() error {
 		arch:       "amd64"}.Run()
 }
 
-func LinuxMusl() error {
+func LinuxDebug() error {
+	return Builder{
+		extra_tags:  " release yara ",
+		goos:        "linux",
+		debug_build: true,
+		arch:        "amd64"}.Run()
+}
+
+func LinuxSumo() error {
+	return Builder{
+		extra_tags: " release yara ",
+		goos:       "linux",
+		sumo:       true,
+		arch:       "amd64"}.Run()
+}
+
+func getMuslBuilder() Builder {
 	return Builder{
 		extra_tags:    " release yara ",
 		goos:          "linux",
 		cc:            "musl-gcc",
 		extra_name:    "-musl",
 		extra_ldflags: "-linkmode external -extldflags \"-static\"",
-		arch:          "amd64"}.Run()
+		arch:          "amd64"}
+}
+
+func LinuxMuslSumo() error {
+	builer := getMuslBuilder()
+	builer.sumo = true
+	return builer.Run()
+}
+
+func LinuxMusl() error {
+	return getMuslBuilder().Run()
 }
 
 func LinuxMuslDebug() error {
@@ -260,13 +308,21 @@ func LinuxMuslDebug() error {
 
 func LinuxMusl386() error {
 	return Builder{
-		extra_tags:    " release yara disable_gui ",
-		goos:          "linux",
-		cc:            "musl-gcc",
-		extra_name:    "-musl",
-		disable_cgo:   true,
+		extra_tags: " release yara disable_gui ",
+		goos:       "linux",
+		cc:         "musl-gcc",
+		extra_name: "-musl",
+		//disable_cgo:   true,
 		extra_ldflags: "-linkmode external -extldflags \"-static\"",
 		arch:          "386"}.Run()
+}
+
+func Linux386() error {
+	return Builder{
+		extra_tags:  " release yara disable_gui ",
+		goos:        "linux",
+		disable_cgo: true,
+		arch:        "386"}.Run()
 }
 
 // A Linux binary without the GUI
@@ -286,6 +342,13 @@ func Freebsd() error {
 		// compilers, otherwise disable cgo.
 		disable_cgo: runtime.GOOS != "freebsd",
 		arch:        "amd64"}.Run()
+}
+
+func LinuxArmhf() error {
+	return Builder{goos: "linux",
+		extra_tags: " release yara ",
+		cc:         "arm-linux-gnueabihf-gcc",
+		arch:       "arm"}.Run()
 }
 
 func Aix() error {
@@ -311,12 +374,21 @@ func Version() error {
 	return nil
 }
 
-func Arm() error {
+func LinuxArm() error {
 	return Builder{
 		extra_tags:  " release yara ",
 		goos:        "linux",
 		disable_cgo: true,
 		arch:        "arm",
+	}.Run()
+}
+
+func LinuxMips() error {
+	return Builder{
+		extra_tags:  " release yara ",
+		goos:        "linux",
+		disable_cgo: true,
+		arch:        "mips",
 	}.Run()
 }
 
@@ -337,19 +409,28 @@ func Windows() error {
 		arch:       "amd64"}.Run()
 }
 
+func WindowsSumo() error {
+	return Builder{
+		extra_tags: " release yara ",
+		goos:       "windows",
+		sumo:       true,
+		arch:       "amd64"}.Run()
+}
+
 // Windows client without a gui.
 func WindowsBare() error {
 	return Builder{
-		extra_tags: " release yara disable_gui ",
-		goos:       "windows",
-		arch:       "amd64"}.Run()
+		extra_tags:  " release yara disable_gui ",
+		goos:        "windows",
+		disable_cgo: true,
+		arch:        "amd64"}.Run()
 }
 
 func WindowsDev() error {
 	return Builder{
 		goos:       "windows",
 		extra_tags: " release yara ",
-		filename:   "velociraptor.exe",
+		filename:   "velociraptor",
 		arch:       "amd64"}.Run()
 }
 
@@ -362,7 +443,7 @@ func WindowsTest() error {
 	return Builder{
 		goos:        "windows",
 		extra_tags:  " release yara ",
-		filename:    "velociraptor.exe",
+		filename:    "velociraptor",
 		arch:        "amd64",
 		extra_flags: []string{"-race"}}.Run()
 }
@@ -418,7 +499,8 @@ func DarwinBase() error {
 
 func Clean() error {
 	for _, target := range assets {
-		err := sh.Rm(target)
+		go_target := filepath.Join(filepath.Dir(target), "ab0x.go")
+		err := sh.Rm(go_target)
 		if err != nil {
 			return err
 		}
@@ -435,6 +517,21 @@ func Assets() error {
 	}
 
 	return ensure_assets()
+}
+
+// Build only essential assets
+func BasicAssets() error {
+	for _, asset := range assets {
+		if strings.Contains("gui", asset) {
+			continue
+		}
+
+		err := fileb0x(asset)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func build_gui_files() error {
@@ -495,18 +592,14 @@ func hash() string {
 	return hash
 }
 
+func current_branch() string {
+	branch, _ := sh.Output("git", "rev-parse", "--abbrev-ref", "HEAD")
+	return branch
+}
+
+// Build the asset by linking directly to fileb0x
 func fileb0x(asset string) error {
-	err := sh.Run("fileb0x", asset)
-	if err != nil {
-		err = sh.Run(mg.GoCmd(), "install", "github.com/Velocidex/fileb0x@d54f4040016051dd9657ce04d0ae6f31eab99bc6")
-		if err != nil {
-			return err
-		}
-
-		err = sh.Run("fileb0x", asset)
-	}
-
-	return err
+	return runner.Process(asset)
 }
 
 func ensure_assets() error {
@@ -516,18 +609,10 @@ func ensure_assets() error {
 		index_template, `="/app/assets/index`,
 		`="{{.BasePath}}/app/assets/index`)
 
-	for asset, target := range assets {
-		before := timestamp_of(target)
+	for _, asset := range assets {
 		err := fileb0x(asset)
 		if err != nil {
 			return err
-		}
-		// Only do this if the file has changed.
-		if before != timestamp_of(target) {
-			err = replace_string_in_file(target, "func init()", "func Init()")
-			if err != nil {
-				return err
-			}
 		}
 	}
 
@@ -576,7 +661,7 @@ func UpdateDependentTools() error {
 		return nil
 	}
 
-	v, err := semver.NewVersion(constants.VERSION)
+	v, err := semver.NewVersion(constants.CLIENT_VERSION)
 	if err != nil {
 		return err
 	}
@@ -588,7 +673,7 @@ func UpdateDependentTools() error {
 	}
 	defer fd.Close()
 
-	data, err := ioutil.ReadAll(fd)
+	data, err := ReadAllWithLimit(fd, constants.MAX_MEMORY)
 	if err != nil {
 		return err
 	}
@@ -601,7 +686,8 @@ func UpdateDependentTools() error {
 	}
 	defer outfd.Close()
 
-	data = bytes.ReplaceAll(data, []byte("<VERSION>"), []byte(constants.VERSION))
+	data = bytes.ReplaceAll(data, []byte("<VERSION>"),
+		[]byte(constants.CLIENT_VERSION))
 	data = bytes.ReplaceAll(data, []byte("<VERSION_BARE>"),
 		[]byte(fmt.Sprintf("%d.%d", v.Major(), v.Minor())))
 
@@ -688,7 +774,7 @@ func Deadcode() error {
 		return err
 	}
 
-	data, err := ioutil.ReadAll(fd)
+	data, err := ReadAllWithLimit(fd, constants.MAX_MEMORY)
 	if err != nil {
 		return err
 	}
@@ -703,7 +789,10 @@ func Deadcode() error {
 	ignore_functions := regexp.MustCompile(strings.Join(ignore.IgnoreFunctions, "|"))
 	ignore_matches := regexp.MustCompile(strings.Join(ignore.IgnoreMatches, "|"))
 
-	out, err := sh.OutCmd("deadcode")("-tags", "server_vql extras", "-json", "./bin")
+	// go install golang.org/x/tools/cmd/deadcode@latest
+	out, err := sh.OutputWith(map[string]string{
+		"GOOS": "windows",
+	}, "deadcode", "-tags", "server_vql extras", "-json", "./bin")
 	if err != nil {
 		return err
 	}
@@ -743,4 +832,114 @@ func Deadcode() error {
 	fmt.Printf("deadcode reported %v functions, %v were suppressed\n",
 		count, suppressed)
 	return nil
+}
+
+type container struct {
+	Tags []string `json:"tags"`
+}
+
+type containerMetadata struct {
+	Container container `json:"container"`
+}
+
+type containerResponse struct {
+	Id       uint64            `json:"id"`
+	Metadata containerMetadata `json:"metadata"`
+}
+
+func InString(hay []string, needle string) bool {
+	for _, x := range hay {
+		if x == needle {
+			return true
+		}
+	}
+
+	return false
+}
+
+func doesContainerExist(name string) bool {
+	fmt.Printf("checking for container with tag %v\n", name)
+
+	var res []containerResponse
+	out, err := sh.OutputWith(map[string]string{},
+		"gh", "api",
+		"/orgs/velocidex/packages/container/velociraptor-server/versions")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return false
+	}
+
+	err = json.Unmarshal([]byte(out), &res)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return false
+	}
+
+	//fmt.Printf("Res %#v\n", json.MustMarshalString(res))
+	for _, entry := range res {
+		if InString(entry.Metadata.Container.Tags, name) {
+			fmt.Printf("Found container: %v\n",
+				json.MustMarshalString(entry))
+			return true
+		}
+	}
+
+	return false
+}
+
+// Build the container
+func Container() error {
+	tag := constants.VERSION
+	fmt.Printf("Current_branch %v\n", current_branch())
+
+	// Always update the latest master branch
+	if current_branch() == "master" {
+		tag = "latest"
+
+	} else {
+
+		// For release branches only push the first image after
+		// release.
+		if doesContainerExist(tag) {
+			fmt.Printf("Container with tag %v already exists", tag)
+			return nil
+		}
+	}
+
+	builder := getMuslBuilder()
+
+	// We really want the sumo build inside the container.
+	builder.sumo = true
+
+	target := "output/" + builder.Name()
+	fmt.Printf("Getting binary from %v\n", target)
+
+	// Copy the binary to the docker directory
+	err := sh.Copy("Docker/bin/velociraptor", target)
+	if err != nil {
+		// If it is not there, build it.
+		err := LinuxMuslSumo()
+		if err != nil {
+			return err
+		}
+		err = sh.Copy("Docker/bin/velociraptor", target)
+		if err != nil {
+			return err
+		}
+	}
+
+	image := "ghcr.io/velocidex/velociraptor-server:" + tag
+
+	// Build the docker image
+	err = sh.Run("docker", "buildx", "build", "-t", image,
+		"--label", fmt.Sprintf("version=%v", constants.VERSION),
+		"--label", "commit_hash="+hash(),
+		"--label", "build_time="+time.Now().Format(time.RFC3339),
+		"Docker")
+	if err != nil {
+		return err
+	}
+
+	// Upload the image to the repository
+	return sh.Run("docker", "push", image)
 }

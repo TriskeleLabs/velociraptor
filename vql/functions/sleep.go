@@ -2,8 +2,9 @@ package functions
 
 import (
 	"context"
-	"math/rand"
 	"time"
+
+	"www.velocidex.com/golang/velociraptor/utils/rand"
 
 	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -22,7 +23,7 @@ func (self *SleepFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("sleep", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "sleep", args)()
 
 	arg := &SleepArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)

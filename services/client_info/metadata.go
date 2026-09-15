@@ -1,24 +1,77 @@
 package client_info
 
+/*
+   Client metadata are arbitrary key/value pairs stored about a
+   client.
+
+   There are two types of metadata:
+
+   * Indexed metadata is searchable via the client search. The key of
+     the indexed metadata is used as a verb in the search bar. For *
+     example `foo:bar` will search for a metadata key of foo with *
+     value of bar.
+
+     Indexed metadata fields are specified in the
+     Defaults.indexed_client_metadata field in the configuration file.
+
+   * Non-indexed metadata is not indexed but is still associated with
+     the client record.
+
+   We assume the total metadata record is fairly small and therefore
+   write it into the datastore atomically.
+
+   ## Internal organization
+
+   The indexed fields are stored with the client info record as they
+   can be written into the snapshot.
+
+   ClientInfo.Metadata - contains only the indexed k/v pairs in an
+      unordered map.
+
+   ClientInfo.AllMetadata - an ordered map or k/v pairs read/written
+     from the metadata datastore object.
+
+*/
+
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 
 	"github.com/Velocidex/ordereddict"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
-func (self ClientInfoManager) GetMetadata(ctx context.Context,
+func (self *ClientInfoManager) GetMetadata(ctx context.Context,
+	client_id string) (*ordereddict.Dict, error) {
+	return self.storage.GetMetadata(ctx, self.config_obj, client_id)
+}
+
+func (self *ClientInfoManager) SetMetadata(ctx context.Context,
+	client_id string, metadata *ordereddict.Dict, principal string) error {
+	return self.storage.SetMetadata(ctx, self.config_obj,
+		client_id, metadata, principal)
+}
+
+func (self *Store) GetMetadata(ctx context.Context,
+	config_obj *config_proto.Config,
+	client_id string) (*ordereddict.Dict, error) {
+
+	return self._GetMetadata(ctx, config_obj, client_id)
+}
+
+func (self *Store) _GetMetadata(ctx context.Context,
+	config_obj *config_proto.Config,
 	client_id string) (*ordereddict.Dict, error) {
 
 	client_path_manager := paths.NewClientPathManager(client_id)
-	db, err := datastore.GetDB(self.config_obj)
+	db, err := datastore.GetDB(config_obj)
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +79,7 @@ func (self ClientInfoManager) GetMetadata(ctx context.Context,
 	// If the metadata does not exist - this is not an error we just
 	// return a blank one.
 	result := &api_proto.ClientMetadata{}
-	err = db.GetSubject(self.config_obj,
+	err = db.GetSubject(config_obj,
 		client_path_manager.Metadata(), result)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -39,92 +92,231 @@ func (self ClientInfoManager) GetMetadata(ctx context.Context,
 	return result_dict, nil
 }
 
-func (self ClientInfoManager) SetMetadata(ctx context.Context,
-	client_id string, metadata *ordereddict.Dict, principal string) error {
+func (self *ClientInfoManager) ModifyMetadata(
+	ctx context.Context, config_obj *config_proto.Config,
+	client_id, principal string, cb func(*ordereddict.Dict) (
+		*ordereddict.Dict, error)) error {
 
-	existing_metadata, err := self.GetMetadata(ctx, client_id)
+	updated_keys := []string{}
+
+	err := self.storage.ModifyMetadata(ctx, config_obj, client_id,
+		func(metadata *ordereddict.Dict) (*ordereddict.Dict, error) {
+			existing := metadata.Copy()
+			new_metadata, err := cb(metadata)
+			if err != nil {
+				return nil, err
+			}
+
+			// calculate the differences
+			for _, item := range new_metadata.Items() {
+				existing_value, pres := existing.GetString(item.Key)
+				if !pres {
+					updated_keys = append(updated_keys, item.Key)
+					continue
+				}
+
+				value := utils.ToString(item.Value)
+				if value != existing_value {
+					updated_keys = append(updated_keys, item.Key)
+				}
+				existing.Delete(item.Key)
+			}
+
+			updated_keys = append(updated_keys, existing.Keys()...)
+
+			return new_metadata, nil
+		})
 	if err != nil {
 		return err
 	}
 
-	// Merge the new keys with the existing metdata
-	updated_keys := []string{}
-	for _, key := range metadata.Keys() {
-		value_any, _ := metadata.Get(key)
-		if utils.IsNil(value_any) {
-			updated_keys = append(updated_keys, key)
-			existing_metadata.Set(key, nil)
-			continue
-		}
+	// Now audit which fields were modified.
+	return auditMetadataChange(
+		ctx, config_obj, client_id, principal, updated_keys)
+}
 
-		value, ok := value_any.(string)
-		if !ok {
-			value = utils.ToString(value_any)
-		}
+// Modify the metadata atomically. This avoids the get/modify/set
+// pattern and is race free.
+func (self *Store) ModifyMetadata(
+	ctx context.Context, config_obj *config_proto.Config,
+	client_id string, cb func(*ordereddict.Dict) (
+		*ordereddict.Dict, error)) error {
 
-		existing_value, pres := existing_metadata.GetString(key)
-		// Update the key is it is not there, or if it is different
-		// from the existing value.
-		if !pres || existing_value != value {
-			updated_keys = append(updated_keys, key)
-			existing_metadata.Update(key, value)
+	// Optionally update the index service.
+	indexer, err := services.GetIndexer(config_obj)
+	if err != nil {
+		return err
+	}
+
+	indexed_fields := make(map[string]bool)
+	if config_obj.Defaults != nil {
+		for _, k := range config_obj.Defaults.IndexedClientMetadata {
+			indexed_fields[k] = true
 		}
 	}
+
+	// Record contains all fields
+	record, err := self._GetMetadata(ctx, config_obj, client_id)
+	if err != nil {
+		return err
+	}
+
+	new_metadata, err := cb(record)
+	if err != nil {
+		return err
+	}
+
+	// Nothing to update
+	if new_metadata == nil {
+		return nil
+	}
+
+	self.mu.Lock()
+	client_record, pres := self.data[client_id]
+	self.mu.Unlock()
+
+	// Modify the client record
+	if !pres {
+		return utils.NotFoundError
+	}
+
+	// This stored object contains all the metadata fields.
+	stored_obj := &api_proto.ClientMetadata{ClientId: client_id}
+
+	err = client_record.Modify(
+		func(client_info *services.ClientInfo) (
+			*services.ClientInfo, error) {
+			// The client_info.Metadata only contains indexed fields
+			if client_info.Metadata != nil {
+				// Unindex all the existing fields
+				for k, v := range client_info.Metadata {
+					_ = indexer.UnsetIndex(client_id, k+":"+v)
+				}
+			}
+
+			// Clear the indexed record and start again.
+			client_info.Metadata = make(map[string]string)
+
+			for _, item := range new_metadata.Items() {
+				key := item.Key
+				if key == "client_id" || key == "metadata" {
+					continue
+				}
+
+				if utils.IsNil(item.Value) {
+					continue
+				}
+
+				value := utils.ToString(item.Value)
+				if indexed_fields[item.Key] {
+					client_info.Metadata[key] = value
+					_ = indexer.SetIndex(client_id, key+":"+value)
+				}
+
+				stored_obj.Items = append(stored_obj.
+					Items, &api_proto.ClientMetadataItem{
+					Key: key, Value: value})
+			}
+
+			return client_info, nil
+		})
+	if err != nil {
+		return err
+	}
+
+	// Now store the full metadata dict in the data store. FIXME: We
+	// are still holding the lock and the below may take a long
+	// time....
+	client_path_manager := paths.NewClientPathManager(client_id)
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return err
+	}
+
+	return db.SetSubject(config_obj,
+		client_path_manager.Metadata(), stored_obj)
+}
+
+func (self *Store) SetMetadata(
+	ctx context.Context, config_obj *config_proto.Config,
+	client_id string, metadata *ordereddict.Dict, principal string) error {
+
+	updated_keys := []string{}
+
+	// Merge the new metadata into the existing metadata
+	err := self.ModifyMetadata(ctx, config_obj, client_id,
+		func(existing_metadata *ordereddict.Dict) (*ordereddict.Dict, error) {
+
+			// Merge the new keys with the existing metadata
+			for _, item := range metadata.Items() {
+				key := item.Key
+
+				// Nill value means to remove the key, but we only
+				// care if the field already is set.
+				if utils.IsNil(item.Value) {
+					updated_keys = append(updated_keys, key)
+					existing_metadata.Delete(key)
+					continue
+				}
+
+				old_value, _ := existing_metadata.GetString(key)
+
+				// Only update the field if the value is changed.
+				value := utils.ToString(item.Value)
+				if old_value != value {
+					updated_keys = append(updated_keys, key)
+				}
+				existing_metadata.Set(key, value)
+
+			}
+
+			// If not fields were actually updated, then do nothing.
+			if len(updated_keys) == 0 {
+				return nil, nil
+			}
+
+			// Update to new metadata.
+			return existing_metadata, nil
+		})
+
+	if err != nil {
+		return err
+	}
+
+	return auditMetadataChange(
+		ctx, config_obj, client_id, principal, updated_keys)
+}
+
+func auditMetadataChange(
+	ctx context.Context, config_obj *config_proto.Config,
+	client_id string, principal string, updated_keys []string) error {
 
 	// Nothing to do here...
 	if len(updated_keys) == 0 {
 		return nil
 	}
 
-	client_path_manager := paths.NewClientPathManager(client_id)
-	db, err := datastore.GetDB(self.config_obj)
-	if err != nil {
-		return err
-	}
-
-	result := &api_proto.ClientMetadata{ClientId: client_id}
-	for _, key := range existing_metadata.Keys() {
-		if key == "client_id" || key == "metadata" {
-			continue
-		}
-
-		value, pres := existing_metadata.GetString(key)
-		if !pres {
-			// Users can set a parameter to NULL to make it disappear.
-			value_any, _ := existing_metadata.Get(key)
-			if utils.IsNil(value_any) {
-				continue
-			}
-			value = fmt.Sprintf("%v", value_any)
-		}
-
-		result.Items = append(result.Items, &api_proto.ClientMetadataItem{
-			Key: key, Value: value})
-	}
-
-	err = db.SetSubject(self.config_obj,
-		client_path_manager.Metadata(), result)
-	if err != nil {
-		return err
-	}
-
-	services.LogAudit(ctx,
-		self.config_obj, principal, "SetMetadata",
+	// Generate an audit log
+	err := services.LogAudit(ctx,
+		config_obj, principal, "SetMetadata",
 		ordereddict.NewDict().
 			Set("updated_keys", updated_keys).
 			Set("client_id", client_id))
-
-	// Notify the changes and log them.
-	journal, err := services.GetJournal(self.config_obj)
 	if err != nil {
 		return err
 	}
 
-	return journal.PushRowsToArtifact(ctx, self.config_obj,
+	// Notify the changes and log them.
+	journal, err := services.GetJournal(config_obj)
+	if err != nil {
+		return err
+	}
+
+	return journal.PushRowsToArtifact(ctx, config_obj,
 		[]*ordereddict.Dict{
 			ordereddict.NewDict().
 				Set("principal", principal).
 				Set("client_id", client_id).
 				Set("updated_keys", updated_keys),
-		}, "Server.Internal.MetadataModifications", "server", "")
+		}, artifacts.CLIENT_METADATA_MODIFICATION)
 }

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -28,10 +28,12 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/Velocidex/yaml/v2"
+	errors "github.com/go-errors/errors"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/json"
 	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/startup"
@@ -48,6 +50,10 @@ var (
 
 	artifact_command_show = artifact_command.Command(
 		"show", "Show an artifact")
+
+	artifact_command_collect_cli_mode = artifact_command_collect.Flag(
+		"cli_help_mode", "Display help like a CLI command").
+		Bool()
 
 	artifact_command_show_name = artifact_command_show.Arg(
 		"name", "Name to show.").Required().String()
@@ -67,6 +73,17 @@ var (
 		"output", "When specified we create a zip file and "+
 			"store all output in it.").
 		Default("").String()
+
+	artifact_command_collect_client_id = artifact_command_collect.Flag(
+		"client_id", "Used for remote API calls to specify the client id "+
+			"to collect from. By default this is `server` to server "+
+			"artifacts").
+		Default("server").String()
+
+	artifact_command_collect_org_id = artifact_command_collect.Flag(
+		"org_id", "Used for remote API calls to specify the org id "+
+			"(default `root`)").
+		Default("root").String()
 
 	artifact_command_collect_timeout = artifact_command_collect.Flag(
 		"timeout", "Time collection out after this many seconds.").
@@ -92,8 +109,8 @@ var (
 		Default("").String()
 
 	artifact_command_collect_format = artifact_command_collect.Flag(
-		"format", "Output format to use  (text,json,csv,jsonl).").
-		Default("json").Enum("text", "json", "csv", "jsonl")
+		"format", "Output format to use  (csv, json, csv_only).").
+		Default("json").Enum("json", "jsonl", "csv", "csv_only")
 
 	artifact_command_collect_names = artifact_command_collect.Arg(
 		"artifact_name", "The artifact name to collect.").
@@ -148,18 +165,29 @@ func doArtifactCollect() error {
 		}
 	}
 
-	config_obj, err := makeDefaultConfigLoader().
-		WithNullLoader().LoadAndValidate()
+	config_obj, err := APIConfigLoader.WithNullLoader().
+		LoadAndValidate()
 	if err != nil {
-		return fmt.Errorf("Unable to create config: %w", err)
+		return err
 	}
 
-	ctx, top_cancel := install_sig_handler()
+	config_obj.Services = services.GenericToolServices()
+
+	ctx, top_cancel := Install_sig_handler()
 	defer top_cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
+	if err != nil {
+		return err
+	}
 	defer sm.Close()
 
+	manager, err := services.GetRepositoryManager(config_obj)
+	if err != nil {
+		return err
+	}
+
+	repository, err := manager.GetGlobalRepository(config_obj)
 	if err != nil {
 		return err
 	}
@@ -182,26 +210,51 @@ func doArtifactCollect() error {
 			parts := strings.SplitN(item, "=", 2)
 			arg_name := parts[0]
 
+			arg_type, err := getParameterType(ctx, config_obj,
+				repository, name, arg_name)
+			if err != nil {
+				return err
+			}
+
 			if len(parts) < 2 {
 				collect_args.Set(arg_name, "Y")
 			} else {
-				collect_args.Set(arg_name, parts[1])
+				collect_args.Set(arg_name,
+					parseArtifactType(arg_type, parts[1]))
 			}
 		}
 
 		spec.Set(name, collect_args)
 	}
 
-	manager, err := services.GetRepositoryManager(config_obj)
-	if err != nil {
-		return err
+	if len(*artifact_command_collect_names) == 0 {
+		return errors.New("Need some artifact to collect")
+	}
+
+	if *artifact_command_collect_cli_mode {
+		for _, name := range *artifact_command_collect_names {
+			return doArtifactCLIHelp(ctx, config_obj, manager, name)
+		}
+	}
+
+	if config_obj.ApiConfig != nil && config_obj.ApiConfig.Name != "" {
+		logging.GetLogger(config_obj, &logging.ToolComponent).
+			Info("API Client configuration loaded - will make gRPC connection.")
+		return doRemoteArtifactCollection(
+			ctx, config_obj, spec,
+			*artifact_command_collect_org_id,
+			*artifact_command_collect_cpu_limit,
+			*artifact_command_collect_timeout,
+			*artifact_command_collect_client_id,
+			*artifact_command_collect_output,
+		)
 	}
 
 	logger := &LogWriter{config_obj: config_obj}
 	scope := manager.BuildScope(services.ScopeBuilder{
 		Config:     config_obj,
 		ACLManager: acl_managers.NullACLManager{},
-		Logger:     log.New(&LogWriter{config_obj: config_obj}, "", 0),
+		Logger:     log.New(logger, "", 0),
 		Env: ordereddict.NewDict().
 			Set("Artifacts", *artifact_command_collect_names).
 			Set("Output", *artifact_command_collect_output).
@@ -218,11 +271,15 @@ func doArtifactCollect() error {
 	// Stick around until the query completes so it gets a chance to
 	// close the collection zip.
 	sm.Wg.Add(1)
-	scope.AddDestructor(func() {
+	err = scope.AddDestructor(func() {
 		sm.Wg.Done()
 	})
+	if err != nil {
+		sm.Wg.Done()
+		return err
+	}
 
-	// If interrupt has occured we cancel everything and wait for any
+	// If interrupt has occurred we cancel everything and wait for any
 	// cleanups to occur. If we return too quickly from the main
 	// thread, we might leave some tempfiles behind.
 	defer func() {
@@ -241,8 +298,8 @@ func doArtifactCollect() error {
 			MaxMemoryHardLimit: *artifact_command_collect_hardmemory,
 			Logger: logging.GetLogger(
 				config_obj, &logging.ToolComponent),
-			OnExit: sm.Close,
 		}
+		Nanny.RegisterOnWarnings(utils.GetId(), sm.Close)
 
 		// Keep the nanny running after the query is done so it can
 		// hard kill the process if cancellation is not enough.
@@ -291,15 +348,14 @@ func doArtifactShow() error {
 		return fmt.Errorf("Unable to create config: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
@@ -311,7 +367,8 @@ func doArtifactShow() error {
 		return err
 	}
 
-	artifact, pres := repository.Get(ctx, config_obj, *artifact_command_show_name)
+	artifact, pres := repository.Get(ctx, config_obj,
+		*artifact_command_show_name)
 	if !pres {
 		return fmt.Errorf("Artifact %s not found",
 			*artifact_command_show_name)
@@ -330,15 +387,14 @@ func doArtifactList() error {
 		return fmt.Errorf("Unable to load config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	var name_regex *regexp.Regexp
 	if *artifact_command_list_name != "" {
@@ -415,6 +471,68 @@ func doArtifactList() error {
 	return nil
 }
 
+func doArtifactCLIHelp(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	manager services.RepositoryManager, artifact_name string) error {
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return err
+	}
+	artifact, pres := repository.Get(ctx, config_obj, artifact_name)
+	if !pres {
+		return utils.Wrap(utils.NotFoundError,
+			"Unknown artifact %v", artifact_name)
+	}
+
+	parse_context, err := app.ParseContext(
+		[]string{"artifacts", "collect", artifact.Name})
+	if err != nil {
+		return err
+	}
+	app.UsageForContextWithTemplate(
+		parse_context, 2, fmt.Sprintf(`
+usage: {{.App.Name}} [<common flags> ...] -r %v [<artifact params> ...]:
+
+%v
+
+Common Flags:
+{{with .Context.Flags|FlagsToTwoColumns}}{{FormatTwoColumnsWithIndent . 4 2}}{{end}}
+Artifact Parameters:
+`, artifact.Name, artifact.Description))
+
+	for _, param := range artifact.Parameters {
+		desc := strings.TrimSpace(param.Description)
+		type_str := ""
+		if param.Type != "" {
+			type_str = fmt.Sprintf(" [%v] ", param.Type)
+			switch param.Type {
+			case "bool":
+				desc += "\n\nValid values: Y / N"
+			case "multichoice":
+				desc += `
+
+NOTE: Provide one or more of the following separated by ,
+Valid values one or more of: ` + strings.Join(param.Choices, ", ")
+
+			case "regex":
+				desc += "\n\nNOTE: Be careful to escape regex backslashes from the shell!"
+			}
+		}
+
+		desc = utils.Indent(utils.WrapString(desc, 100), 10) + "\n"
+
+		if param.Default != "" {
+			fmt.Printf(" --%v%v\n   default: '%v'\n%v",
+				param.Name, type_str, param.Default, desc)
+		} else {
+			fmt.Printf(" --%v%v\n%v",
+				param.Name, type_str, desc)
+		}
+	}
+	return nil
+}
+
 func maybeAddDefinitionsDirectory(config_obj *config_proto.Config) error {
 	if *artifact_definitions_dir != "" {
 		if config_obj.Defaults == nil {
@@ -426,6 +544,48 @@ func maybeAddDefinitionsDirectory(config_obj *config_proto.Config) error {
 			*artifact_definitions_dir)
 	}
 	return nil
+}
+
+// Simplify parsing of some parameter types. Since typing complicated
+// JSON escapes on the command line may be complicated (especially on
+// Windows) we also support some simpler types here
+func parseArtifactType(param_type string, param string) string {
+	switch param_type {
+	case "multichoice", "json_array":
+		var res []string
+		err := json.Unmarshal([]byte(param), &res)
+		if err != nil {
+			// As an alternative for multi choice we allow items to be
+			// separated by comma.
+			for _, part := range strings.Split(param, ",") {
+				res = append(res, strings.TrimSpace(part))
+			}
+			return json.MustMarshalString(res)
+		}
+	}
+	return param
+}
+
+func getParameterType(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	repository services.Repository,
+	artifact_name, param_name string) (string, error) {
+	artifact, pres := repository.Get(ctx, config_obj, artifact_name)
+	if !pres {
+		return "", utils.Wrap(utils.NotFoundError,
+			"Unknown artifact %v", artifact_name)
+	}
+
+	for _, p := range artifact.Parameters {
+		if p.Name == param_name {
+			return p.Type, nil
+		}
+	}
+
+	return "", utils.Wrap(utils.NotFoundError,
+		"Parameter %v not known for artifact %v",
+		param_name, artifact_name)
 }
 
 func init() {

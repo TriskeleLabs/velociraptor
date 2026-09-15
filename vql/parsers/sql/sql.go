@@ -15,7 +15,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -99,7 +98,7 @@ func (self SQLPlugin) Call(
 	go func() {
 		defer close(output_chan)
 		defer utils.RecoverVQL(scope)
-		defer vql_subsystem.RegisterMonitor("sql", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "sql", args)()
 
 		arg := &SQLPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -120,12 +119,11 @@ func (self SQLPlugin) Call(
 			return
 
 		case "sqlite":
-			err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+			err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_READ)
 			if err != nil {
-				scope.Log("sql: %s", err)
+				scope.Log("sql: %v", err)
 				return
 			}
-
 			handle, err = GetHandleSqlite(ctx, arg, scope)
 			if err == notValidDatabase {
 				return
@@ -137,6 +135,15 @@ func (self SQLPlugin) Call(
 			}
 
 		case "mysql", "postgres":
+			err := vql_subsystem.CheckAccess(scope,
+				acls.FILESYSTEM_READ,
+				acls.NETWORK,
+			)
+			if err != nil {
+				scope.Log("sql: %v", err)
+				return
+			}
+
 			handle, err = self.GetHandleOther(scope, arg.ConnString, arg.Driver)
 			if err != nil {
 				scope.Log("sql: %s", err)
@@ -181,7 +188,7 @@ func (self SQLPlugin) Call(
 			// item in the columns slice.
 			row_values := make([]interface{}, len(columns))
 			row_pointers := make([]interface{}, len(columns))
-			for i, _ := range columns {
+			for i := range columns {
 				row_pointers[i] = &row_values[i]
 			}
 
@@ -220,10 +227,11 @@ func (self SQLPlugin) Call(
 
 func (self SQLPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "sql",
-		Doc:      "Run queries against sqlite, mysql, and postgres databases",
-		ArgType:  type_map.AddType(scope, &SQLPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "sql",
+		Doc:     "Run queries against sqlite, mysql, and postgres databases",
+		ArgType: type_map.AddType(scope, &SQLPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ, acls.NETWORK).Build(),
 	}
 }
 

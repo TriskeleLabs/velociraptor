@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -30,7 +30,6 @@ import (
 
 	errors "github.com/go-errors/errors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/crypto/utils"
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
 )
 
@@ -122,9 +121,9 @@ func GenerateServerCert(config_obj *config_proto.Config, name string) (*CertBund
 	}
 
 	days_valid := int64(365)
-	if config_obj.Defaults != nil &&
-		config_obj.Defaults.CertificateValidityDays > 0 {
-		days_valid = config_obj.Defaults.CertificateValidityDays
+	if config_obj.Security != nil &&
+		config_obj.Security.CertificateValidityDays > 0 {
+		days_valid = config_obj.Security.CertificateValidityDays
 	}
 
 	start_time := time.Now()
@@ -136,13 +135,13 @@ func GenerateServerCert(config_obj *config_proto.Config, name string) (*CertBund
 		return nil, err
 	}
 
-	ca_cert, err := utils.ParseX509CertFromPemStr([]byte(
+	ca_cert, err := crypto_utils.ParseX509CertFromPemStr([]byte(
 		config_obj.Client.CaCertificate))
 	if err != nil {
 		return nil, err
 	}
 
-	ca_private_key, err := utils.ParseRsaPrivateKeyFromPemStr(
+	ca_private_key, err := crypto_utils.ParseRsaPrivateKeyFromPemStr(
 		[]byte(config_obj.CA.PrivateKey))
 	if err != nil {
 		return nil, err
@@ -245,13 +244,13 @@ func ReissueServerCert(config_obj *config_proto.Config,
 		return nil, err
 	}
 
-	ca_cert, err := utils.ParseX509CertFromPemStr([]byte(
+	ca_cert, err := crypto_utils.ParseX509CertFromPemStr([]byte(
 		config_obj.Client.CaCertificate))
 	if err != nil {
 		return nil, err
 	}
 
-	ca_private_key, err := utils.ParseRsaPrivateKeyFromPemStr(
+	ca_private_key, err := crypto_utils.ParseRsaPrivateKeyFromPemStr(
 		[]byte(config_obj.CA.PrivateKey))
 	if err != nil {
 		return nil, err

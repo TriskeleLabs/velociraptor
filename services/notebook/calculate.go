@@ -2,7 +2,6 @@ package notebook
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -120,7 +119,10 @@ func (self *NotebookManager) UpdateNotebookCell(
 		notebook_cell.Messages = append(notebook_cell.Messages,
 			"ERROR:"+err.Error())
 
-		self.Store.SetNotebookCell(notebook_metadata.NotebookId, notebook_cell)
+		err1 := self.Store.SetNotebookCell(notebook_metadata.NotebookId, notebook_cell)
+		if err1 != nil {
+			return notebook_cell, err1
+		}
 
 		return notebook_cell, err
 	}
@@ -140,7 +142,7 @@ func (self *NotebookManager) UpdateNotebookCell(
 
 	case job_resp, ok := <-response_chan:
 		if !ok {
-			return notebook_cell, errors.New("Cancelled")
+			return notebook_cell, nil
 		}
 		notebook_resp := &NotebookResponse{}
 		err := json.Unmarshal([]byte(job_resp.Job), notebook_resp)

@@ -1,12 +1,14 @@
 name: Notebooks.Default
 description: |
-  A default notebook.
+  Creates a new notebook with a welcome message and placeholder VQL
+  cell.
 
 type: NOTEBOOK
 
 sources:
   - notebook:
     - type: markdown
+      name: Welcome page
       template: |
         # Welcome to Velociraptor notebooks!
 

@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
@@ -25,6 +25,9 @@ import (
 // client, and simply synced to the server. This dramatically reduces
 // the amount of work done on the server.
 type FlowContext struct {
+	// A counter of uploads sent in the entire collection.
+	upload_id int32
+
 	ctx        context.Context
 	config_obj *config_proto.Config
 	flow_id    string
@@ -33,8 +36,12 @@ type FlowContext struct {
 	req *crypto_proto.FlowRequest
 
 	// Flow wide totals
-	total_rows           uint64
-	total_uploaded_bytes uint64
+	total_rows               uint64
+	total_uploaded_bytes     uint64
+	total_jsonl_bytes        map[string]uint64
+	total_logs               uint64
+	logs_disabled            bool
+	transactions_outstanding uint64
 
 	// Send the messages to this channel
 	output chan *crypto_proto.VeloMessage
@@ -54,9 +61,6 @@ type FlowContext struct {
 	// Logs and uploads are managed per collection, and are shared
 	// with all the queries.
 
-	// A counter of uploads sent in the entire collection.
-	upload_id int32
-
 	// A JSONL buffer with log messages collected for the entire flow.
 	mu                sync.Mutex
 	log_messages      []byte
@@ -65,7 +69,7 @@ type FlowContext struct {
 	error_message     string // If an error occurs trap the error message
 
 	last_stats_timestamp uint64
-	frequency_msec       uint64
+	frequency_ns         uint64
 
 	// We ensure to only send the final flow complete message
 	// once. This will trigger a System.Flow.Completion event on the
@@ -89,40 +93,48 @@ func newFlowContext(ctx context.Context,
 
 	// How often do we send a FlowStat message to sync the server's
 	// flow progress stat.
-	frequency_msec := uint64(5000)
+	frequency := 5 * time.Second
 	if config_obj != nil &&
 		config_obj.Client != nil &&
 		config_obj.Client.DefaultServerFlowStatsUpdate > 0 {
-		frequency_msec = config_obj.Client.DefaultServerFlowStatsUpdate
+		frequency = time.Second * time.Duration(
+			config_obj.Client.DefaultServerFlowStatsUpdate)
 	}
+
 	if req.FlowRequest.FlowUpdateTime > 0 {
-		frequency_msec = req.FlowRequest.FlowUpdateTime
+		frequency = time.Second * time.Duration(
+			req.FlowRequest.FlowUpdateTime)
 	}
 
 	// Default is set by config file
-	batch_delay := uint64(5000)
+	batch_delay := 5 * time.Second
 	if config_obj != nil &&
 		config_obj.Frontend != nil &&
 		config_obj.Frontend.Resources != nil &&
 		config_obj.Frontend.Resources.DefaultLogBatchTime > 0 {
-		batch_delay = config_obj.Frontend.Resources.DefaultLogBatchTime
+		batch_delay = time.Millisecond *
+			time.Duration(config_obj.Frontend.Resources.DefaultLogBatchTime)
 	}
+
 	if req.FlowRequest.LogBatchTime > 0 {
-		batch_delay = req.FlowRequest.LogBatchTime
+		batch_delay = time.Millisecond *
+			time.Duration(req.FlowRequest.LogBatchTime)
 	}
 
 	// Allow the flow to be cancelled.
 	sub_ctx, cancel := context.WithCancel(ctx)
 	self := &FlowContext{
-		ctx:            sub_ctx,
-		cancel:         cancel,
-		wg:             &sync.WaitGroup{},
-		output:         output,
-		req:            req.FlowRequest,
-		frequency_msec: frequency_msec,
-		config_obj:     config_obj,
-		flow_id:        flow_id,
-		owner:          owner,
+		ctx:               sub_ctx,
+		cancel:            cancel,
+		wg:                &sync.WaitGroup{},
+		output:            output,
+		req:               req.FlowRequest,
+		frequency_ns:      uint64(frequency.Nanoseconds()),
+		config_obj:        config_obj,
+		flow_id:           flow_id,
+		owner:             owner,
+		total_jsonl_bytes: make(map[string]uint64),
+
 		// Disable checkpoints for now since the server will get the
 		// flow state anyway.
 		// checkpoint:     makeCheckpoint(config_obj, flow_id),
@@ -134,7 +146,7 @@ func newFlowContext(ctx context.Context,
 			case <-sub_ctx.Done():
 				return
 
-			case <-time.After(time.Duration(batch_delay) * time.Millisecond):
+			case <-time.After(batch_delay):
 				stats := self.MaybeSendStats()
 				if stats != nil {
 					select {
@@ -149,44 +161,6 @@ func newFlowContext(ctx context.Context,
 	}()
 
 	return self
-}
-
-func makeCheckpoint(
-	config_obj *config_proto.Config,
-	flow_id string) string {
-
-	if config_obj == nil ||
-		config_obj.Client == nil ||
-		config_obj.Client.DisableCheckpoints {
-		return ""
-	}
-
-	checkpoint, err := ioutil.TempFile("",
-		fmt.Sprintf("checkpoint_*.%s", flow_id))
-	if err != nil {
-		return ""
-	}
-	// Start off with something sensible.
-	checkpoint.Write([]byte(
-		json.Format(`{"session_id": %q, "flow_stats": {}}`, flow_id)))
-	// We just need the name
-	checkpoint.Close()
-
-	writeback_service := writeback.GetWritebackService()
-	writeback_service.MutateWriteback(config_obj,
-		func(wb *config_proto.Writeback) error {
-			wb.Checkpoints = append(wb.Checkpoints,
-				&config_proto.FlowCheckPoint{
-					FlowId: flow_id,
-					Path:   checkpoint.Name(),
-				})
-			return writeback.WritebackUpdateLevel2
-		})
-
-	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
-	logger.Info("Creating a flow checkpoint at <green>%v</>", checkpoint.Name())
-
-	return checkpoint.Name()
 }
 
 // Is the flow complete? A flow is complete when all its queries are
@@ -205,6 +179,7 @@ func (self *FlowContext) isFlowComplete() bool {
 		return false
 	}
 
+	// We are only complete when *all* the responders are complete!
 	for _, r := range self.responders {
 		if !r.IsComplete() {
 			return false
@@ -219,11 +194,29 @@ func (self *FlowContext) ChargeRows(rows uint64) error {
 
 	self.total_rows += rows
 	if self.req.MaxRows > 0 && self.total_rows > self.req.MaxRows {
-		msg := fmt.Sprintf("Rows %v exceeded limit %v for flow %v. Cancelling.",
+		return fmt.Errorf(
+			"Rows %v exceeded limit %v for flow %v. Cancelling.",
 			self.total_rows, self.req.MaxRows, self.flow_id)
-		return errors.New(msg)
+
 	}
 	return nil
+}
+
+func (self *FlowContext) GetJSONLBytes(name string) uint64 {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	count := self.total_jsonl_bytes[name]
+	return count
+}
+
+func (self *FlowContext) ChargeJSONLBytes(name string, bytes uint64) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	count := self.total_jsonl_bytes[name]
+	count += bytes
+	self.total_jsonl_bytes[name] = count
 }
 
 func (self *FlowContext) ChargeBytes(bytes uint64) error {
@@ -252,11 +245,11 @@ func (self *FlowContext) Cancel() {
 func (self *FlowContext) _Cancel() {
 	// Cancel all outstanding queries
 	for _, r := range self.responders {
-		r.RaiseError(self.ctx, "Cancelled")
+		r.Cancel(self.ctx)
 	}
 
 	self.addLogMessage("ERROR",
-		fmt.Sprintf("Cancelled all inflight queries for flow %v", self.flow_id))
+		fmt.Sprintf("Cancelled all in-flight queries for flow %v", self.flow_id))
 
 	self._Close()
 }
@@ -273,13 +266,13 @@ func (self *FlowContext) Close() {
 
 func (self *FlowContext) _Close() {
 	if self.owner != nil {
-		self.owner.removeFlowContext(self.flow_id)
+		self.owner.RemoveFlowContext(self.flow_id)
 	}
 	if self.checkpoint != "" {
 		os.Remove(self.checkpoint)
 
 		writeback_service := writeback.GetWritebackService()
-		writeback_service.MutateWriteback(self.config_obj,
+		_ = writeback_service.MutateWriteback(self.config_obj,
 			func(wb *config_proto.Writeback) error {
 				new_list := make([]*config_proto.FlowCheckPoint,
 					0, len(wb.Checkpoints))
@@ -339,9 +332,10 @@ func (self *FlowContext) FlushLogMessages(ctx context.Context) {
 }
 
 func (self *FlowContext) flushLogMessages(ctx context.Context) {
+	var messages []*crypto_proto.VeloMessage
 	buf, id, count, error_message := self.getLogMessages()
 	if len(buf) > 0 {
-		self.output <- &crypto_proto.VeloMessage{
+		messages = append(messages, &crypto_proto.VeloMessage{
 			SessionId: self.flow_id,
 			RequestId: constants.LOG_SINK,
 			LogMessage: &crypto_proto.LogMessage{
@@ -349,15 +343,28 @@ func (self *FlowContext) flushLogMessages(ctx context.Context) {
 				NumberOfRows: count,
 				Jsonl:        string(buf),
 				ErrorMessage: error_message,
-			}}
+			}})
 	}
+
+	// Dump the messages to the output in the background so we do not
+	// block the locks for too long.
+	go func() {
+		for _, msg := range messages {
+			select {
+			case <-ctx.Done():
+				return
+
+			case self.output <- msg:
+			}
+		}
+	}()
 }
 
 // Alert messages are sent in their own packet because the server will
 // redirect them into the alert queue.
 func (self *FlowContext) sendAlertMessage(
 	ctx context.Context, level string,
-	// msg containes serialized services.AlertMessage
+	// msg contains serialized services.AlertMessage
 	msg string) {
 
 	self.mu.Lock()
@@ -372,7 +379,7 @@ func (self *FlowContext) sendAlertMessage(
 			Id:           int64(id),
 			NumberOfRows: 1,
 			Jsonl: json.Format(
-				"{\"client_time\":%d,\"level\":%q,\"message\":%q}\n",
+				`{"client_time":%d,"level":%q,"message":%q}`+"\n",
 				int(utils.GetTime().Now().Unix()), level, msg),
 			Level: logging.ALERT,
 		}}
@@ -388,13 +395,31 @@ func (self *FlowContext) AddLogMessage(
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	// Suppress logs
+	self.total_logs++
+	if self.logs_disabled {
+		return
+	}
+
+	max_logs := uint64(100000)
+	if self.req.MaxLogs > 0 {
+		max_logs = self.req.MaxLogs
+	}
+
+	if self.total_logs >= max_logs {
+		self.addLogMessage(level,
+			"Log Limit Exceeded - suppressing further logs")
+		self.logs_disabled = true
+		return
+	}
+
 	self.addLogMessage(level, msg)
 }
 
 func (self *FlowContext) addLogMessage(level string, msg string) {
 	self.log_message_count++
 	self.log_messages = append(self.log_messages, json.Format(
-		"{\"client_time\":%d,\"level\":%q,\"message\":%q}\n",
+		`{"client_time":%d,"level":%q,"message":%q}`+"\n",
 		int(utils.GetTime().Now().Unix()), level, msg)...)
 }
 
@@ -413,7 +438,8 @@ func (self *FlowContext) NewResponder(
 	// Done in the Close() method.
 	self.wg.Add(1)
 	responder := newFlowResponder(
-		self.ctx, self.config_obj, self.wg, self.output, self)
+		self.ctx, self.config_obj, self.wg, self.output,
+		self.req, self)
 	self.responders = append(self.responders, responder)
 
 	return self.ctx, responder
@@ -430,10 +456,10 @@ func (self *FlowContext) MaybeSendStats() *crypto_proto.VeloMessage {
 		return nil
 	}
 
-	now := uint64(utils.GetTime().Now().UnixNano() / 1000)
+	now := uint64(utils.GetTime().Now().UnixNano())
 	last_timestamp := self.last_stats_timestamp
 	if self.isFlowComplete() ||
-		now-last_timestamp > self.frequency_msec {
+		now-last_timestamp > self.frequency_ns {
 		self.last_stats_timestamp = now
 		return self.getStats()
 	}
@@ -457,6 +483,39 @@ func (self *FlowContext) sendStats() {
 	}
 }
 
+func (self *FlowContext) GetStatsDicts() *ordereddict.Dict {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	query_status := []*ordereddict.Dict{}
+
+	// Fill in all the responder's stats.
+	for _, r := range self.responders {
+		status := r.GetStatus()
+
+		query_status = append(query_status, ordereddict.NewDict().
+			Set("Status", status.Status.String()).
+			Set("Error", status.ErrorMessage).
+			Set("Backtrace", status.Backtrace).
+			Set("Duration", time.Duration(status.Duration).Round(time.Second).String()).
+			Set("FirstActive", time.Unix(0, int64(status.FirstActive*1000)).
+				Format(time.RFC3339)).
+			Set("LastActive", time.Unix(0, int64(status.LastActive*1000)).
+				Format(time.RFC3339)).
+			Set("QueriesWithResponse", status.NamesWithResponse).
+			Set("ResultRows", status.ResultRows).
+			Set("LogRows", status.LogRows).
+			Set("UploadedFiles", status.UploadedFiles).
+			Set("UploadedBytes", status.UploadedBytes).
+			Set("ExpectedUploadedBytes", status.ExpectedUploadedBytes))
+	}
+
+	return ordereddict.NewDict().
+		Set("SessionId", self.flow_id).
+		Set("QueryStatus", query_status).
+		Set("FlowComplete", self.isFlowComplete())
+}
+
 func (self *FlowContext) GetStats() *crypto_proto.VeloMessage {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -469,7 +528,9 @@ func (self *FlowContext) getStats() *crypto_proto.VeloMessage {
 	result := &crypto_proto.VeloMessage{
 		SessionId: self.flow_id,
 		RequestId: constants.STATS_SINK,
-		FlowStats: &crypto_proto.FlowStats{},
+		FlowStats: &crypto_proto.FlowStats{
+			TransactionsOutstanding: self.transactions_outstanding,
+		},
 	}
 
 	// Fill in all the responder's stats.
@@ -491,11 +552,25 @@ func (self *FlowContext) getStats() *crypto_proto.VeloMessage {
 			fd, err := os.OpenFile(self.checkpoint,
 				os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0660)
 			if err == nil {
-				fd.Write(serialized)
+				_, _ = fd.Write(serialized)
 			}
 			fd.Close()
 		}
 	}
 
 	return result
+}
+
+func (self *FlowContext) IncTransaction() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.transactions_outstanding++
+}
+
+func (self *FlowContext) DecTransaction() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.transactions_outstanding--
 }

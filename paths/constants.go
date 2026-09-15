@@ -17,6 +17,9 @@ var (
 				SetType(api.PATH_TYPE_DATASTORE_PROTO).
 				SetTag("ClientIndex")
 
+	FLOWS_JOUNRNAL = path_specs.NewSafeFilestorePath("flows_journal").
+			SetType(api.PATH_TYPE_FILESTORE_JSON)
+
 	// An index of all the hunts and clients.
 	HUNT_INDEX = path_specs.NewSafeDatastorePath("hunt_index").
 			SetType(api.PATH_TYPE_DATASTORE_PROTO)
@@ -45,7 +48,7 @@ var (
 			SetType(api.PATH_TYPE_DATASTORE_JSON)
 
 	HUNTS_ROOT = path_specs.NewSafeDatastorePath("hunts").
-			SetType(api.PATH_TYPE_DATASTORE_PROTO)
+			SetType(api.PATH_TYPE_DATASTORE_JSON)
 
 	USERS_ROOT = path_specs.NewUnsafeDatastorePath("users").
 			SetType(api.PATH_TYPE_DATASTORE_JSON)

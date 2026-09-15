@@ -8,10 +8,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"www.velocidex.com/golang/go-ntfs/parser"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vql_constants "www.velocidex.com/golang/velociraptor/vql/constants"
 	"www.velocidex.com/golang/velociraptor/vql/readers"
@@ -19,11 +19,6 @@ import (
 )
 
 var (
-	ntfsAccessorCurrentOpened = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "accessor_ntfs_current_open",
-		Help: "Number of currently opened handles to the ntfs accessor.",
-	})
-
 	ntfsCacheTotalOpened = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ntfs_cache_total_open",
 		Help: "Total Number of times we opened the ntfs cache",
@@ -65,6 +60,10 @@ type NTFSCachedContext struct {
 	paged_reader      *readers.AccessorReader
 	ntfs_ctx          *ntfs.NTFSContext
 
+	id           uint64
+	started      time.Time
+	next_refresh time.Time
+
 	// When this is closed we stop refreshing the cache. Normally
 	// only closed when the scope is destroyed.
 	done chan bool
@@ -76,6 +75,11 @@ func (self *NTFSCachedContext) Start(
 	ctx context.Context, scope vfilter.Scope) (err error) {
 
 	cache_life := vql_constants.GetNTFSCacheTime(ctx, scope)
+
+	self.mu.Lock()
+	self.started = utils.GetTime().Now()
+	self.next_refresh = self.started.Add(cache_life)
+	self.mu.Unlock()
 
 	lru_size := vql_subsystem.GetIntFromRow(
 		self.scope, self.scope, constants.NTFS_CACHE_SIZE)
@@ -121,7 +125,6 @@ func (self *NTFSCachedContext) Start(
 				return
 
 			case <-time.After(cache_life):
-				scope.Log("DEBUG:Resetting NTFS Cache")
 				self.Close()
 			}
 		}
@@ -141,7 +144,6 @@ func (self *NTFSCachedContext) Close() {
 func (self *NTFSCachedContext) _CloseWithLock() {
 	if self.ntfs_ctx != nil {
 		self.ntfs_ctx.Close()
-		self.ntfs_ctx = nil
 	}
 	self.paged_reader.Close()
 }
@@ -230,17 +232,24 @@ func getNTFSCache(scope vfilter.Scope,
 	// Get the cache context from the root scope's cache
 	cache_ctx, ok := vql_subsystem.CacheGet(scope, key).(*NTFSCachedContext)
 	if !ok {
+		// Create a new cache context.
+
 		cache_ctx = &NTFSCachedContext{
 			accessor:          accessor,
 			device:            device,
 			device_is_raw_mft: device_is_raw_mft,
 			scope:             scope,
 			done:              make(chan bool),
+			id:                utils.GetId(),
 		}
-		err := cache_ctx.Start(context.Background(), scope)
+
+		subctx, cancel := context.WithCancel(context.Background())
+		err := cache_ctx.Start(subctx, scope)
 		if err != nil {
 			return nil, err
 		}
+
+		Tracker.Register(cache_ctx)
 
 		// Destroy the context when the scope is done.
 		err = vql_subsystem.GetRootScope(scope).AddDestructor(func() {
@@ -250,6 +259,8 @@ func getNTFSCache(scope vfilter.Scope,
 			}
 			cache_ctx.mu.Unlock()
 			cache_ctx.Close()
+			cancel()
+			Tracker.Unregister(cache_ctx)
 		})
 		if err != nil {
 			return nil, err
@@ -261,7 +272,7 @@ func getNTFSCache(scope vfilter.Scope,
 	return cache_ctx, nil
 }
 
-func GetScopeOptions(scope vfilter.Scope) parser.Options {
+func GetScopeOptions(scope vfilter.Scope) ntfs.Options {
 	directory_depth := vql_subsystem.GetIntFromRow(
 		scope, scope, constants.NTFS_MAX_DIRECTORY_DEPTH)
 	if directory_depth == 0 {
@@ -280,7 +291,7 @@ func GetScopeOptions(scope vfilter.Scope) parser.Options {
 	full_path_resolution := vql_subsystem.GetBoolFromRow(
 		scope, scope, constants.NTFS_DISABLE_FULL_PATH_RESOLUTION)
 
-	return parser.Options{
+	return ntfs.Options{
 		MaxDirectoryDepth:         int(directory_depth),
 		MaxLinks:                  int(max_links),
 		IncludeShortNames:         include_short_names,

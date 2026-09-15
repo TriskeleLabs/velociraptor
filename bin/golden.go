@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -32,9 +32,12 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/Velocidex/yaml/v2"
+	"github.com/Velocidex/velociraptor-site-search/api"
 	errors "github.com/go-errors/errors"
+	"github.com/mccutchen/go-httpbin/v2/httpbin"
 	"github.com/sergi/go-diff/diffmatchpatch"
+	proto "google.golang.org/protobuf/proto"
+	"gopkg.in/yaml.v3"
 	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -42,6 +45,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/crypto/storage"
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
 	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/directory"
+	"www.velocidex.com/golang/velociraptor/file_store/memory"
 	"www.velocidex.com/golang/velociraptor/json"
 	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
@@ -50,10 +55,12 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/startup"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vql/psutils"
 	"www.velocidex.com/golang/velociraptor/vql/remapping"
+	"www.velocidex.com/golang/velociraptor/vtesting"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
@@ -91,9 +98,50 @@ var (
 	}
 )
 
+type queryDesc struct {
+	Comment string
+	Query   string
+}
+
+type Transform struct {
+	// Search for the content of this scope variable and replace it.
+	Scope string `yaml:"Scope"`
+
+	// Search for the literal string in the output and replace it.
+	Search string `yaml:"Search"`
+
+	// Search for the regular expression in the output and replace it.
+	Regexp  string `yaml:"Regexp"`
+	regexp  *regexp.Regexp
+	Replace string `yaml:"Replace"`
+}
+
 type testFixture struct {
-	Parameters map[string]string `json:"Parameters"`
-	Queries    []string          `json:"Queries"`
+	Transforms    []Transform
+	Parameters    map[string]string
+	Queries       []queryDesc
+	ConfigPatches []string
+	ConfigMerges  []string
+}
+
+func (self *testFixture) NormalizeOutput(
+	ctx context.Context, scope vfilter.Scope, out []byte) string {
+	res := string(out)
+	for _, t := range self.Transforms {
+		if t.Scope != "" {
+			value, pres := scope.Resolve(t.Scope)
+			if pres {
+				value_str := utils.ToString(
+					vql_subsystem.Materialize(ctx, scope, value))
+				res = strings.ReplaceAll(res, value_str, t.Replace)
+			}
+		} else if t.Search != "" {
+			res = strings.ReplaceAll(res, t.Search, t.Replace)
+		} else if t.regexp != nil {
+			res = t.regexp.ReplaceAllString(res, t.Replace)
+		}
+	}
+	return res
 }
 
 // We want to emulate as closely as possible the logic in the artifact
@@ -173,8 +221,17 @@ func makeCtxWithTimeout(
 func runTest(fixture *testFixture, sm *services.Service,
 	config_obj *config_proto.Config) (string, error) {
 
+	config_obj = proto.Clone(config_obj).(*config_proto.Config)
+
+	err := applyMergesAndPatches(config_obj,
+		nil, fixture.ConfigMerges,
+		nil, fixture.ConfigPatches)
+	if err != nil {
+		return "", err
+	}
+
 	gen := utils.IncrementalIdGenerator(0)
-	utils.SetIdGenerator(&gen)
+	defer utils.SetIdGenerator(&gen)()
 
 	// Freeze the time for consistent golden tests Monday, May 31, 2020 3:28:05 PM
 	closer := utils.MockTime(utils.NewMockClock(time.Unix(1590938885, 10)))
@@ -182,7 +239,7 @@ func runTest(fixture *testFixture, sm *services.Service,
 
 	ctx := sm.Ctx
 
-	// Limit each test for maxmimum time
+	// Limit each test for maximum time
 	if !*disable_alarm {
 		sub_ctx, cancel := makeCtxWithTimeout(ctx, 30)
 		defer cancel()
@@ -194,15 +251,18 @@ func runTest(fixture *testFixture, sm *services.Service,
 	storage.SetCurrentServerPem([]byte(config_obj.Frontend.Certificate))
 
 	writeback_service := writeback.GetWritebackService()
-	writeback_service.LoadWriteback(config_obj)
+	err = writeback_service.LoadWriteback(config_obj)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	err := crypto_utils.VerifyConfig(config_obj)
+	err = crypto_utils.VerifyConfig(config_obj)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Create an output container.
-	tmpfile, err := ioutil.TempFile("", "golden")
+	tmpfile, err := tempfile.TempFile("golden")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -254,11 +314,15 @@ func runTest(fixture *testFixture, sm *services.Service,
 		return "", err
 	}
 
+	// Build the result of the query into a golden file.
 	result := ""
 	for _, query := range fixture.Queries {
-		result += query
-		scope.Log("Running query %v", query)
-		vql, err := vfilter.Parse(query)
+		if query.Comment != "" {
+			result += query.Comment + "\n"
+		}
+		result += fmt.Sprintf("Query: %v\n", query.Query)
+		scope.Log("Running query %v", query.Query)
+		vql, err := vfilter.Parse(query.Query)
 		if err != nil {
 			return "", err
 		}
@@ -272,7 +336,8 @@ func runTest(fixture *testFixture, sm *services.Service,
 			if !ok {
 				break
 			}
-			result += string(query_result.Payload)
+			result += fmt.Sprintf("Output: %v\n\n",
+				fixture.NormalizeOutput(ctx, scope, query_result.Payload))
 		}
 	}
 
@@ -282,6 +347,9 @@ func runTest(fixture *testFixture, sm *services.Service,
 			return "", fmt.Errorf("Log out matches %q", msg)
 		}
 	}
+
+	// Purge any active index files
+	api.PurgeCache()
 
 	return result, nil
 }
@@ -296,6 +364,7 @@ func doGolden() error {
 	vql_subsystem.RegisterPlugin(&MemoryLogPlugin{})
 	vql_subsystem.RegisterFunction(&WriteFilestoreFunction{})
 	vql_subsystem.RegisterFunction(&MockTimeFunciton{})
+	vql_subsystem.RegisterFunction(&HTTPBinFunction{})
 
 	config_obj, err := makeDefaultConfigLoader().LoadAndValidate()
 	if err != nil {
@@ -316,23 +385,22 @@ func doGolden() error {
 
 	config_obj.Services = services.GoldenServicesSpec()
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	// Global timeout for the entire test
 	if !*disable_alarm {
-		timeout_ctx, cancel := makeCtxWithTimeout(ctx, 120)
+		timeout_ctx, cancel := makeCtxWithTimeout(ctx, 240)
 		defer cancel()
 
 		ctx = timeout_ctx
 	}
 
 	sm, err := startup.StartToolServices(ctx, config_obj)
-	defer sm.Close()
-
 	if err != nil {
 		return err
 	}
+	defer sm.Close()
 
 	var file_paths []string
 
@@ -369,15 +437,14 @@ func doGolden() error {
 			return fmt.Errorf("Reading file: %w", err)
 		}
 
-		fixture := testFixture{}
-		err = yaml.Unmarshal(data, &fixture)
+		fixture, err := parseFixture(data)
 		if err != nil {
 			return fmt.Errorf("Unmarshal input file: %w", err)
 		}
 
 		result, err := runTest(&fixture, sm, config_obj)
 		if err != nil {
-			return fmt.Errorf("Running test %v: %w", fixture, err)
+			return fmt.Errorf("Running test %v: %w", file_path, err)
 		}
 
 		outfile := strings.Replace(file_path, ".in.", ".out.", -1)
@@ -400,9 +467,7 @@ func doGolden() error {
 		}
 
 		if !*testonly {
-			err = ioutil.WriteFile(
-				outfile,
-				[]byte(result), 0666)
+			err = ioutil.WriteFile(outfile, []byte(result), 0666)
 			if err != nil {
 				return fmt.Errorf("Unable to write golden file: %w", err)
 			}
@@ -417,6 +482,27 @@ func doGolden() error {
 		return fmt.Errorf(
 			"Failed! Some golden files did not match: %s\n", failures)
 	}
+
+	// Check the filestore locker has all files removed.
+	file_store_factory := file_store.GetFileStore(config_obj)
+	switch t := file_store_factory.(type) {
+	case *directory.DirectoryFileStore:
+		stats := t.Locker.Stats()
+		if stats.InProgress != 0 {
+			return fmt.Errorf(
+				"Failed! Some filestore files were left open: %v",
+				stats)
+		}
+
+	case *memory.MemoryFileStore:
+		stats := t.Locker.Stats()
+		if stats.InProgress != 0 {
+			return fmt.Errorf(
+				"Failed! Some filestore files were left open: %v",
+				stats)
+		}
+	}
+
 	return nil
 }
 
@@ -462,7 +548,7 @@ func (self *MemoryLogWriter) Matches(pattern string) (bool, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	re, err := regexp.Compile(pattern)
+	re, err := regexp.Compile("(?i)" + pattern)
 	if err != nil {
 		return false, err
 	}
@@ -538,12 +624,16 @@ func (self WriteFilestoreFunction) Call(ctx context.Context,
 	pathspec := paths.FSPathSpecFromClientPath(arg.FSPath)
 	writer, err := file_store_factory.WriteFile(pathspec)
 	if err != nil {
-		scope.Log("write_filestore: %s", err)
+		scope.Log("write_filestore: %v", err)
 		return &vfilter.Null{}
 	}
 	defer writer.Close()
 
-	writer.Write([]byte(arg.Data))
+	_, err = writer.Write([]byte(arg.Data))
+	if err != nil {
+		scope.Log("write_filestore: %v", err)
+		return &vfilter.Null{}
+	}
 
 	return true
 }
@@ -590,5 +680,76 @@ func (self MockTimeFunciton) Info(
 	return &vfilter.FunctionInfo{
 		Name:    "mock_time",
 		ArgType: type_map.AddType(scope, &MockTimeFuncitonArgs{}),
+	}
+}
+
+func parseFixture(data []byte) (res testFixture, err error) {
+	type tmpType struct {
+		ConfigMerges  []string          `yaml:"ConfigMerges"`
+		ConfigPatches []string          `yaml:"ConfigPatches"`
+		Transforms    []Transform       `yaml:"Transforms"`
+		Parameters    map[string]string `yaml:"Parameters"`
+		Queries       []yaml.Node       `yaml:"Queries"`
+	}
+
+	var n tmpType
+	err = yaml.Unmarshal(data, &n)
+	if err != nil {
+		return res, err
+	}
+
+	res.ConfigMerges = n.ConfigMerges
+	res.ConfigPatches = n.ConfigPatches
+	res.Parameters = n.Parameters
+	res.Transforms = n.Transforms
+	for _, node := range n.Queries {
+		if node.Kind != yaml.ScalarNode {
+			continue
+		}
+
+		res.Queries = append(res.Queries, queryDesc{
+			Query:   node.Value,
+			Comment: node.HeadComment,
+		})
+	}
+
+	var transforms []Transform
+	for _, t := range res.Transforms {
+		if t.Regexp != "" {
+			t.regexp, err = regexp.Compile(t.Regexp)
+			if err != nil {
+				return res, err
+			}
+		}
+		transforms = append(transforms, t)
+	}
+	res.Transforms = transforms
+
+	return res, err
+}
+
+// A helper function to spin up go-httpbin for testing http
+// connections.
+type HTTPBinFunction struct{}
+
+func (self HTTPBinFunction) Call(ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+
+	app := httpbin.New()
+	testServer := vtesting.NewServer(app, 8006)
+
+	err := vql_subsystem.GetRootScope(scope).AddDestructor(testServer.Close)
+	if err != nil {
+		scope.Log("httpbin: %v", err)
+	}
+	return testServer.URL
+}
+
+func (self HTTPBinFunction) Info(
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name: "httpbin",
+		Doc:  "Start HTTPBin and return the URL",
 	}
 }

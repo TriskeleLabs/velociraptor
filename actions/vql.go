@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -25,6 +25,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
@@ -33,6 +34,7 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/services"
@@ -48,6 +50,17 @@ type LogWriter struct {
 	config_obj *config_proto.Config
 	responder  responder.Responder
 	ctx        context.Context
+}
+
+func NewLogWriter(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	responder responder.Responder) *LogWriter {
+	return &LogWriter{
+		ctx:        ctx,
+		config_obj: config_obj,
+		responder:  responder,
+	}
 }
 
 func (self *LogWriter) Write(b []byte) (int, error) {
@@ -66,6 +79,8 @@ func (self VQLClientAction) StartQuery(
 	ctx context.Context,
 	responder responder.Responder,
 	arg *actions_proto.VQLCollectorArgs) {
+
+	defer responder.Return(ctx)
 
 	// Just ignore requests that are too old.
 	if arg.Expiry > 0 && arg.Expiry < uint64(utils.Now().Unix()) {
@@ -118,7 +133,7 @@ func (self VQLClientAction) StartQuery(
 		return
 	}
 
-	name := GetQueryName(arg.Query)
+	name := strings.Split(utils.GetQueryName(arg.Query), "/")[0]
 
 	// Clients do not have a copy of artifacts so they need to be
 	// sent all artifacts from the server.
@@ -142,12 +157,14 @@ func (self VQLClientAction) StartQuery(
 		}
 	}
 
-	uploader := &uploads.VelociraptorUploader{
-		Responder: responder,
-	}
+	logger := log.New(NewLogWriter(ctx, config_obj, responder), "", 0)
+	uploader := uploads.NewVelociraptorUploader(sub_ctx, logger,
+		time.Duration(timeout)*time.Second, responder)
+	defer uploader.Close()
 
 	builder := services.ScopeBuilder{
 		Config: &config_proto.Config{
+			Client:     config_obj.Client,
 			Remappings: config_obj.Remappings,
 		},
 		Ctx: ctx,
@@ -163,7 +180,7 @@ func (self VQLClientAction) StartQuery(
 			Set(constants.SCOPE_RESPONDER, responder),
 		Uploader:   uploader,
 		Repository: repository,
-		Logger:     log.New(&LogWriter{config_obj, responder, ctx}, "", 0),
+		Logger:     logger,
 	}
 
 	for _, env_spec := range arg.Env {
@@ -173,9 +190,16 @@ func (self VQLClientAction) StartQuery(
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
+	// The uploader needs to be flushed before the scope is destroyed
+	// because transactions may still be active.
+	defer uploader.Close()
+
 	// Allow VQL to gain access to the flow responder for low level
 	// functionality.
 	scope.SetContext(constants.SCOPE_RESPONDER_CONTEXT, responder)
+
+	// Add some additional context for debugging
+	scope.SetContext(constants.SCOPE_QUERY_NAME, name)
 
 	if runtime.GOARCH == "386" &&
 		os.Getenv("PROCESSOR_ARCHITEW6432") == "AMD64" {
@@ -186,8 +210,10 @@ func (self VQLClientAction) StartQuery(
 
 	scope.Log("INFO:Starting query execution for %v.", name)
 
-	throttler := NewThrottler(ctx, scope, float64(rate),
-		float64(cpu_limit), float64(iops_limit))
+	// Make a throttler
+	throttler, closer := throttler.NewThrottler(ctx, scope, config_obj,
+		float64(rate), float64(cpu_limit), float64(iops_limit))
+	defer closer()
 
 	if arg.ProgressTimeout > 0 {
 		duration := time.Duration(arg.ProgressTimeout) * time.Second
@@ -261,6 +287,8 @@ func (self VQLClientAction) StartQuery(
 				// can at least return any data it
 				// has.
 				cancel()
+				uploader.Abort()
+
 				scope.Close()
 
 				// Try again after a while to prevent spinning here.
@@ -316,12 +344,18 @@ func (self VQLClientAction) StartQuery(
 		}
 	}
 
-	if uploader.Count > 0 {
-		responder.Log(ctx, logging.DEFAULT,
-			fmt.Sprintf("%v: Uploaded %v files.", name, uploader.Count))
+	if uploader.GetCount() > 0 {
+		if uploader.GetTransactionCount() > 0 {
+			responder.Log(ctx, logging.DEFAULT,
+				fmt.Sprintf("%v: Uploaded %v files with %v outstanding upload transactions.",
+					name, uploader.GetCount(),
+					uploader.GetTransactionCount()))
+		} else {
+			responder.Log(ctx, logging.DEFAULT,
+				fmt.Sprintf("%v: Uploaded %v files.",
+					name, uploader.GetCount()))
+		}
 	}
-
-	responder.Return(ctx)
 }
 
 func CheckPreconditions(
@@ -340,7 +374,7 @@ func CheckPreconditions(
 	}
 
 	for _, vql := range vqls {
-		for _ = range vql.Eval(ctx, scope) {
+		for range vql.Eval(ctx, scope) {
 			return true, nil
 		}
 	}

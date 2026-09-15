@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
@@ -40,13 +41,14 @@ import (
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/writeback"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 )
 
 type EventTable struct {
 	mu sync.Mutex
 
-	// Context for cancelling all inflight queries in this event
+	// Context for cancelling all in-flight queries in this event
 	// table.
 	Ctx    context.Context
 	cancel func()
@@ -100,7 +102,7 @@ func (self *EventTable) Equal(events []*actions_proto.VQLCollectorArgs) bool {
 	return true
 }
 
-// Teardown all the current quries. Blocks until they all shut down.
+// Teardown all the current queries. Blocks until they all shut down.
 func (self *EventTable) Close() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -152,7 +154,7 @@ func (self *EventTable) Update(
 	// If the new update is identical to the old queries we wont
 	// restart. This can happen e.g. if the server changes label
 	// groups and recalculates the table version but the actual
-	// queries dont end up changing.
+	// queries don't end up changing.
 	if self.Equal(table.Event) {
 		logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 		logger.Info("Client event query update %v did not "+
@@ -182,7 +184,7 @@ func (self *EventTable) Update(
 	return nil, true /* changed */
 }
 
-// Make a copy of the event table and appand any config enforced
+// Make a copy of the event table and append any config-enforced
 // additional event queries.
 func (self *EventTable) GetEventQueries(
 	ctx context.Context,
@@ -194,6 +196,8 @@ func (self *EventTable) GetEventQueries(
 	result := make([]*actions_proto.VQLCollectorArgs, 0, len(self.Events))
 	result = append(result, self.Events...)
 
+	// If there are no built in additional event artifacts we are done
+	// - just run the queries from the event table.
 	if config_obj.Client == nil ||
 		len(config_obj.Client.AdditionalEventArtifacts) == 0 {
 		return result, nil
@@ -204,6 +208,9 @@ func (self *EventTable) GetEventQueries(
 		return result, err
 	}
 
+	// Config enforced event queries are compiled using the built in
+	// repository because we do no have access to the server
+	// repository yet!
 	manager, err := services.GetRepositoryManager(config_obj)
 	if err != nil {
 		return result, err
@@ -242,12 +249,11 @@ func (self *EventTable) StartQueries(
 	}
 
 	// Start a new query for each event.
-	action_obj := &VQLClientAction{}
 	for _, event := range events {
 
 		// Name of the query we are running. There must be at least
 		// one query with a name.
-		artifact_name := GetQueryName(event.Query)
+		artifact_name := utils.GetQueryName(event.Query)
 		if artifact_name == "" {
 			continue
 		}
@@ -255,18 +261,19 @@ func (self *EventTable) StartQueries(
 		logger.Info("<green>Starting</> monitoring query %s", artifact_name)
 		query_responder := responder.NewMonitoringResponder(
 			ctx, config_obj, self.monitoring_manager,
-			output_chan, artifact_name)
+			output_chan, artifact_name, event.QueryId)
 
 		self.wg.Add(1)
 		go func(event *actions_proto.VQLCollectorArgs) {
 			defer self.wg.Done()
+			defer query_responder.Close()
 
-			// Event tables never time out
+			// Event tables get refreshed by default every 12 hours.
 			if event.Timeout == 0 {
-				event.Timeout = 99999999
+				event.Timeout = 12 * 60 * 60
 			}
 
-			// Dont heartbeat too often for event queries
+			// Don't heartbeat too often for event queries
 			// - the log generates un-neccesary traffic.
 			if event.Heartbeat == 0 {
 				event.Heartbeat = 300 // 5 minutes
@@ -274,12 +281,65 @@ func (self *EventTable) StartQueries(
 
 			// Start the query - if it is an event query this will
 			// never complete until it is cancelled.
-			action_obj.StartQuery(
-				config_obj, self.Ctx, query_responder, event)
+			self.RunQuery(self.Ctx, config_obj,
+				artifact_name, query_responder, event)
 			if artifact_name != "" {
 				logger.Info("Finished monitoring query %s", artifact_name)
 			}
 		}(proto.Clone(event).(*actions_proto.VQLCollectorArgs))
+	}
+}
+
+func (self *EventTable) RunQuery(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact_name string,
+	query_responder responder.Responder,
+	event *actions_proto.VQLCollectorArgs) {
+
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
+
+	refresh_timeout := event.Timeout
+	event.Timeout = 999999
+
+	for {
+		sub_ctx, cancel := context.WithCancel(ctx)
+
+		refresh := utils.Jitter(time.Second * time.Duration(refresh_timeout))
+
+		// Start the query - if it is an event query this will not
+		// complete until we cancel it due to refresh. If it is not
+		// an event query, it will complete sooner but we wont start
+		// it again until the refresh time.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			query_responder.Log(ctx, logging.DEBUG,
+				fmt.Sprintf("Starting monitoring query %s with refresh in %v",
+					artifact_name, refresh.Round(2).String()))
+
+			action_obj := &VQLClientAction{}
+			action_obj.StartQuery(
+				config_obj, sub_ctx, query_responder, event)
+		}()
+
+		select {
+		// Exit completely when the parent ctx is done.
+		case <-ctx.Done():
+			cancel()
+			return
+
+			// When the deadline fires, we refresh the query.
+		case <-time.After(refresh):
+			query_responder.Log(ctx, logging.DEBUG,
+				fmt.Sprintf("Refreshing monitoring query %s", artifact_name))
+			cancel()
+
+			// Wait here for it to be done.
+			wg.Wait()
+		}
 	}
 }
 
@@ -289,7 +349,7 @@ func (self *EventTable) StartFromWriteback(
 	output_chan chan *crypto_proto.VeloMessage) {
 
 	// Get the event table from the writeback if possible.
-	event_table := &actions_proto.VQLEventTable{}
+	var event_table *actions_proto.VQLEventTable
 
 	writeback_service := writeback.GetWritebackService()
 	writeback, err := writeback_service.GetWriteback(config_obj)

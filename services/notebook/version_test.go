@@ -4,16 +4,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/alecthomas/assert"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 )
 
 func (self *NotebookManagerTestSuite) TestUpdateCellVersions() {
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
+	gen := utils.IncrementalIdGenerator(0)
+	defer utils.SetIdGenerator(&gen)()
 
 	notebook_manager, err := services.GetNotebookManager(self.ConfigObj)
 	assert.NoError(self.T(), err)

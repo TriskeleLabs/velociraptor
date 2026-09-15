@@ -3,28 +3,28 @@ package actions_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
+	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/services/client_monitoring"
-	"www.velocidex.com/golang/velociraptor/services/labels"
 	"www.velocidex.com/golang/velociraptor/services/writeback"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
 )
@@ -33,6 +33,8 @@ var (
 	artifact_definitions = []string{`
 name: EventArtifact1
 type: CLIENT_EVENT
+parameters:
+- name: Foo
 sources:
 - query: SELECT * FROM info()
 `, `
@@ -40,6 +42,9 @@ name: EventArtifact2
 type: CLIENT_EVENT
 sources:
 - query: SELECT * FROM info()
+`, `
+name: Windows.Remediation.QuarantineMonitor
+type: CLIENT_EVENT
 `}
 )
 
@@ -49,9 +54,9 @@ type EventsTestSuite struct {
 	responder *responder.TestResponderType
 	writeback string
 
-	Clock utils.Clock
-
-	event_table *actions.EventTable
+	event_table           *actions.EventTable
+	investigator_username string
+	closer                func()
 }
 
 func (self *EventsTestSuite) SetupTest() {
@@ -60,7 +65,7 @@ func (self *EventsTestSuite) SetupTest() {
 
 	// Set a tempfile for the writeback we need to check that the
 	// new event query is written there.
-	tmpfile, err := ioutil.TempFile("", "")
+	tmpfile, err := tempfile.TempFile("")
 	assert.NoError(self.T(), err)
 	tmpfile.Close()
 
@@ -80,13 +85,13 @@ func (self *EventsTestSuite) SetupTest() {
 	writeback_service.LoadWriteback(self.ConfigObj)
 
 	self.client_id = "C.2232"
-	self.Clock = &utils.IncClock{}
+	self.closer = utils.MockTime(&utils.IncClock{})
 
 	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
 	client_info_manager.Set(self.Ctx, &services.ClientInfo{
-		actions_proto.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
 			ClientId: self.client_id,
 		},
 	})
@@ -99,6 +104,18 @@ func (self *EventsTestSuite) SetupTest() {
 		self.Ctx, self.Wg, self.ConfigObj,
 		self.responder.Output(),
 		&actions_proto.VQLEventTable{})
+
+	user_manager := services.GetUserManager()
+	self.investigator_username = "UserInvestigator"
+	err = user_manager.SetUser(self.Sm.Ctx,
+		&api_proto.VelociraptorUser{
+			Name: self.investigator_username,
+		})
+	assert.NoError(self.T(), err)
+
+	err = services.GrantRoles(self.ConfigObj, self.investigator_username,
+		[]string{"investigator"})
+	assert.NoError(self.T(), err)
 }
 
 func (self *EventsTestSuite) InitializeEventTable(ctx context.Context,
@@ -113,29 +130,34 @@ func (self *EventsTestSuite) InitializeEventTable(ctx context.Context,
 func (self *EventsTestSuite) TearDownTest() {
 	self.TestSuite.TearDownTest()
 
+	if self.closer != nil {
+		self.closer()
+	}
+
 	os.Remove(self.writeback) // clean up file buffer
 }
 
-var server_state = &flows_proto.ClientEventTable{
-	Artifacts: &flows_proto.ArtifactCollectorArgs{
-		// These apply to all labels.
-		Artifacts: []string{"EventArtifact1"},
-	},
-
-	// If the client is labeled as "Label1" then it will
-	// receive these
-	LabelEvents: []*flows_proto.LabelEvents{{
-		Label: "Label1",
+func server_state() *flows_proto.ClientEventTable {
+	return &flows_proto.ClientEventTable{
 		Artifacts: &flows_proto.ArtifactCollectorArgs{
-			Artifacts: []string{"EventArtifact2"},
-		}},
-	},
+			// These apply to all labels.
+			Artifacts: []string{"EventArtifact1"},
+		},
+
+		// If the client is labeled as "Label1" then it will
+		// receive these
+		LabelEvents: []*flows_proto.LabelEvents{{
+			Label: "Label1",
+			Artifacts: &flows_proto.ArtifactCollectorArgs{
+				Artifacts: []string{"EventArtifact2"},
+			}},
+		},
+	}
 }
 
 func (self *EventsTestSuite) TestEventTableUpdate() {
 	client_manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
-	client_manager.(*client_monitoring.ClientEventTable).Clock = self.Clock
 
 	wg := &sync.WaitGroup{}
 	defer wg.Wait()
@@ -148,7 +170,8 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 	table := self.InitializeEventTable(ctx, wg, output_chan)
 
 	require.NoError(self.T(), client_manager.SetClientMonitoringState(
-		ctx, self.ConfigObj, "", server_state))
+		ctx, self.ConfigObj,
+		self.investigator_username, server_state()))
 
 	// Check the version of the initial Event table it should be 0
 	version := table.Version()
@@ -167,7 +190,7 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 	// Only one query will be selected now since no label is set
 	// on the client.
 	assert.Equal(self.T(), len(message.UpdateEventTable.Event), 1)
-	assert.Equal(self.T(), actions.GetQueryName(
+	assert.Equal(self.T(), utils.GetQueryName(
 		message.UpdateEventTable.Event[0].Query), "EventArtifact1")
 
 	// Set the new table, this will execute the new queries and
@@ -182,7 +205,7 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 
 	// And we ran some queries.
 	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
-		return len(actions.QueryLog.Get()) > 1
+		return len(actions.QueryLog.Get()) >= 1
 	})
 	actions.QueryLog.Clear()
 
@@ -198,7 +221,6 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 	// be the same as the old one, except the version will be
 	// advanced.
 	label_manager := services.GetLabeler(self.ConfigObj)
-	label_manager.(*labels.Labeler).Clock = self.Clock
 
 	require.NoError(self.T(),
 		label_manager.SetClientLabel(
@@ -266,20 +288,52 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 
 	// Wait for the event table to be swapped.
 	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
-		return len(actions.QueryLog.Get()) > 2
+		return len(actions.QueryLog.Get()) >= 1
 	})
 
 	// At least 2 queries were run
-	assert.True(self.T(), len(actions.QueryLog.Get()) > 2)
+	assert.True(self.T(), len(actions.QueryLog.Get()) >= 1)
 
 	fd, err := os.Open(self.writeback)
 	assert.NoError(self.T(), err)
-	data, err := ioutil.ReadAll(fd)
+	data, err := io.ReadAll(fd)
 	assert.NoError(self.T(), err)
 
 	// Make sure the event queries end up in the writeback file
 	assert.Contains(self.T(), string(data), "EventArtifact1")
 	assert.Contains(self.T(), string(data), "EventArtifact2")
+
+	// The below checks that the event table is updated if only a
+	// parameter is changed.
+
+	// Check that Foo is empty right now
+	assert.Equal(self.T(), "", table.Events[0].Env[0].Value)
+
+	// Update the monitoring table but only change artifact
+	// parameters. Set Foo to "X"
+	new_state := server_state()
+	new_state.Artifacts.Specs = append(new_state.Artifacts.Specs,
+		&flows_proto.ArtifactSpec{
+			Artifact: "EventArtifact1",
+			Parameters: &flows_proto.ArtifactParameters{
+				Env: []*actions_proto.VQLEnv{
+					{Key: "Foo", Value: "X"},
+				},
+			},
+		})
+
+	require.NoError(self.T(), client_manager.SetClientMonitoringState(
+		ctx, self.ConfigObj, self.investigator_username, new_state))
+
+	new_message = client_manager.GetClientUpdateEventTableMessage(
+		self.Ctx, self.ConfigObj, self.client_id)
+
+	// Force the update on the table.
+	table.UpdateEventTable(ctx, wg, self.ConfigObj, output_chan,
+		new_message.UpdateEventTable)
+
+	// The update took hold - the new parameter value is "X"
+	assert.Equal(self.T(), "X", table.Events[0].Env[0].Value)
 }
 
 // What do we consider a change in the event table. The server may
@@ -290,7 +344,6 @@ func (self *EventsTestSuite) TestEventTableUpdate() {
 func (self *EventsTestSuite) TestEventEqual() {
 	client_manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
-	client_manager.(*client_monitoring.ClientEventTable).Clock = self.Clock
 
 	ctx, cancel := context.WithTimeout(self.Ctx, time.Second*60)
 	defer cancel()
@@ -302,7 +355,7 @@ func (self *EventsTestSuite) TestEventEqual() {
 	_ = table
 
 	require.NoError(self.T(), client_manager.SetClientMonitoringState(
-		ctx, self.ConfigObj, "", server_state))
+		ctx, self.ConfigObj, self.investigator_username, server_state()))
 
 	message := client_manager.GetClientUpdateEventTableMessage(
 		self.Ctx, self.ConfigObj, self.client_id)

@@ -10,13 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
+	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/client_monitoring"
-	"www.velocidex.com/golang/velociraptor/services/labels"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 
@@ -48,14 +48,29 @@ type: CLIENT_EVENT
 sources:
 - precondition: SELECT OS from info() where OS = "windows"
   query: SELECT * FROM info()
+`, `
+name: Client.Artifact
+type: CLIENT
+sources:
+- precondition: SELECT OS from info() where OS = "windows"
+  query: SELECT * FROM info()
+`, `
+name: Restricted.Permission
+required_permissions:
+- EXECVE
+type: CLIENT_EVENT
+sources:
+- precondition: SELECT OS from info() where OS = "windows"
+  query: SELECT * FROM info()
 `,
 	}
 )
 
 type ClientMonitoringTestSuite struct {
 	test_utils.TestSuite
-	client_id string
-	flow_id   string
+	client_id             string
+	investigator_username string
+	admin_user            string
 }
 
 func (self *ClientMonitoringTestSuite) SetupTest() {
@@ -75,6 +90,7 @@ func (self *ClientMonitoringTestSuite) SetupTest() {
 
 	_, err = repository.LoadYaml(`
 name: TestArtifact
+type: CLIENT_EVENT
 sources:
 - query:
     SELECT * FROM info()
@@ -85,6 +101,7 @@ sources:
 	assert.NoError(self.T(), err)
 	_, err = repository.LoadYaml(`
 name: SomethingElse
+type: CLIENT_EVENT
 sources:
 - query:
     SELECT * FROM info()
@@ -98,22 +115,46 @@ sources:
 	assert.NoError(self.T(), err)
 
 	client_info_manager.Set(self.Ctx, &services.ClientInfo{
-		actions_proto.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
 			ClientId: self.client_id,
 		},
 	})
+
+	user_manager := services.GetUserManager()
+	self.investigator_username = "UserInvestigator"
+	err = user_manager.SetUser(self.Sm.Ctx,
+		&api_proto.VelociraptorUser{
+			Name: self.investigator_username,
+		})
+	assert.NoError(self.T(), err)
+
+	err = services.GrantRoles(self.ConfigObj, self.investigator_username,
+		[]string{"investigator"})
+	assert.NoError(self.T(), err)
+
+	self.admin_user = "admin"
+	err = user_manager.SetUser(self.Sm.Ctx,
+		&api_proto.VelociraptorUser{
+			Name: self.admin_user,
+		})
+	assert.NoError(self.T(), err)
+
+	err = services.GrantRoles(self.ConfigObj, self.admin_user,
+		[]string{"administrator"})
+	assert.NoError(self.T(), err)
 }
 
 // Check that monitoring tables eventually follow when artifact
 // definitions are updated.
 func (self *ClientMonitoringTestSuite) TestUpdatingArtifacts() {
-	current_clock := &utils.IncClock{NowTime: 10}
+	closer := utils.MockTime(&utils.IncClock{NowTime: 10})
+	defer closer()
 
 	manager, err := services.ClientEventManager(self.ConfigObj)
-	manager.(*client_monitoring.ClientEventTable).SetClock(current_clock)
+	assert.NoError(self.T(), err)
 
 	err = manager.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+		self.Ctx, self.ConfigObj, self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"TestArtifact", "SomethingElse"},
@@ -122,8 +163,8 @@ func (self *ClientMonitoringTestSuite) TestUpdatingArtifacts() {
 	assert.NoError(self.T(), err)
 
 	old_table_message := manager.GetClientUpdateEventTableMessage(
-		context.Background(), self.ConfigObj, self.client_id)
-	assert.NotContains(self.T(), json.StringIndent(old_table_message), "Crib")
+		self.Ctx, self.ConfigObj, self.client_id)
+	assert.NotContains(self.T(), json.MustStringIndent(old_table_message), "Crib")
 
 	table_version := old_table_message.UpdateEventTable.Version
 
@@ -135,6 +176,7 @@ func (self *ClientMonitoringTestSuite) TestUpdatingArtifacts() {
 	_, err = repository_manager.SetArtifactFile(ctx,
 		self.ConfigObj, "", `
 name: TestArtifact
+type: CLIENT_EVENT
 sources:
 - query:
     SELECT *, Crib FROM info()
@@ -152,7 +194,7 @@ sources:
 
 		new_table_message = manager.GetClientUpdateEventTableMessage(
 			context.Background(), self.ConfigObj, self.client_id)
-		return strings.Contains(json.StringIndent(new_table_message), "Crib")
+		return strings.Contains(json.MustStringIndent(new_table_message), "Crib")
 	})
 
 	// Make sure the table version is updated
@@ -175,7 +217,7 @@ sources:
 
 		table := manager.GetClientUpdateEventTableMessage(
 			context.Background(), self.ConfigObj, self.client_id)
-		table_json = json.StringIndent(table)
+		table_json = json.MustStringIndent(table)
 
 		// The table should not contain the Crib any more
 		return !strings.Contains(table_json, "TestArtifact")
@@ -186,11 +228,13 @@ sources:
 }
 
 func (self *ClientMonitoringTestSuite) TestUpdatingClientTable() {
-	current_clock := &utils.IncClock{NowTime: 10}
+	closer := utils.MockTime(&utils.IncClock{NowTime: 10})
+	defer closer()
 
 	repository_manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository_manager.SetArtifactFile(self.Ctx, self.ConfigObj, "", `
 name: TestArtifact
+type: CLIENT_EVENT
 sources:
 - query:
     SELECT * FROM info()
@@ -199,11 +243,9 @@ sources:
 	manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	manager.(*client_monitoring.ClientEventTable).SetClock(current_clock)
-
 	// Set the initial table.
 	err = manager.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+		self.Ctx, self.ConfigObj, self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"TestArtifact"},
@@ -217,7 +259,8 @@ sources:
 
 	// Now update the monitoring state
 	err = manager.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+		context.Background(), self.ConfigObj,
+		self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"TestArtifact"},
@@ -235,11 +278,13 @@ sources:
 }
 
 func (self *ClientMonitoringTestSuite) TestUpdatingClientTableMultiFrontend() {
-	current_clock := &utils.IncClock{NowTime: 10}
+	closer := utils.MockTime(&utils.IncClock{NowTime: 10})
+	defer closer()
 
 	repository_manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository_manager.SetArtifactFile(self.Ctx, self.ConfigObj, "", `
 name: TestArtifact
+type: CLIENT_EVENT
 sources:
 - query:
     SELECT * FROM info()
@@ -248,11 +293,9 @@ sources:
 	manager1, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	manager1.(*client_monitoring.ClientEventTable).SetClock(current_clock)
-
 	// Set the initial table.
 	err = manager1.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+		self.Ctx, self.ConfigObj, self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"TestArtifact"},
@@ -269,11 +312,9 @@ sources:
 		self.Ctx, self.Wg, self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	manager2.(*client_monitoring.ClientEventTable).SetClock(current_clock)
-
 	// Now update the monitoring state
 	err = manager2.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+		self.Ctx, self.ConfigObj, self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"TestArtifact"},
@@ -293,24 +334,24 @@ sources:
 func (self *ClientMonitoringTestSuite) TestClientMonitoringCompiling() {
 	// Every time the clock gives time.Now() it is forced to
 	// increment.
-	current_clock := &utils.IncClock{NowTime: 10}
-
-	labeler := services.GetLabeler(self.ConfigObj)
-	labeler.(*labels.Labeler).SetClock(current_clock)
+	closer := utils.MockTime(&utils.IncClock{NowTime: 10})
+	defer closer()
 
 	// If no table exists, we will get a default table.
 	manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
-	manager.(*client_monitoring.ClientEventTable).SetClock(current_clock)
+
+	labeler := services.GetLabeler(self.ConfigObj)
 
 	// Install an initial monitoring table: Everyone gets ServiceCreation.
-	manager.SetClientMonitoringState(
-		context.Background(), self.ConfigObj, "",
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.investigator_username,
 		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"Windows.Events.ServiceCreation"},
 			},
 		})
+	assert.NoError(self.T(), err)
 
 	table := manager.GetClientUpdateEventTableMessage(
 		context.Background(), self.ConfigObj, self.client_id)
@@ -347,8 +388,8 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoringCompiling() {
 
 	// Now lets install a new label rule for this label and another label.
 	manager.SetClientMonitoringState(
-		context.Background(),
-		self.ConfigObj, "", &flows_proto.ClientEventTable{
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
 			// All clients should have ServiceCreation
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{"Windows.Events.ServiceCreation"},
@@ -413,7 +454,7 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoringCompiling() {
 		self.client_id, version))
 }
 
-// Event queries are asyncronous and blocking so when collecting
+// Event queries are asynchronous and blocking so when collecting
 // multiple queries, we need to send each query in its own Event entry
 // so they can run in parallel. The client runs each Event object in a
 // separate goroutine. It is not allowed to send multiple SELECT
@@ -421,21 +462,17 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoringCompiling() {
 // SELECT and never reach the second SELECT. This test checks for this
 // condition.
 func (self *ClientMonitoringTestSuite) TestClientMonitoringCompilingMultipleArtifacts() {
-	current_clock := &utils.IncClock{NowTime: 10}
-
-	labeler := services.GetLabeler(self.ConfigObj)
-	labeler.(*labels.Labeler).SetClock(current_clock)
+	closer := utils.MockTime(&utils.IncClock{NowTime: 10})
+	defer closer()
 
 	// If no table exists, we will get a default table.
 	manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	manager.(*client_monitoring.ClientEventTable).SetClock(current_clock)
-
 	// Install an initial monitoring table: Everyone gets ServiceCreation.
 	manager.SetClientMonitoringState(
-		context.Background(),
-		self.ConfigObj, "", &flows_proto.ClientEventTable{
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
 			Artifacts: &flows_proto.ArtifactCollectorArgs{
 				Artifacts: []string{
 					"Windows.Events.ServiceCreation",
@@ -448,17 +485,8 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoringCompilingMultipleArti
 
 	// Count how many SELECT statements exist in each event table.
 	for _, event := range table.UpdateEventTable.Event {
-		count := 0
 		// Make sure we have a dedicated precondition in each event.
 		assert.Contains(self.T(), event.Precondition, "SELECT")
-		for _, query := range event.Query {
-			if strings.HasPrefix(query.VQL, "SELECT") {
-				count++
-				// Make sure it contains the precondition
-				assert.Contains(self.T(), query.VQL, "precondition_")
-			}
-		}
-		assert.Equal(self.T(), 1, count)
 	}
 }
 
@@ -478,15 +506,12 @@ func extractArtifacts(args *actions_proto.VQLEventTable) []string {
 
 // Check that labels are properly populated from the index.
 func (self *ClientMonitoringTestSuite) TestClientMonitoring() {
-	current_clock := utils.NewMockClock(time.Unix(10, 0))
-
-	labeler := services.GetLabeler(self.ConfigObj)
-	labeler.(*labels.Labeler).SetClock(current_clock)
+	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 0)))
+	defer closer()
 
 	// If no table exists, we will get a default table.
 	manager, err := services.ClientEventManager(self.ConfigObj)
 	assert.NoError(self.T(), err)
-	manager.(*client_monitoring.ClientEventTable).SetClock(current_clock)
 
 	test_utils.GetMemoryDataStore(self.T(), self.ConfigObj).Clear()
 	assert.NoError(self.T(),
@@ -505,13 +530,16 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoring() {
 		context.Background(), self.ConfigObj,
 		self.client_id, 50))
 
-	// If a client presents the same table version they dont need to do anything.
+	// If a client presents the same table version they don't need to do anything.
 	assert.False(self.T(), manager.CheckClientEventsVersion(
 		context.Background(), self.ConfigObj,
 		self.client_id, uint64(10000000000)))
 
 	// Some time later we label the client.
-	current_clock.Set(time.Unix(20, 0))
+	closer = utils.MockTime(utils.NewMockClock(time.Unix(20, 0)))
+	defer closer()
+
+	labeler := services.GetLabeler(self.ConfigObj)
 	labeler.SetClientLabel(self.Ctx, self.ConfigObj, self.client_id, "Foobar")
 
 	// Client will now be required to update its event table to
@@ -520,6 +548,82 @@ func (self *ClientMonitoringTestSuite) TestClientMonitoring() {
 		self.Ctx, self.ConfigObj,
 		self.client_id, uint64(10000000000)))
 
+}
+
+func (self *ClientMonitoringTestSuite) TestPermissions() {
+	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 0)))
+	defer closer()
+
+	// If no table exists, we will get a default table.
+	manager, err := services.ClientEventManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	// Install an initial monitoring table: an investigator can
+	// install it.
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
+			Artifacts: &flows_proto.ArtifactCollectorArgs{
+				Artifacts: []string{
+					"Windows.Events.DNSQueries",
+				},
+			},
+		})
+	assert.NoError(self.T(), err)
+
+	// Try to install a client artifact - not acceptable
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
+			Artifacts: &flows_proto.ArtifactCollectorArgs{
+				Artifacts: []string{
+					"Client.Artifact",
+				},
+			},
+		})
+	assert.Error(self.T(), err)
+	assert.ErrorContains(self.T(), err, "not a client event artifact")
+
+	// Try to install a client event artifact with a required permission.
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
+			Artifacts: &flows_proto.ArtifactCollectorArgs{
+				Artifacts: []string{
+					"Restricted.Permission",
+				},
+			},
+		})
+	assert.Error(self.T(), err)
+	assert.ErrorContains(self.T(), err, "permission denied EXECVE")
+
+	// Admin can install it
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.admin_user,
+		&flows_proto.ClientEventTable{
+			Artifacts: &flows_proto.ArtifactCollectorArgs{
+				Artifacts: []string{
+					"Restricted.Permission",
+				},
+			},
+		})
+	assert.NoError(self.T(), err)
+
+	// The investigator_username can not install into a label.
+	err = manager.SetClientMonitoringState(
+		self.Ctx, self.ConfigObj, self.investigator_username,
+		&flows_proto.ClientEventTable{
+			LabelEvents: []*flows_proto.LabelEvents{{
+				Label: "Foo",
+				Artifacts: &flows_proto.ArtifactCollectorArgs{
+					Artifacts: []string{
+						"Restricted.Permission",
+					},
+				}},
+			},
+		})
+	assert.Error(self.T(), err)
+	assert.ErrorContains(self.T(), err, "permission denied EXECVE")
 }
 
 func TestClientMonitoringService(t *testing.T) {

@@ -3,17 +3,19 @@ name: Reporting.Default
 type: SERVER
 
 description: |
-  A default template for HTML export.  This template will be used to
-  host html exports such as the notebook and the reporting
-  templates. Velociraptor will evaluate this template on the following
-  dict:
+  Provides the default HTML template for exporting notebook and report
+  content.
 
-    - key main: contains a string with all the results of rendering
+  This template will be used to host HTML exports such as the notebook
+  and the reporting templates. Velociraptor will evaluate this
+  template on the following dict:
+
+  - key main: contains a string with all the results of rendering
                 the notebook inside.
 
   ## Notes
 
-  1. All html elements are allowed in a html template.
+  1. All HTML elements are allowed in a HTML template.
 
   2. It is possible to run arbitrary VQL (and therefore arbitrary
      code) inside HTML templates. Therefore to modify this you will

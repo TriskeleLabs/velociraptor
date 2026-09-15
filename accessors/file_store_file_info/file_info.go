@@ -103,7 +103,7 @@ func (self *FileStoreFileInfo) Btime() time.Time {
 }
 
 func (self *FileStoreFileInfo) Mtime() time.Time {
-	return time.Time{}
+	return self.FileInfo.ModTime()
 }
 
 func (self *FileStoreFileInfo) Ctime() time.Time {
@@ -118,7 +118,7 @@ func (self *FileStoreFileInfo) IsLink() bool {
 	return self.Mode()&os.ModeSymlink != 0
 }
 
-// Filestores do not implementat links
+// Filestores do not implement links
 func (self *FileStoreFileInfo) GetLink() (*accessors.OSPath, error) {
 	return nil, errors.New("Not implemented")
 }

@@ -150,6 +150,36 @@ message Artifact {
             description: "A list of required permissions to collect this artifact."
         }];
 
+    // A list of permissions implied by this artifact. This is used by
+    // the artifact writer to declare what additional permissions the
+    // artifact provides over the permissions provided by the user.
+    //
+    // On the client, artifacts do not run with ACL enforced,
+    // therefore they can do anything, including actions which the
+    // user launching the artifact does not have. For example, the
+    // user may have the investigator role which does not have
+    // EXECVE. However, when launching this artifact on the client,
+    // the artifact will be able to run actions requiring the EXEVE
+    // permission (because there is no ACL enforcement on the client).
+    //
+    // Therefore we say this artifact implies the user has EXECVE -
+    // this is safe if the aritfact takes steps to ensure the user
+    // does not have arbitrary control over what to execute (for
+    // example, if the artifact launches a tool with restricted
+    // command line args).
+    //
+    // This field is only used to ensure the static analysis engine
+    // that the implied permission is properly controlled.
+    repeated string implied_permissions = 28;
+
+    // If this is specified, we run this artifact as the named user,
+    // with that user's ACL token. This is similar to the Unix suid
+    // mechanism or the Windows impersonation mechanism in that it
+    // allows artifact writers to craft a curated set of powerful
+    // artifacts that can be run by low privileged users in a
+    // controlled way.
+    string impersonate = 27;
+
     // Default resource limits.
     Resources resources = 19;
 
@@ -206,7 +236,8 @@ message Artifact {
     // Artifact was already compiled.
     bool compiled = 14;
 
-    // The artifact is considered built in and can not be overriden by the GUI
+    // The artifact is considered built in and can not be overriden by
+    // the GUI
     bool built_in = 20;
 
     // The artifact is built into the Velociraptor binary.
@@ -223,6 +254,7 @@ message Artifact {
 
 message ArtifactDescriptors {
     repeated Artifact items = 1;
+    repeated string tags = 2;
 }
 
 
@@ -232,6 +264,8 @@ message ArtifactMetadata {
     // Do not show this artifact in the GUI search screen.
     bool hidden = 1;
     bool basic = 2;
+
+    repeated string tags = 3;
 }
 
 message ArtifactMetadataStorage {
@@ -250,6 +284,11 @@ message Tool {
     // The URL to fetch the tool from when we upload it the first
     // time, or when we update.
     string url = 2;
+
+    // A transform to apply when downloading the tool contents. Currently:
+    // 1. Empty string - no transform applied.
+    // 2. "gunzip" - The tool will be decompressed using the gunzip algorithm.
+    string download_transform = 19;
 
     // As an alternative to a url we allow scrapping of GitHub
     // releases using the github API. NOTE: When this method is
@@ -299,6 +338,11 @@ message Tool {
     // is empty we just let the endpoint download its own tool from
     // the url above.
     string serve_url = 8;
+
+    // More recent velociraptor servers allow multiple URLs to be
+    // tried for the tool download. This helps in situations where the
+    // server is not reachable from some networks.
+    repeated string serve_urls = 18;
 
     // Only valid for local dummy inventory.
     string serve_path = 12;

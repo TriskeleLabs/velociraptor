@@ -12,6 +12,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -48,8 +49,10 @@ func (self *UserManager) SetUserPassword(
 
 	user_manager := services.GetUserManager()
 
-	// Hold on to the error until after ACL check
-	user_record, user_err := user_manager.GetUser(ctx, principal, username)
+	user_record, err := user_manager.GetUser(ctx, principal, username)
+	if err != nil {
+		return err
+	}
 
 	// Update the password if needed.
 	if password != "" {
@@ -66,33 +69,34 @@ func (self *UserManager) SetUserPassword(
 		user_record.CurrentOrg = current_org
 	}
 
-	// A user can always get their own user record regarless of
+	// A user can always get their own user record regardless of
 	// permissions.
 	if principal == username {
-		if user_err != nil {
-			return user_err
-		}
-		services.LogAudit(ctx,
+		err := services.LogAudit(ctx,
 			config_obj, principal, "Update password",
 			ordereddict.NewDict().
 				Set("operation", "Update Own Password").
 				Set("user", user_record.Name))
-
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("<red>UserManager Update Password</> %v", principal)
+		}
 		return user_manager.SetUser(ctx, user_record)
 	}
 
 	// ORG_ADMINs can see everything
 	ok, _ := services.CheckAccess(root_config_obj, principal, acls.ORG_ADMIN)
 	if ok {
-		if user_err != nil {
-			return user_err
-		}
-
-		services.LogAudit(ctx,
+		err := services.LogAudit(ctx,
 			config_obj, principal, "Update password",
 			ordereddict.NewDict().
 				Set("operation", "Update Password By Admin").
 				Set("user", user_record.Name))
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("<red>UserManager Update Password By Admin</> %v %v",
+				principal, user_record.Name)
+		}
 
 		return user_manager.SetUser(ctx, user_record)
 	}
@@ -106,24 +110,31 @@ func (self *UserManager) SetUserPassword(
 		ok, _ := services.CheckAccess(
 			org_config_obj, principal, acls.SERVER_ADMIN)
 		if ok {
-			if user_err != nil {
-				return user_err
-			}
-			services.LogAudit(ctx,
+			err := services.LogAudit(ctx,
 				config_obj, principal, "Update password",
 				ordereddict.NewDict().
 					Set("operation", "Update Password By Admin").
 					Set("user", user_record.Name))
+			if err != nil {
+				logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+				logger.Error("<red>UserManager Update Password By Admin</> %v %v",
+					principal, user_record.Name)
+			}
 
 			return user_manager.SetUser(ctx, user_record)
 		}
 	}
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		config_obj, principal, "Update password",
 		ordereddict.NewDict().
 			Set("error", acls.PermissionDenied.Error()).
 			Set("user", user_record.Name))
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("<red>UserManager Update Password</> %v %v",
+			principal, user_record.Name)
+	}
 
 	return acls.PermissionDenied
 }

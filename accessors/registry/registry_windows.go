@@ -3,7 +3,7 @@
 
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -145,6 +145,12 @@ func (self *RegKeyInfo) Size() int64 {
 	return 0
 }
 
+func (self *RegKeyInfo) UniqueName() string {
+	// Key names can not have \ in them so it is safe to add this
+	// without risk of collisions.
+	return self._full_path.String() + "\\"
+}
+
 func (self *RegKeyInfo) FullPath() string {
 	return self._full_path.String()
 }
@@ -211,6 +217,10 @@ type RegValueInfo struct {
 
 func (self *RegValueInfo) IsDir() bool {
 	return false
+}
+
+func (self *RegValueInfo) UniqueName() string {
+	return self._full_path.String()
 }
 
 func (self *RegValueInfo) Mode() os.FileMode {
@@ -302,14 +312,13 @@ func (self *RegValueInfo) materialize() error {
 		self.Type = "BINARY"
 
 	case registry.MULTI_SZ:
-		value_str, _ := value.(string)
-		self._binary_data = []byte(value_str)
+		self._binary_data, _ = json.Marshal(value)
 		self.Type = "MULTI_SZ"
 
 		if buf_size < MAX_EMBEDDED_REG_VALUE {
 			self._data = ordereddict.NewDict().
 				Set("type", "MULTI_SZ").
-				Set("value", strings.Split(value_str, "\n"))
+				Set("value", value)
 		}
 
 	case registry.SZ, registry.EXPAND_SZ:
@@ -374,6 +383,19 @@ func NewValueBuffer(buf []byte, stat accessors.FileInfo) *ValueBuffer {
 
 type RegFileSystemAccessor struct {
 	cache *RegFileSystemAccessorCache
+}
+
+func (self RegFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "registry",
+		Description: `Access the registery like a filesystem using the OS APIs.`,
+	}
+}
+
+// Registry filesystems are usually case insensitive.
+func (self RegFileSystemAccessor) GetCanonicalFilename(
+	path *accessors.OSPath) string {
+	return strings.ToLower(path.String())
 }
 
 func (self *RegFileSystemAccessor) New(scope vfilter.Scope) (
@@ -511,18 +533,20 @@ func (self RegFileSystemAccessor) OpenWithOSPath(path *accessors.OSPath) (
 
 	metricsOpen.Inc()
 
-	stat, err := self.LstatWithOSPath(path)
+	// Try to open the key as a value
+	value_info, err := self.lstatValue(path)
+	if err == nil {
+		value_info.materialize()
+		return NewValueBuffer(value_info._binary_data, value_info), nil
+	}
+
+	// Did we just open a key?
+	stat, err := self.lstatKey(path)
 	if err != nil {
 		return nil, err
 	}
 
-	value_info, ok := stat.(*RegValueInfo)
-	if ok {
-		value_info.materialize()
-		return NewValueBuffer(value_info._binary_data, stat), nil
-	}
-
-	// Keys do not have any data.
+	// Keys do not have any data so just include the Data as a json blob.
 	serialized, _ := json.Marshal(stat.Data)
 	return NewValueBuffer(serialized, stat), nil
 }
@@ -554,6 +578,71 @@ func (self *RegFileSystemAccessor) Lstat(filename string) (
 	return self.LstatWithOSPath(full_path)
 }
 
+// Try to get the path as a key.
+func (self *RegFileSystemAccessor) lstatKey(
+	full_path *accessors.OSPath) (*RegKeyInfo, error) {
+
+	cached, ok := self.cache.Get(full_path.String())
+	if ok {
+		return cached, nil
+	}
+
+	hive, hive_key_path, err := getHiveAndKey(full_path)
+	if err != nil {
+		return nil, err
+	}
+
+	metricsOpenKey.Inc()
+	key, err := registry.OpenKey(hive, hive_key_path,
+		registry.READ|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return nil, err
+	}
+	defer key.Close()
+
+	// We opened the full_path as a key - cache it for next time.
+	return self.buildAndCacheKeyInfo(key, full_path)
+}
+
+// Try to get the path as a key.
+func (self *RegFileSystemAccessor) lstatValue(
+	full_path *accessors.OSPath) (*RegValueInfo, error) {
+	// Try to open it as a value
+	if len(full_path.Components) == 0 {
+		return nil, utils.NotFoundError
+	}
+
+	// Maybe its a value then - open the containing key
+	// and return a valueInfo
+	containing_key := full_path.Dirname()
+
+	// We have the containing key in cache - use it.
+	cached, ok := self.cache.Get(containing_key.String())
+	if ok {
+		return getValueInfo(cached.ModTime(), full_path)
+	}
+
+	// We need to open the containing key
+	hive, hive_key_path, err := getHiveAndKey(containing_key)
+	if err != nil {
+		return nil, err
+	}
+
+	metricsOpenKey.Inc()
+	key, err := registry.OpenKey(hive, hive_key_path,
+		registry.READ|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return nil, err
+	}
+	defer key.Close()
+
+	cached, err = self.buildAndCacheKeyInfo(key, containing_key)
+	if err != nil {
+		return nil, err
+	}
+	return getValueInfo(cached.ModTime(), full_path)
+}
+
 func (self *RegFileSystemAccessor) LstatWithOSPath(
 	full_path *accessors.OSPath) (accessors.FileInfo, error) {
 
@@ -566,56 +655,12 @@ func (self *RegFileSystemAccessor) LstatWithOSPath(
 	}
 
 	// No: Try to open it as a key
-	hive, hive_key_path, err := getHiveAndKey(full_path)
-	if err != nil {
-		return nil, err
+	res, err := self.lstatKey(full_path)
+	if err == nil {
+		return res, nil
 	}
 
-	metricsOpenKey.Inc()
-	key, err := registry.OpenKey(hive, hive_key_path,
-		registry.READ|registry.QUERY_VALUE|registry.WOW64_64KEY)
-
-	// We could not open it as a key - it could be a value
-	if err != nil && len(full_path.Components) > 1 {
-
-		// Maybe its a value then - open the containing key
-		// and return a valueInfo
-		containing_key := full_path.Dirname()
-
-		// We have the containing key in cache - use it.
-		cached, ok := self.cache.Get(containing_key.String())
-		if ok {
-			return getValueInfo(cached.ModTime(), full_path)
-		}
-
-		// We need to open the containing key
-		hive, hive_key_path, err := getHiveAndKey(containing_key)
-		if err != nil {
-			return nil, err
-		}
-
-		metricsOpenKey.Inc()
-		key, err := registry.OpenKey(hive, hive_key_path,
-			registry.READ|registry.QUERY_VALUE|registry.WOW64_64KEY)
-		if err != nil {
-			return nil, err
-		}
-		defer key.Close()
-
-		cached, err = self.buildAndCacheKeyInfo(key, containing_key)
-		if err != nil {
-			return nil, err
-		}
-		return getValueInfo(cached.ModTime(), full_path)
-	}
-	defer key.Close()
-
-	// We opened the full_path as a key - cache it for next time.
-	res, err := self.buildAndCacheKeyInfo(key, full_path)
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
+	return self.lstatValue(full_path)
 }
 
 func (self *RegFileSystemAccessor) buildAndCacheKeyInfo(
@@ -681,10 +726,7 @@ func getHiveAndKey(full_path *accessors.OSPath) (registry.Key, string, error) {
 }
 
 func init() {
-	description := `Access the registery like a filesystem using the OS APIs.`
-	accessors.Register("reg", &RegFileSystemAccessor{}, description)
-	accessors.Register("registry", &RegFileSystemAccessor{}, description)
-
+	accessors.Register(&RegFileSystemAccessor{})
 	json.RegisterCustomEncoder(&RegKeyInfo{}, accessors.MarshalGlobFileInfo)
 	json.RegisterCustomEncoder(&RegValueInfo{}, accessors.MarshalGlobFileInfo)
 }

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -23,7 +23,13 @@ import (
 )
 
 const (
-	VERSION = "0.73.0-rc1"
+	VERSION = "0.77.2"
+
+	// This is the version of dependent client binaries that will be
+	// included in the offline collector or MSI. Usually this will be
+	// lockstep with the server version except for server side
+	// patches.
+	CLIENT_VERSION = VERSION
 
 	ENROLLMENT_WELL_KNOWN_FLOW   = "E:Enrol"
 	MONITORING_WELL_KNOWN_FLOW   = FLOW_PREFIX + "Monitoring"
@@ -42,10 +48,10 @@ const (
 	ProcessVQLResponses     = 1
 
 	// Largest buffer we use for comms.
-	MAX_MEMORY    = 5 * 1024 * 1024
+	MAX_MEMORY    = 50 * 1024 * 1024
 	MAX_POST_SIZE = 5 * 1024 * 1024
 
-	// Messages to the client which we dont care about their responses.
+	// Messages to the client which we don't care about their responses.
 	IgnoreResponseState = uint64(101)
 
 	USER_AGENT = "Velociraptor"
@@ -62,6 +68,7 @@ const (
 	SCOPE_DEVICE_MANAGER    = "$device_manager"
 	SCOPE_REPOSITORY        = "$repository"
 	SCOPE_RESPONDER_CONTEXT = "_Context"
+	SCOPE_QUERY_NAME        = "$query_name"
 
 	// Artifact names from packs should start with this
 	ARTIFACT_PACK_NAME_PREFIX   = "Packs."
@@ -91,12 +98,31 @@ const (
 	REG_CACHE_SIZE = "REG_CACHE_SIZE"
 	REG_CACHE_TIME = "REG_CACHE_TIME"
 
-	RAW_REG_CACHE_SIZE  = "RAW_REG_CACHE_SIZE"
-	RAW_REG_CACHE_TIME  = "RAW_REG_CACHE_TIME"
-	BINARY_CACHE_SIZE   = "BINARY_CACHE_SIZE"
+	// Maximum size of files to hash
+	HASH_MAX_SIZE   = "HASH_MAX_SIZE"
+	BUFFER_MAX_SIZE = "BUFFER_MAX_SIZE"
+
+	RAW_REG_CACHE_SIZE = "RAW_REG_CACHE_SIZE"
+	RAW_REG_CACHE_TIME = "RAW_REG_CACHE_TIME"
+	BINARY_CACHE_SIZE  = "BINARY_CACHE_SIZE"
+
 	EVTX_FREQUENCY      = "EVTX_FREQUENCY"
+	EVTX_PREFERRED_LANG = "EVTX_PREFERRED_LANG"
+
 	USN_FREQUENCY       = "USN_FREQUENCY"
 	ZIP_FILE_CACHE_SIZE = "ZIP_FILE_CACHE_SIZE"
+
+	PST_CACHE_SIZE = "PST_CACHE_SIZE"
+	PST_CACHE_TIME = "PST_CACHE_TIME"
+
+	// Path to disk based process tracker cache
+	PROCESS_TRACKER_CACHE = "PROCESS_TRACKER_CACHE"
+
+	// Sets client uploaders to be async and resumable.
+	UPLOAD_IS_RESUMABLE = "UPLOAD_IS_RESUMABLE"
+
+	// The result names for the upload resumption
+	UPLOAD_RESUMED_SOURCE = "Server.Internal.ResumedUploads"
 
 	// Used by the SSH accessor to configure access
 	SSH_CONFIG = "SSH_CONFIG"
@@ -107,7 +133,10 @@ const (
 	// Used by the S3 accessor to configure credentials.
 	S3_CREDENTIALS = "S3_CREDENTIALS"
 
-	// VQL tries to balance memory/cpu tradeoffs and also place limits
+	// Used by the overlay accessor to configure delegates'
+	OVERLAY_ACCESSOR_DELEGATES = "OVERLAY_ACCESSOR_DELEGATES"
+
+	// VQL tries to balance memory/cpu trade-offs and also place limits
 	// on memory use. These parameters control this behavior. You can
 	// set them in the VQL environment to influence how the engine
 	// optimizes the queries.
@@ -119,7 +148,7 @@ const (
 	// Certain VQL errors represent a failure in artifact
 	// collection. We use this RegExp to determine if log messages
 	// represent failure.
-	VQL_ERROR_REGEX = "(?i)(Error:|Symbol.+?not found|Expecting a path arg type, not)"
+	VQL_ERROR_REGEX = "(?i)(Error:|Symbol.+?not found|Expecting a path arg type, not|Field.+?is required|Unexpected arg)"
 
 	// Set in the scope with one or more passwords. Used by the zip
 	// accessor to open password protected zip files.
@@ -144,6 +173,14 @@ const (
 	// timezone actually serialized.
 	TZ = "TZ"
 
+	// Log levels for the Yara plugin:
+	// 1: Log ranges
+	// 2: Log Bytes scanned with 30 second deduplicated logs
+	YARA_LOG_LEVEL = "YARA_LOG_LEVEL"
+
+	// Set this to see extended debug messages of various LRU
+	LRU_DEBUG = "LRU_DEBUG"
+
 	PinnedServerName = "VelociraptorServer"
 
 	// Default gateway identity. This is only used when creating the
@@ -162,11 +199,22 @@ const (
 	DISABLE_DANGEROUS_API_CALLS = "DISABLE_DANGEROUS_API_CALLS"
 
 	// Fixed secret types - definitions in the sanity service
-	AWS_S3_CREDS    = "AWS S3 Creds"
-	SSH_PRIVATE_KEY = "SSH PrivateKey"
-	HTTP_SECRETS    = "HTTP Secrets"
-	SPLUNK_CREDS    = "Splunk Creds"
-	ELASTIC_CREDS   = "Elastic Creds"
+	AWS_S3_CREDS        = "AWS S3 Creds"
+	SSH_PRIVATE_KEY     = "SSH PrivateKey"
+	HTTP_SECRETS        = "HTTP Secrets"
+	SPLUNK_CREDS        = "Splunk Creds"
+	ELASTIC_CREDS       = "Elastic Creds"
+	ADX_CREDS           = "ADX Creds"
+	AZURE_MONITOR_CREDS = "Azure Monitor Creds"
+	SMTP_CREDS          = "SMTP Creds"
+	EXECVE_SECRET       = "Execve Secrets"
+
+	// The name of the annotation timeline
+	TIMELINE_ANNOTATION      = "Annotation"
+	TIMELINE_DEFAULT_KEY     = "Timestamp"
+	TIMELINE_DEFAULT_MESSAGE = "Message"
+
+	VELOCIRAPTOR_SERVER_CLIENT_ID = "server"
 )
 
 type key int

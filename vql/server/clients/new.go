@@ -10,8 +10,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -37,31 +37,31 @@ func (self NewClientFunction) Call(ctx context.Context,
 
 	err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
 	if err != nil {
-		scope.Log("client_create: %s", err)
+		scope.Error("client_create: %s", err)
 		return &vfilter.Null{}
 	}
 
 	err = arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
-		scope.Log("client_create: %s", err)
+		scope.Error("client_create: %s", err)
 		return &vfilter.Null{}
 	}
 
 	err = services.RequireFrontend()
 	if err != nil {
-		scope.Log("client_create: %v", err)
+		scope.Error("client_create: %v", err)
 		return vfilter.Null{}
 	}
 
 	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
-		scope.Log("client_create: Command can only run on the server")
+		scope.Error("client_create: Command can only run on the server")
 		return &vfilter.Null{}
 	}
 
 	client_info_manager, err := services.GetClientInfoManager(config_obj)
 	if err != nil {
-		scope.Log("client_create: %s", err)
+		scope.Error("client_create: %s", err)
 		return &vfilter.Null{}
 	}
 
@@ -73,7 +73,7 @@ func (self NewClientFunction) Call(ctx context.Context,
 	}
 
 	// Create a client record and index with elastic.
-	record := actions_proto.ClientInfo{
+	record := &actions_proto.ClientInfo{
 		Hostname:     arg.Hostname,
 		Fqdn:         arg.Hostname,
 		System:       arg.OS,
@@ -90,15 +90,15 @@ func (self NewClientFunction) Call(ctx context.Context,
 		record.Ping = uint64(arg.LastSeenAt.UnixNano() / 1000)
 	}
 
-	err = client_info_manager.Set(ctx, &services.ClientInfo{record})
+	err = client_info_manager.Set(ctx, &services.ClientInfo{ClientInfo: record})
 	if err != nil {
-		scope.Log("client_create: %s", err)
+		scope.Error("client_create: %s", err)
 		return &vfilter.Null{}
 	}
 
 	indexer, err := services.GetIndexer(config_obj)
 	if err != nil {
-		scope.Log("client_create: %s", err)
+		scope.Error("client_create: %s", err)
 		return &vfilter.Null{}
 	}
 
@@ -111,7 +111,7 @@ func (self NewClientFunction) Call(ctx context.Context,
 	} {
 		err = indexer.SetIndex(arg.ClientId, term)
 		if err != nil {
-			scope.Log("client_create: %s", err)
+			scope.Error("client_create: %s", err)
 			return &vfilter.Null{}
 		}
 	}
@@ -126,13 +126,18 @@ func (self NewClientFunction) Call(ctx context.Context,
 	}
 
 	principal := vql_subsystem.GetPrincipal(scope)
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		config_obj, principal, "client_create",
 		ordereddict.NewDict().
 			Set("client_id", record.ClientId).
 			Set("details", record))
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("NewClientFunction: client_create %v $%v",
+			principal, record)
+	}
 
-	return json.ConvertProtoToOrderedDict(&record)
+	return json.ConvertProtoToOrderedDict(record)
 }
 
 func (self NewClientFunction) Info(
@@ -141,7 +146,8 @@ func (self NewClientFunction) Info(
 		Name:     "client_create",
 		Doc:      "Create a new client in the data store.",
 		ArgType:  type_map.AddType(scope, &NewClientArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Version:  2,
 	}
 }
 

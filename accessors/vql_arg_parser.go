@@ -14,7 +14,7 @@ import (
 
 // Parse a value into an OSPath. This is used by VQL functions to
 // accept an OSPath object from VQL as an argument. If the argument is
-// already a *OSPath then we dont need to do anything and we just
+// already a *OSPath then we don't need to do anything and we just
 // reuse it saving us the effort of serializing and unserializing the
 // same thing. We also accept a string path and automatically convert
 // it to an OSPath.
@@ -46,10 +46,19 @@ func ParseOSPath(ctx context.Context,
 		return t, nil
 
 	case *PathSpec:
-		return accessor.ParsePath(t.String())
+		root, err := accessor.ParsePath("")
+		if err != nil {
+			return accessor.ParsePath(t.String())
+		}
+		return root, root.SetPathSpec(t)
 
 	case PathSpec:
-		return accessor.ParsePath(t.String())
+
+		root, err := accessor.ParsePath("")
+		if err != nil {
+			return accessor.ParsePath(t.String())
+		}
+		return root, root.SetPathSpec(&t)
 
 	case api.FSPathSpec:
 		// Create an OSPath to represent the abstract filestore path.
@@ -60,7 +69,13 @@ func ParseOSPath(ctx context.Context,
 			last_idx := len(components) - 1
 			components[last_idx] += api.GetExtensionForFilestore(t)
 		}
-		return MustNewFileStorePath("fs:").Append(components...), nil
+		res := MustNewFileStorePath("fs:").Append(components...)
+
+		// Store the FSPathSpec in the data for fast retrieval if we
+		// are passed to the fs accessor (this is commonly the case).
+		res.Data = t
+
+		return res, nil
 
 	case api.DSPathSpec:
 		// Create an OSPath to represent the abstract filestore path.
@@ -72,11 +87,6 @@ func ParseOSPath(ctx context.Context,
 			components[last_idx] += api.GetExtensionForDatastore(t)
 		}
 		return MustNewFileStorePath("ds:").Append(components...), nil
-
-		// WHERE version(plugin="glob") > 2:
-		// Initializer can be a list of components. In this case we
-		// take the base pathspec (which is accessor determined) and
-		// add the components to it.
 
 	case string:
 		return accessor.ParsePath(t)

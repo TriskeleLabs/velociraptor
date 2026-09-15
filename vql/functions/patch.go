@@ -13,9 +13,9 @@ import (
 )
 
 type PatchFunctionArgs struct {
-	Item  vfilter.Any `vfilter:"required,field=item,doc=The item to path"`
-	Patch vfilter.Any `vfilter:"optional,field=patch,doc=A JSON Patch to apply"`
-	Merge vfilter.Any `vfilter:"optional,field=merge,doc=A merge-patch to apply"`
+	Item  vfilter.Any `vfilter:"required,field=item,doc=The item to patch"`
+	Patch vfilter.Any `vfilter:"optional,field=patch,doc=A JSON patch to apply"`
+	Merge vfilter.Any `vfilter:"optional,field=merge,doc=A merge patch to apply"`
 }
 
 type PatchFunction struct{}
@@ -23,7 +23,7 @@ type PatchFunction struct{}
 func (self PatchFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:    "patch",
-		Doc:     "Patch a JSON object with a json patch.",
+		Doc:     "Patch a JSON object with a JSON patch.",
 		ArgType: type_map.AddType(scope, PatchFunctionArgs{}),
 	}
 }
@@ -47,7 +47,7 @@ func (self *PatchFunction) Call(
 	args *ordereddict.Dict) vfilter.Any {
 	arg := &PatchFunctionArgs{}
 
-	defer vql_subsystem.RegisterMonitor("patch", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "patch", args)()
 
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {

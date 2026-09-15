@@ -16,14 +16,13 @@ package accessors
 import (
 	"fmt"
 	"strings"
-	"sync"
 
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
-// Mount tree is very sparse so we dont really need a map here -
+// Mount tree is very sparse so we don't really need a map here -
 // linear search is fast enough.
 
 // The mount accessor is essentially a redirector - it needs to find a
@@ -66,15 +65,16 @@ func (self *node) Debug() string {
 	res := fmt.Sprintf("node: %v, prefix: %v, accessor: %T\n",
 		self.name, self.prefix.String(), self.accessor)
 	for _, c := range self.children {
-		res += fmt.Sprintf("  %v\n", strings.Replace(c.Debug(), "\n", "  \n", -1))
+		res += fmt.Sprintf("  %v\n", strings.ReplaceAll(c.Debug(), "\n", "  \n"))
 	}
 	return res
 }
 
 // Lookup a child by name. If not found returns nil
-func (self *node) GetChild(name string) *node {
+func (self *node) GetChild(
+	name string, manipulator PathManipulator) *node {
 	for _, c := range self.children {
-		if c.name == name {
+		if manipulator.ComponentEqual(c.name, name) {
 			return c
 		}
 	}
@@ -84,9 +84,10 @@ func (self *node) GetChild(name string) *node {
 
 // Get the child node for the given name. If the node is not found, we
 // create a new node based on our last mount point.
-func (self *node) MakeChild(name string) *node {
+func (self *node) MakeChild(
+	name string, manipulator PathManipulator) *node {
 	for _, c := range self.children {
-		if c.name == name {
+		if manipulator.ComponentEqual(c.name, name) {
 			return c
 		}
 	}
@@ -141,17 +142,28 @@ func (self FileInfoWrapper) OSPath() *OSPath {
 	}
 
 	delegate_path := self.FileInfo.OSPath()
-	trimmed_path := delegate_path.TrimComponents(
-		self.remove_prefix.Components...)
+	trimmed_path := delegate_path
+	if self.remove_prefix != nil {
+		trimmed_path = delegate_path.TrimComponents(
+			self.remove_prefix.Components...)
+	}
 
 	self._ospath = self.prefix.Append(trimmed_path.Components...)
 	return self._ospath
 }
 
+func NewFileInfoWrapper(fsinfo FileInfo,
+	prefix, remove_prefix *OSPath) *FileInfoWrapper {
+	return &FileInfoWrapper{
+		FileInfo:      fsinfo,
+		prefix:        prefix,
+		remove_prefix: remove_prefix,
+	}
+}
+
 // A mount accessor maps several delegate accessors inside the same
 // filesystem tree emulating mount points.
 type MountFileSystemAccessor struct {
-	mu    sync.Mutex
 	scope vfilter.Scope
 
 	// The root filesystem is the one registered
@@ -183,7 +195,7 @@ func (self *MountFileSystemAccessor) getDelegateNode(os_path *OSPath) (
 
 	for idx, c := range os_path.Components {
 		if c != "" {
-			next_node := node.GetChild(c)
+			next_node := node.GetChild(c, os_path.Manipulator)
 
 			// There is no internal mount point, use the last known
 			// mounted filesystem.
@@ -197,6 +209,10 @@ func (self *MountFileSystemAccessor) getDelegateNode(os_path *OSPath) (
 		}
 	}
 	return node, nil, nil
+}
+
+func (self MountFileSystemAccessor) Describe() *AccessorDescriptor {
+	return &AccessorDescriptor{}
 }
 
 func (self *MountFileSystemAccessor) New(scope vfilter.Scope) (FileSystemAccessor, error) {
@@ -299,7 +315,7 @@ func (self *MountFileSystemAccessor) OpenWithOSPath(
 	return delegate_node.accessor.OpenWithOSPath(delegate_path)
 }
 
-func (self MountFileSystemAccessor) Lstat(path string) (FileInfo, error) {
+func (self *MountFileSystemAccessor) Lstat(path string) (FileInfo, error) {
 	// Parse the path into an OSPath
 	os_path, err := self.ParsePath(path)
 	if err != nil {
@@ -309,7 +325,7 @@ func (self MountFileSystemAccessor) Lstat(path string) (FileInfo, error) {
 	return self.LstatWithOSPath(os_path)
 }
 
-func (self MountFileSystemAccessor) LstatWithOSPath(os_path *OSPath) (FileInfo, error) {
+func (self *MountFileSystemAccessor) LstatWithOSPath(os_path *OSPath) (FileInfo, error) {
 	delegate_node, delegate_path, err := self.getDelegatePath(os_path)
 	if err != nil {
 		return nil, err
@@ -339,13 +355,13 @@ func (self *MountFileSystemAccessor) AddMapping(
 	target *OSPath,
 	source_accessor FileSystemAccessor) {
 
-	// Walk the tree and create the sentinal node. NOTE: split the
+	// Walk the tree and create the sentinel node. NOTE: split the
 	// path according to the target accessor we are emulating.
 	node := self.root
 
 	for _, c := range target.Components {
 		if c != "" {
-			node = node.MakeChild(c)
+			node = node.MakeChild(c, target.Manipulator)
 		}
 	}
 

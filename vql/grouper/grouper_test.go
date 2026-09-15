@@ -9,13 +9,13 @@ import (
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -87,7 +87,7 @@ func TestVQLGroupBy(t *testing.T) {
 	assert.Equal(t, int64(0), count)
 
 	// Now set the limit at 5 bins - this will force all rows after 5
-	// to use the mergs sort.
+	// to use the merge sort.
 	config_obj.Defaults.MaxInMemoryGroupBy = 5
 
 	merge_group_rows := runQuery(t, config_obj)

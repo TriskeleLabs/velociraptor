@@ -3,7 +3,6 @@ package golang
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"regexp"
 	"runtime/pprof"
@@ -12,13 +11,11 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/tink-ab/tempfile"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/actions"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services/debug"
 	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -69,9 +66,7 @@ func writeMetrics(
 		select {
 		case <-ctx.Done():
 			return
-		case output_chan <- ordereddict.NewDict().
-			Set("Type", "metrics").
-			Set("Line", metric):
+		case output_chan <- metric:
 		}
 	}
 }
@@ -79,7 +74,7 @@ func writeMetrics(
 func writeProfile(
 	ctx context.Context, scope vfilter.Scope,
 	output_chan chan vfilter.Row, name string, debug int64) {
-	tmpfile, err := ioutil.TempFile("", "tmp*.tmp")
+	tmpfile, err := utils_tempfile.TempFile("tmp*.tmp")
 	if err != nil {
 		scope.Log("profile: %s", err)
 		return
@@ -123,7 +118,7 @@ func writeCPUProfile(
 	ctx context.Context,
 	scope vfilter.Scope,
 	output_chan chan vfilter.Row, duration int64) {
-	tmpfile, err := tempfile.TempFile("", "tmp", ".tmp")
+	tmpfile, err := utils_tempfile.TempFile("tmp*.tmp")
 	if err != nil {
 		scope.Log("profile: %s", err)
 		return
@@ -162,14 +157,19 @@ func writeTraceProfile(
 	ctx context.Context,
 	scope vfilter.Scope,
 	output_chan chan vfilter.Row, duration int64) {
-	tmpfile, err := tempfile.TempFile("", "tmp", ".tmp")
+	tmpfile, err := utils_tempfile.TempFile("tmp*.tmp")
 	if err != nil {
 		scope.Log("profile: %s", err)
 		return
 	}
 	defer tmpfile.Close()
 
-	scope.AddDestructor(func() { remove(scope, tmpfile.Name()) })
+	err = scope.AddDestructor(func() { remove(scope, tmpfile.Name()) })
+	if err != nil {
+		remove(scope, tmpfile.Name())
+		scope.Log("profile: %s", err)
+		return
+	}
 
 	err = trace.Start(tmpfile)
 	if err != nil {
@@ -203,7 +203,7 @@ func (self *ProfilePlugin) Call(ctx context.Context,
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("profile", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "profile", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
 		if err != nil {
@@ -276,7 +276,10 @@ func (self *ProfilePlugin) Call(ctx context.Context,
 			}
 			for _, writer := range debug.GetProfileWriters() {
 				if re.MatchString(writer.Name) {
-					writer.ProfileWriter(ctx, scope, output_chan)
+					debug.Decorate(ctx, scope, output_chan, writer.ProfileWriter,
+						func(item *ordereddict.Dict) *ordereddict.Dict {
+							return item.Set("Profile", writer.Name)
+						})
 				}
 			}
 		}
@@ -289,10 +292,12 @@ func (self *ProfilePlugin) Call(ctx context.Context,
 func (self ProfilePlugin) Info(
 	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "profile",
-		Doc:      "Returns a profile dump from the running process.",
-		ArgType:  type_map.AddType(scope, &ProfilePluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+		Name:    "profile",
+		Doc:     "Returns a profile dump from the running process.",
+		ArgType: type_map.AddType(scope, &ProfilePluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.MACHINE_STATE).Build(),
+		Version: 2,
 	}
 }
 
@@ -302,11 +307,13 @@ func init() {
 		Name:          "Metrics",
 		Description:   "Report all the current process running metrics.",
 		ProfileWriter: writeMetrics,
+		Categories:    []string{"Global"},
 	})
 
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
 		Name:        "logs",
 		Description: "Dump recent logs from memory ring buffer.",
+		Categories:  []string{"Global"},
 		ProfileWriter: func(ctx context.Context,
 			scope vfilter.Scope, output_chan chan vfilter.Row) {
 			for _, line := range logging.GetMemoryLogs() {
@@ -323,19 +330,62 @@ func init() {
 	})
 
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
-		Name:        "Queries",
+		Name:        "RecentQueries",
 		Description: "Report all the recent queries.",
+		Categories:  []string{"Global", "VQL"},
 		ProfileWriter: func(ctx context.Context,
 			scope vfilter.Scope, output_chan chan vfilter.Row) {
-			for _, q := range actions.QueryLog.Get() {
+
+			for _, item := range actions.QueryLog.Get() {
+				row := ordereddict.NewDict().
+					Set("Status", "").
+					Set("Duration", "").
+					Set("Started", item.Start).
+					Set("Query", item.Query)
+				if item.Duration == 0 {
+					row.Update("Status", "RUNNING").
+						Update("Duration", time.Since(item.Start).
+							Round(time.Second).String())
+				} else {
+					row.Update("Status", "FINISHED").
+						Update("Duration", time.Duration(item.Duration).
+							Round(time.Second).String())
+				}
+
 				select {
 				case <-ctx.Done():
 					return
 
-				case output_chan <- ordereddict.NewDict().
-					Set("Type", "query").
-					Set("Line", q).
-					Set("OSPath", ""):
+				case output_chan <- row:
+				}
+			}
+		},
+	})
+
+	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
+		Name:        "ActiveQueries",
+		Description: "Report Currently Active queries.",
+		Categories:  []string{"Global", "VQL"},
+		ProfileWriter: func(ctx context.Context,
+			scope vfilter.Scope, output_chan chan vfilter.Row) {
+
+			for _, item := range actions.QueryLog.Get() {
+				if item.Duration != 0 {
+					continue
+				}
+
+				row := ordereddict.NewDict().
+					Set("Status", "RUNNING").
+					Set("Duration", time.Since(item.Start).
+						Round(time.Millisecond).String()).
+					Set("Started", item.Start).
+					Set("Query", item.Query)
+
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- row:
 				}
 			}
 		},

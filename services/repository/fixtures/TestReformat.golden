@@ -1,0 +1,90 @@
+{
+ "Simple": [
+  "",
+  "name: Foo",
+  "sources:",
+  "- query: |",
+  "    SELECT A,",
+  "           B,",
+  "           C",
+  "    FROM info(arg1=Foobar, arg2=\"XXXXX\")",
+  "- query: |-",
+  "    SELECT A,",
+  "           B,",
+  "           C",
+  "    FROM info()",
+  "- description: Foo bar",
+  ""
+ ],
+ "Single line queries are not reformatted.": [
+  "",
+  "name: Single line",
+  "sources:",
+  "- query: SELECT * FROM info()",
+  "- query: |",
+  "    SELECT A",
+  "    FROM scope()",
+  ""
+ ],
+ "export reformatted": [
+  "",
+  "name: Exported",
+  "export: |",
+  "  SELECT *",
+  "  FROM scope()",
+  ""
+ ],
+ "preconditions": [
+  "",
+  "name: Preconditions",
+  "precondition: SELECT * FROM info()",
+  "sources:",
+  "- precondition: |",
+  "    SELECT *",
+  "    FROM info()",
+  ""
+ ],
+ "notebook": [
+  "",
+  "name: Notebook",
+  "sources:",
+  "- query: |",
+  "    SELECT A,",
+  "           B,",
+  "           C",
+  "    FROM scope()",
+  "  notebook:",
+  "    - name: Test",
+  "      type: vql_suggestion",
+  "      template: |",
+  "        SELECT * FROM scope()",
+  ""
+ ],
+ "column types": [
+  "",
+  "name: Column Types",
+  "sources:",
+  "- query: |",
+  "    SELECT A,",
+  "           B,",
+  "           C",
+  "    FROM scope()",
+  "column_types:",
+  "  - name: A",
+  "    type: string",
+  ""
+ ],
+ "negative slice": [
+  "",
+  "name: Negative Slice",
+  "sources:",
+  "- query: |",
+  "    LET X \u003c= 1",
+  "    ",
+  "    LET Y \u003c= (1, 2, 3, 4)",
+  "    ",
+  "    SELECT Y[-X:]",
+  "    FROM scope()",
+  ""
+ ]
+}

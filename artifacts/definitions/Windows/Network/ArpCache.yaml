@@ -1,5 +1,8 @@
 name: Windows.Network.ArpCache
-description: Address resolution cache, both static and dynamic (from ARP, NDP).
+description: |
+  Enumerates the Windows network neighbor cache (ARP/NDP) showing
+  resolved IP and MAC address pairs.
+
 parameters:
   - name: wmiQuery
     default: |
@@ -42,8 +45,9 @@ sources:
                     then="Active",
                   else="?")) as Store,
 
-               get(item=parse_json(data=kMapOfState),
-                   member=encode(string=State, type='string')) AS State,
+               get(item=parse_json(data=kMapOfState), 
+                   member=str(str=State)) AS State,
+
                InterfaceIndex, IPAddress,
                InterfaceAlias, LinkLayerAddress
             FROM wmi(query=wmiQuery, namespace=wmiNamespace)

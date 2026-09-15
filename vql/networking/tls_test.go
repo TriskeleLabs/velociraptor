@@ -5,27 +5,35 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 )
 
 func testHTTPConnection(
-	config_obj *config_proto.ClientConfig, url string) ([]byte, error) {
+	config_obj *config_proto.ClientConfig, url string) (
+	HTTPClient, []byte, error) {
+
+	TransportCache.Reset()
+
+	url_obj, err := parseURL(url)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	ctx := context.Background()
 	scope := vql_subsystem.MakeScope()
-	client, err := GetHttpClient(ctx, config_obj, scope, &HttpPluginRequest{
-		Url:    url,
+	client, _, err := GetHttpClient(ctx, config_obj, scope, &HttpPluginRequest{
+		Url:    []string{url},
 		Method: "GET",
-	})
+	}, url_obj)
 	if err != nil {
-		return nil, err
+		return client, nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
@@ -34,28 +42,29 @@ func testHTTPConnection(
 	req, err := http.NewRequestWithContext(
 		ctx, "GET", url, strings.NewReader(""))
 	if err != nil {
-		return nil, err
+		return client, nil, err
 	}
 
 	http_resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return client, nil, err
 	}
 	defer http_resp.Body.Close()
 
-	return ioutil.ReadAll(http_resp.Body)
+	res, err := ioutil.ReadAll(http_resp.Body)
+	return client, res, err
 }
 
 func TestTLSVerification(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := vtesting.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, client")
 	}))
 	defer ts.Close()
 
-	// Default client config is PKI verification - we dont like this
+	// Default client config is PKI verification - we don't like this
 	// certificate.
 	config_obj := &config_proto.ClientConfig{}
-	_, err := testHTTPConnection(config_obj, ts.URL)
+	_, _, err := testHTTPConnection(config_obj, ts.URL)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown authority")
 
@@ -69,7 +78,7 @@ func TestTLSVerification(t *testing.T) {
 			},
 		},
 	}
-	_, err = testHTTPConnection(config_obj, ts.URL)
+	_, _, err = testHTTPConnection(config_obj, ts.URL)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown authority")
 
@@ -82,7 +91,7 @@ func TestTLSVerification(t *testing.T) {
 			},
 		},
 	}
-	data, err := testHTTPConnection(config_obj, ts.URL)
+	_, data, err := testHTTPConnection(config_obj, ts.URL)
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), "Hello, client")
 
@@ -95,7 +104,7 @@ func TestTLSVerification(t *testing.T) {
 			},
 		},
 	}
-	data, err = testHTTPConnection(config_obj, ts.URL)
+	_, data, err = testHTTPConnection(config_obj, ts.URL)
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), "Hello, client")
 
@@ -109,7 +118,7 @@ func TestTLSVerification(t *testing.T) {
 			},
 		},
 	}
-	data, err = testHTTPConnection(config_obj, "https://www.google.com")
+	_, _, err = testHTTPConnection(config_obj, "https://www.google.com")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "Server certificate had no known thumbprint")
 
@@ -126,7 +135,7 @@ func TestTLSVerification(t *testing.T) {
 			"nosuch-site.example.com:443": strings.TrimPrefix(ts.URL, "https://"),
 		},
 	}
-	data, err = testHTTPConnection(config_obj, "https://nosuch-site.example.com")
+	_, data, err = testHTTPConnection(config_obj, "https://nosuch-site.example.com")
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), "Hello, client")
 }

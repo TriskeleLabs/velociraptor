@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,8 +24,8 @@ package services
 
 import (
 	"context"
-	"os"
 
+	"github.com/Velocidex/ordereddict"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/result_sets"
@@ -35,7 +35,7 @@ import (
 )
 
 var (
-	HuntNotFoundError = utils.Wrap(os.ErrNotExist, "Hunt no found")
+	HuntNotFoundError = utils.Wrap(utils.NotFoundError, "Hunt not found")
 )
 
 // How was the hunt modified and what should be done about it?
@@ -80,11 +80,21 @@ type FlowSearchOptions struct {
 	BasicInformation bool
 }
 
+type GetHuntOptions struct {
+	// Include the flow downloads (ZIP exports of the hunt).
+	Downloads bool
+
+	// Also include the full request and precompiled data.
+	Request bool
+}
+
 type IHuntDispatcher interface {
 	// Applies the function on all the hunts. Functions may not
 	// modify the hunt but will have read only access to the hunt
 	// objects under lock.
-	ApplyFuncOnHunts(ctx context.Context, options HuntSearchOptions,
+	ApplyFuncOnHunts(ctx context.Context,
+		options HuntSearchOptions,
+		hunt_options GetHuntOptions,
 		cb func(hunt *api_proto.Hunt) error) error
 
 	// As an optimization callers may get the latest hunt's
@@ -98,19 +108,15 @@ type IHuntDispatcher interface {
 	// frontends. Return HuntModificationAction to indicate if the
 	// hunt was modified.
 	// This function can only be called on the master node.
-	ModifyHuntObject(ctx context.Context, hunt_id string,
+	ModifyHuntObject(ctx context.Context,
+		hunt_id string,
+		hunt_options GetHuntOptions,
 		cb func(hunt *api_proto.Hunt) HuntModificationAction,
 	) HuntModificationAction
 
-	// Modify a hunt by sending a mutation. This function can be
-	// called anywhere (minion or master).
-	ModifyHunt(ctx context.Context,
-		config_obj *config_proto.Config,
-		hunt_modification *api_proto.Hunt,
-		user string) error
-
 	// Gets read only access to the hunt object.
 	GetHunt(ctx context.Context,
+		hunt_options GetHuntOptions,
 		hunt_id string) (*api_proto.Hunt, bool)
 
 	// Paged view into the flows in the hunt
@@ -127,12 +133,14 @@ type IHuntDispatcher interface {
 	// Deprecated - use GetHunts for paged access
 	ListHunts(ctx context.Context,
 		config_obj *config_proto.Config,
+		hunt_options GetHuntOptions,
 		in *api_proto.ListHuntsRequest) (*api_proto.ListHuntsResponse, error)
 
 	// Paged access to hunts
 	GetHunts(ctx context.Context,
 		config_obj *config_proto.Config,
 		options result_sets.ResultSetOptions,
+		hunt_options GetHuntOptions,
 		start_row, length int64) ([]*api_proto.Hunt, int64, error)
 
 	// Send a mutation to a hunt object. Mutations allow the minions
@@ -145,13 +153,21 @@ type IHuntDispatcher interface {
 	// periodically and can also be triggered when a change is
 	// written to the datastore (e.g. new hunt scheduled) to pick
 	// up the latest hunts.
-	Refresh(ctx context.Context, config_obj *config_proto.Config) error
+	Refresh(ctx context.Context,
+		config_obj *config_proto.Config,
+		force bool) error
 
 	// Clean up and close the hunt dispatcher. Only used in tests.
 	Close(ctx context.Context)
 
 	// Get all known tags. Used for GUI suggestions
 	GetTags(ctx context.Context) []string
+
+	// If force is specified we force a rebuild event if the index is
+	// fresh enough, otherwise we skip rebuilding the index if it is
+	// fresh enough.
+	RebuildHuntIndex(ctx context.Context, hunt_id string, force bool) (
+		*ordereddict.Dict, error)
 }
 
 func GetHuntDispatcher(config_obj *config_proto.Config) (IHuntDispatcher, error) {

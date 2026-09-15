@@ -13,6 +13,8 @@ import (
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
@@ -59,7 +61,7 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 		Input:             in.Input,
 		CellId:            in.CellId,
 		Type:              in.Type,
-		Timestamp:         utils.GetTime().Now().Unix(),
+		Timestamp:         utils.GetTime().Now().UnixNano(),
 		CurrentlyEditing:  in.CurrentlyEditing,
 		Calculating:       true,
 		Output:            "Loading ...",
@@ -72,12 +74,9 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 		notebook_metadata.NotebookId)
 
 	// The query will run in a sub context of the main context to
-	// allow our notification to cancel it.  NOTE: The
-	// updateCellContents() function itself must run as the parent
-	// context to ensure we are able to write **after** the query is
-	// cancelled. Otherwise the template will not be able to write any
-	// error messages or flush any queues after cancellation.
+	// allow our notification to cancel it.
 	query_ctx, query_cancel := context.WithCancel(ctx)
+	defer query_cancel()
 
 	// Run this query as the specified username
 	acl_manager := acl_managers.NewServerACLManager(config_obj, user_name)
@@ -103,6 +102,17 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 	defer tmpl.Close()
 
 	tmpl.SetEnv("NotebookId", in.NotebookId)
+	tmpl.SetEnv("NotebookCellId", in.CellId)
+
+	// Throttle the notebook accordingly.
+	tmpl.Scope.SetContext(constants.SCOPE_QUERY_NAME,
+		fmt.Sprintf("Notebook %v", in.NotebookId))
+	t, closer := throttler.NewThrottler(ctx, tmpl.Scope, config_obj, 0, 0, 0)
+	tmpl.Scope.SetThrottler(t)
+	err = tmpl.Scope.AddDestructor(closer)
+	if err != nil {
+		return nil, err
+	}
 
 	// Register a progress reporter so we can monitor how the
 	// template rendering is going.
@@ -126,6 +136,19 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 		tmpl.SetEnv(env.Key, env.Value)
 	}
 
+	// Initialize the cell from the notebook_metadata
+	for _, req := range notebook_metadata.Requests {
+		// First populate all the Env from requests.
+		for _, env := range req.Env {
+			tmpl.SetEnv(env.Key, env.Value)
+		}
+
+		// Next execute all the queries - discard the output though.
+		for _, query := range req.Query {
+			tmpl.Query(query.VQL)
+		}
+	}
+
 	input := in.Input
 	cell_type := in.Type
 
@@ -140,12 +163,15 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 	// The notification is removed either inline or in the background.
 	cancel_notify, remove_notification := notifier.ListenForNotification(
 		in.CellId + in.Version)
-	defer remove_notification()
 
 	// Watcher thread: Wait for cancellation from the GUI or a 10 min timeout.
 	go func() {
 		defer query_cancel()
 		defer remove_notification()
+		defer func() {
+			utils.GetTime().Sleep(time.Second)
+			runtime.GC()
+		}()
 
 		default_notebook_expiry := config_obj.Defaults.NotebookCellTimeoutMin
 		if default_notebook_expiry == 0 {
@@ -153,7 +179,7 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-query_ctx.Done():
 			return
 
 		// Active cancellation from the GUI.
@@ -168,9 +194,8 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 		}
 	}()
 
-	// This must run with the parent context not the query_ctx to
-	// ensure we can still write after query cancellation.
-	resp, err := self.updateCellContents(ctx, config_obj, store, tmpl,
+	resp, err := self.updateCellContents(query_ctx,
+		config_obj, store, tmpl,
 		in.CurrentlyEditing, in.NotebookId,
 		in.CellId, in.Version, in.AvailableVersions,
 		cell_type, in.Env, query_cancel, input, in.Input)
@@ -184,7 +209,7 @@ func (self *NotebookWorker) ProcessUpdateRequest(
 }
 
 func (self *NotebookWorker) updateCellContents(
-	ctx context.Context,
+	query_ctx context.Context,
 	config_obj *config_proto.Config,
 	store NotebookStore,
 	tmpl *reporting.GuiTemplateEngine,
@@ -197,11 +222,10 @@ func (self *NotebookWorker) updateCellContents(
 	input, original_input string) (res *api_proto.NotebookCell, err error) {
 
 	// Start a nanny to watch this calculation
-	go self.startNanny(ctx, config_obj, tmpl.Scope, store, query_cancel,
+	go self.startNanny(query_ctx, config_obj, tmpl.Scope, store, query_cancel,
 		notebook_id, cell_id, version)
 
 	output := ""
-	now := utils.GetTime().Now().Unix()
 
 	cell_type = strings.ToLower(cell_type)
 
@@ -221,7 +245,7 @@ func (self *NotebookWorker) updateCellContents(
 			CellId:           cell_id,
 			Type:             cell_type,
 			Env:              env,
-			Timestamp:        now,
+			Timestamp:        utils.GetTime().Now().UnixNano(),
 			CurrentlyEditing: currently_editing,
 			Duration:         int64(time.Since(tmpl.Start).Seconds()),
 
@@ -240,7 +264,10 @@ func (self *NotebookWorker) updateCellContents(
 		error_cell.Calculating = false
 		error_cell.Error = err.Error()
 
-		store.SetNotebookCell(notebook_id, error_cell)
+		err1 := store.SetNotebookCell(notebook_id, error_cell)
+		if err1 != nil {
+			return nil, err1
+		}
 
 		return error_cell, fmt.Errorf("%w: While rendering notebook cell: %v",
 			utils.InlineError, err)
@@ -263,7 +290,7 @@ func (self *NotebookWorker) updateCellContents(
 		return nil, err
 	}
 
-	waitForMemoryLimit(ctx, tmpl.Scope, config_obj)
+	waitForMemoryLimit(query_ctx, tmpl.Scope, config_obj)
 
 	switch cell_type {
 
@@ -431,7 +458,7 @@ func (self *NotebookWorker) RegisterWorker(
 
 			request := &NotebookRequest{}
 			err := json.Unmarshal([]byte(job.Job), request)
-			if err != nil {
+			if err != nil || request.NotebookCellRequest == nil {
 				logger.Error("NotebookManager: Invalid job request in worker: %v: %v",
 					err, job.Job)
 				job.Done("", err)
@@ -440,7 +467,7 @@ func (self *NotebookWorker) RegisterWorker(
 
 			// run the query in the correct ORG. We assume ACL
 			// checks occur in the GUI so we can only receive
-			// valid requrests here.
+			// valid requests here.
 			org_config_obj, err := org_manager.GetOrgConfig(job.OrgId)
 			if err != nil {
 				job.Done("", err)
@@ -471,8 +498,6 @@ func (self *NotebookWorker) RegisterWorker(
 			job.Done(string(serialized), err)
 		}
 	}
-
-	return nil
 }
 
 type WorkerPool struct {
@@ -540,7 +565,7 @@ func (self *NotebookWorker) startNanny(
 
 	// Reduce memory use now so the next measure of memory use is more
 	// reflective of our current workload.
-	debug.FreeOSMemory()
+	runtime.GC()
 
 	// Running in a goroutine it's ok to block.
 	for {
@@ -595,6 +620,9 @@ func (self *NotebookWorker) startNanny(
 
 func waitForMemoryLimit(
 	ctx context.Context, scope types.Scope, config_obj *config_proto.Config) {
+
+	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+
 	// Wait until memory is below the low water mark.
 	if config_obj.Defaults != nil &&
 		config_obj.Defaults.NotebookMemoryLowWaterMark > 0 {
@@ -604,7 +632,7 @@ func waitForMemoryLimit(
 		for {
 			// Reduce memory use now so the next measure of memory use
 			// is more reflective of our current workload.
-			debug.FreeOSMemory()
+			runtime.GC()
 
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
@@ -616,6 +644,9 @@ func waitForMemoryLimit(
 
 			functions.DeduplicatedLog(ctx, scope,
 				"INFO:Waiting for memory use to allow starting the query.")
+
+			logger.Debug("Waiting for memory use to allow starting the query (current memory %v, low water mark %v)",
+				m.Alloc, low_memory_level)
 
 			select {
 			case <-ctx.Done():

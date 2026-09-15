@@ -21,6 +21,12 @@ const requestToParameters = (request) => {
             if (spec.max_batch_rows) {
                 artifact_parameters["max_batch_rows"] = spec.max_batch_rows;
             }
+            if (spec.cpu_limit) {
+                artifact_parameters["cpu_limit"] = spec.cpu_limit;
+            }
+            if (spec.timeout) {
+                artifact_parameters["timeout"] = spec.timeout;
+            }
 
             parameters[spec.artifact] = artifact_parameters;
         });
@@ -76,13 +82,19 @@ const runArtifact = (client_id, artifact, params, on_success, token)=>{
                 // can stop polling.
                 clearInterval(recursive_download_interval);
                 on_success(context);
+            }).catch(e=>{
+                clearInterval(recursive_download_interval);
             });
         }, POLL_TIME);
     });
 };
 
+const getNotebookId = (flow_id, client_id)=>{
+    return "N." + flow_id + "-" + client_id;
+};
 
 export {
     requestToParameters,
     runArtifact,
+    getNotebookId,
 }

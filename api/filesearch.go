@@ -2,13 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"regexp"
 	"strings"
 
 	errors "github.com/go-errors/errors"
-	context "golang.org/x/net/context"
+	file_store_accessor "www.velocidex.com/golang/velociraptor/accessors/file_store"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
@@ -25,6 +26,8 @@ var (
 
 func (self *ApiServer) SearchFile(ctx context.Context,
 	in *api_proto.SearchFileRequest) (*api_proto.SearchFileResponse, error) {
+
+	defer Instrument("SearchFile")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -51,13 +54,18 @@ func (self *ApiServer) SearchFile(ctx context.Context,
 	path_spec := path_specs.NewUnsafeFilestorePath(in.VfsComponents...).
 		SetType(api.PATH_TYPE_FILESTORE_ANY)
 
+	err = file_store_accessor.IsFileAccessible(path_spec)
+	if err != nil {
+		return nil, Status(self.verbose, err)
+	}
+
 	file, err := file_store.GetFileStore(org_config_obj).ReadFile(path_spec)
 	if err != nil {
 		return nil, Status(self.verbose, err)
 	}
 	defer file.Close()
 
-	var reader_at io.ReaderAt = utils.MakeReaderAtter(file)
+	var reader_at = utils.MakeReaderAtter(file)
 	index, err := getIndex(org_config_obj, path_spec)
 
 	// If the file is sparse, we use the sparse reader.
@@ -76,6 +84,7 @@ func (self *ApiServer) SearchFile(ctx context.Context,
 	offset := int64(in.Offset)
 	var buf []byte
 
+	//lint:file-ignore SA6002 Slices are OK
 	if in.Forward {
 		buf = pool.Get().([]byte)
 		defer pool.Put(buf)
@@ -139,15 +148,12 @@ func (self *ApiServer) SearchFile(ctx context.Context,
 			offset -= int64(n)
 
 			// Offset went backwards before the start of the file - we
-			// didnt find it.
+			// didn't find it.
 			if offset < 0 {
 				return &api_proto.SearchFileResponse{}, nil
 			}
 		}
 	}
-
-	// No match
-	return &api_proto.SearchFileResponse{}, nil
 }
 
 type matcher interface {
@@ -188,10 +194,6 @@ func (self *regex_matcher) last_index(buff []byte) int64 {
 	}
 	last_match := matches[len(matches)-1]
 	return int64(last_match[0])
-}
-
-type case_insensitive_matcher struct {
-	lower string
 }
 
 func newMatcher(term, search_type string) (matcher, error) {

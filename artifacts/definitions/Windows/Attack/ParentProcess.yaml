@@ -1,7 +1,8 @@
 name: Windows.Attack.ParentProcess
 description: |
-  Maps the Mitre Att&ck framework process executions into artifacts.
-
+  Flags processes whose parent process does not match the expected
+  parent per the ATT&CK framework mapping.
+  
   NOTE: This artifact uses the process tracker. If you also enable the
   Windows.Events.TrackProcesses or Windows.Events.TrackProcessesBasic
   artifacts, this will be able to retrieve information about exited
@@ -20,7 +21,7 @@ parameters:
       A table mapping a process name to its expected parents. Both
       columns are regular expressions. The ProcessName must appear
       only once - you can specify multiple possible parents using
-      regular expressions patterns.
+      regular expressions.
 
     default: |
        ProcessName,ParentRegex

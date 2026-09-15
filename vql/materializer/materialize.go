@@ -5,13 +5,12 @@ package materializer
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"io"
-	"io/ioutil"
 	"os"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	utils_tempfile "www.velocidex.com/golang/velociraptor/utils/tempfile"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -31,7 +30,7 @@ type TempFileMatrializer struct {
 	filename string
 	tempfile io.Closer
 	writer   *bufio.Writer
-	lf       []byte
+	size     int
 }
 
 func NewTempFileMatrializer(
@@ -39,17 +38,20 @@ func NewTempFileMatrializer(
 	name string, rows []types.Row) (*TempFileMatrializer, error) {
 
 	// name is a VQL identifier so should be safe.
-	tmpfile, err := ioutil.TempFile(
-		"", "VQL_"+utils.SanitizeString(name)+"_.jsonl")
+	tmpfile, err := utils_tempfile.TempFile(
+		"VQL_" + utils.SanitizeString(name) + "_.jsonl")
 	if err != nil {
 		return nil, err
 	}
 	utils_tempfile.AddTmpFile(tmpfile.Name())
 
 	root_scope := vql_subsystem.GetRootScope(scope)
-	root_scope.AddDestructor(func() {
-		filesystem.RemoveFile(0, tmpfile.Name(), root_scope)
+	err = root_scope.AddDestructor(func() {
+		filesystem.RemoveTmpFile(0, tmpfile.Name(), root_scope)
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	result := &TempFileMatrializer{
 		filename: tmpfile.Name(),
@@ -79,6 +81,7 @@ func (self *TempFileMatrializer) Close() {
 }
 
 func (self *TempFileMatrializer) WriteRow(row types.Row) error {
+	self.size++
 	serialized, err := json.Marshal(row)
 	if err != nil {
 		return err
@@ -140,14 +143,10 @@ func (self TempFileMatrializer) Eval(
 // Support Associative protocol
 func (self TempFileMatrializer) Applicable(a types.Any, b types.Any) bool {
 	_, ok := a.(*TempFileMatrializer)
-	if !ok {
-		return false
-	}
-
-	return true
+	return ok
 }
 
-// Just deletegate to our contained rows array.
+// Just delegate to our contained rows array.
 func (self TempFileMatrializer) GetMembers(
 	scope types.Scope, a types.Any) []string {
 	return nil
@@ -186,7 +185,7 @@ func (self *TempFileMatrializer) MarshalJSON() ([]byte, error) {
 // An object implementing the ScopeMaterializer interface. This
 // materializer backs the data into memory until reading the limit and
 // then stores the data in a temp file on disk transparently.  You can
-// control the limit of the materialized threashold by setting the
+// control the limit of the materialized threshold by setting the
 // VQL_MATERIALIZE_ROW_LIMIT variable (default is 1000 rows)
 type Materializer struct{}
 
@@ -236,6 +235,7 @@ func (self Materializer) Materialize(
 	}
 
 	if file_writer != nil {
+		scope.Log("WARN:Materialized %v rows", file_writer.size)
 		return file_writer
 	}
 	return materializer.NewInMemoryMatrializer(rows)

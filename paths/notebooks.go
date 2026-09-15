@@ -10,6 +10,10 @@ import (
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
+var (
+	dirTraversalRegex = regexp.MustCompile(`\.\.+`)
+)
+
 type NotebookPathManager struct {
 	notebook_id string
 	client_id   string
@@ -21,8 +25,12 @@ func NotebookDir() api.DSPathSpec {
 	return NOTEBOOK_ROOT
 }
 
+func (self *NotebookPathManager) NotebookId() string {
+	return self.notebook_id
+}
+
 // Attachments are not the same as uploads - they are usually uploaded
-// by pasting in the cell eg an image. We want the attachment to
+// by pasting in the cell e.g. an image. We want the attachment to
 // remain whenever the cell is updated to a new version.
 // Example workflow:
 //   - User uploads an attachment into a cell
@@ -40,6 +48,17 @@ func (self *NotebookPathManager) AttachmentDirectory() api.FSPathSpec {
 		AsFilestorePath().SetType(api.PATH_TYPE_FILESTORE_ANY)
 }
 
+func (self *NotebookPathManager) NotebookDirectory() api.FSPathSpec {
+	return self.root.AddChild(self.notebook_id).
+		AsFilestorePath().SetType(api.PATH_TYPE_FILESTORE_ANY)
+}
+
+func (self *NotebookPathManager) NotebookIndexForUser(
+	username string) api.FSPathSpec {
+	return self.root.AddChild("indexes", username).
+		AsFilestorePath().SetType(api.PATH_TYPE_FILESTORE_JSON)
+}
+
 // Notebook paths are based on the time so we need to write the stats
 // next to the container and derive the path from the previous
 // filename.
@@ -50,6 +69,14 @@ func (self *NotebookPathManager) PathStats(
 
 func (self *NotebookPathManager) Path() api.DSPathSpec {
 	return self.root.AddChild(self.notebook_id).SetTag("Notebook")
+}
+
+// Stored the cached copy of the pseudo artifact we calculated when
+// the artifact was first created. This is used even if the original
+// artifact is deleted or modified.
+func (self *NotebookPathManager) Artifact() api.DSPathSpec {
+	return self.root.AddChild(self.notebook_id, "artifact").
+		SetTag("Artifact")
 }
 
 // Support versioned cells by appending the version to the cell id.
@@ -106,37 +133,33 @@ func (self *NotebookPathManager) SuperTimeline(
 	}
 }
 
-// A notebook id for clients flows
-var client_notebook_regex = regexp.MustCompile(`^N\.(F\.[^-]+?)-(C\..+|server)$`)
-var event_notebook_regex = regexp.MustCompile(`^N\.E\.([^-]+?)-(C\..+|server)$`)
-
 func rootPathFromNotebookID(notebook_id string) api.DSPathSpec {
-	if strings.HasPrefix(notebook_id, "Dashboard") {
+	if utils.DashboardNotebookId(notebook_id) {
 		return NOTEBOOK_ROOT.AddUnsafeChild("Dashboards").
 			SetType(api.PATH_TYPE_DATASTORE_JSON)
 	}
 
-	if strings.HasPrefix(notebook_id, "N.H.") {
+	hunt_id, ok := utils.HuntNotebookId(notebook_id)
+	if ok {
 		// For hunt notebooks store them in the hunt itself.
-		return HUNTS_ROOT.AddChild(
-			strings.TrimPrefix(notebook_id, "N."), "notebook").
+		return HUNTS_ROOT.AddChild(hunt_id, "notebook").
 			SetType(api.PATH_TYPE_DATASTORE_JSON)
 	}
 
-	matches := client_notebook_regex.FindStringSubmatch(notebook_id)
-	if len(matches) == 3 {
+	flow_id, client_id, ok := utils.ClientNotebookId(notebook_id)
+	if ok {
 		// For collections notebooks store them in the hunt itself.
-		return CLIENTS_ROOT.AddChild(matches[2],
-			"collections", matches[1], "notebook").
+		return CLIENTS_ROOT.AddChild(client_id,
+			"collections", flow_id, "notebook").
 			SetType(api.PATH_TYPE_DATASTORE_JSON)
 	}
 
-	matches = event_notebook_regex.FindStringSubmatch(notebook_id)
-	if len(matches) == 3 {
+	artifact, client_id, ok := utils.EventNotebookId(notebook_id)
+	if ok {
 		// For event notebooks, store them in the client's monitoring
 		// area.
-		return CLIENTS_ROOT.AddUnsafeChild(matches[2],
-			"monitoring_notebooks", matches[1]).
+		return CLIENTS_ROOT.AddUnsafeChild(client_id,
+			"monitoring_notebooks", artifact).
 			SetType(api.PATH_TYPE_DATASTORE_JSON)
 	}
 
@@ -144,6 +167,9 @@ func rootPathFromNotebookID(notebook_id string) api.DSPathSpec {
 }
 
 func NewNotebookPathManager(notebook_id string) *NotebookPathManager {
+	// Do not allow directory traversal sequences in notebook ids so
+	// we can treat it as safe.
+	notebook_id = dirTraversalRegex.ReplaceAllLiteralString(notebook_id, ".")
 	return &NotebookPathManager{
 		notebook_id: notebook_id,
 		root:        rootPathFromNotebookID(notebook_id),
@@ -169,6 +195,10 @@ func (self *NotebookCellPathManager) DSDirectory() api.DSPathSpec {
 func (self *NotebookCellPathManager) Path() api.DSPathSpec {
 	return self.root.AddUnsafeChild(self.notebook_id, self.cell_id).
 		SetTag("NotebookCell")
+}
+
+func (self *NotebookCellPathManager) NotebookId() string {
+	return self.notebook_id
 }
 
 func (self *NotebookCellPathManager) Notebook() *NotebookPathManager {

@@ -3,21 +3,21 @@
 // eventually be removed.
 
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package flows
 
@@ -61,7 +61,6 @@ var (
 		Help: "Total bytes of Uploaded Files.",
 	})
 
-	notModified      = errors.New("Not modified")
 	invalidSessionId = errors.New("Invalid SessionId")
 	invalidClientId  = errors.New("Invalid ClientId")
 )
@@ -76,7 +75,7 @@ var (
 type CollectionContext struct {
 	mu sync.Mutex
 
-	flows_proto.ArtifactCollectorContext
+	*flows_proto.ArtifactCollectorContext
 
 	// We batch all monitoring JSONL rows and then flush them at the
 	// end.
@@ -85,7 +84,7 @@ type CollectionContext struct {
 	// The completer keeps track of all asynchronous filesystem
 	// operations that will occur so that when everything is written
 	// to disk, the completer can send the System.Flow.Completion
-	// event. This is important as we dont want watchers of
+	// event. This is important as we don't want watchers of
 	// System.Flow.Completion to attempt to open the collection before
 	// everything is written.
 	completer *utils.Completer
@@ -94,24 +93,29 @@ type CollectionContext struct {
 	// only happens once the collection is complete and results are
 	// written. It only happens at most once per collection.
 	send_update bool
+
+	closer func()
 }
 
 func NewCollectionContext(
-	ctx context.Context, config_obj *config_proto.Config) *CollectionContext {
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	artifact_collector_ctx *flows_proto.ArtifactCollectorContext,
+) *CollectionContext {
 	self := &CollectionContext{
-		ArtifactCollectorContext: flows_proto.ArtifactCollectorContext{},
+		ArtifactCollectorContext: artifact_collector_ctx,
 		monitoring_batch:         make(map[string]*jsonBatch),
 	}
 
 	// If we need to send a notification we should wait until all parts of
 	// the collection are fully stored first to avoid a race with any
 	// listeners on System.Flow.Completion.
-	self.completer = utils.NewCompleter(func() {
+	self.completer, self.closer = utils.NewCompleter(func() {
 		self.mu.Lock()
 		defer self.mu.Unlock()
 
 		// Mark the collection as updated.
-		updateContext(config_obj, self.ClientId, self.SessionId)
+		_ = updateContext(config_obj, self.ClientId, self.SessionId)
 
 		if !self.send_update {
 			return
@@ -124,14 +128,15 @@ func NewCollectionContext(
 		// completion.
 		row := ordereddict.NewDict().
 			Set("Timestamp", time.Now().UTC().Unix()).
-			Set("Flow", proto.Clone(&self.ArtifactCollectorContext)).
+			Set("Flow", proto.Clone(self.ArtifactCollectorContext)).
 			Set("FlowId", self.SessionId).
 			Set("ClientId", self.ClientId)
 
 		journal, err := services.GetJournal(config_obj)
 		if err == nil {
 			journal.PushRowsToArtifactAsync(ctx,
-				config_obj, row, "System.Flow.Completion")
+				config_obj, row,
+				artifact_paths.FLOW_COMPLETION.WithClientId(self.ClientId))
 		}
 	})
 
@@ -181,10 +186,7 @@ func closeContext(
 	config_obj *config_proto.Config,
 	collection_context *CollectionContext) error {
 
-	// Ensure the completion is not fired until we are done here
-	// completely.
-	completion_func := collection_context.completer.GetCompletionFunc()
-	defer completion_func()
+	defer collection_context.closer()
 
 	// Context is not dirty - nothing to do.
 	if !collection_context.Dirty || collection_context.ClientId == "" {
@@ -255,22 +257,41 @@ func closeContext(
 		}
 	}
 
+	if collection_context.State == flows_proto.ArtifactCollectorContext_WAITING {
+		collection_context.State = flows_proto.ArtifactCollectorContext_RUNNING
+	}
+
+	query_status := crypto_proto.VeloStatus_PROGRESS
+	switch collection_context.State {
+	case flows_proto.ArtifactCollectorContext_ERROR:
+		query_status = crypto_proto.VeloStatus_GENERIC_ERROR
+	case flows_proto.ArtifactCollectorContext_FINISHED:
+		query_status = crypto_proto.VeloStatus_OK
+	}
+
 	collection_context.Dirty = false
+
+	// Write a fake stats object - this is for backwards
+	// compatibility. Older clients do not have QueryStats.
+	collection_context.QueryStats = []*crypto_proto.VeloStatus{{
+		Duration:              collection_context.ExecutionDuration,
+		ExpectedUploadedBytes: int64(collection_context.TotalExpectedUploadedBytes),
+		ResultRows:            int64(collection_context.TotalCollectedRows),
+		LogRows:               int64(collection_context.TotalLogs),
+		Status:                query_status,
+	}}
+
+	launcher_service, err := services.GetLauncher(config_obj)
+	if err != nil {
+		return err
+	}
 
 	// Write the data before we fire the event so the data is
 	// available to any listeners of the event.
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
-		collection_context.Status = err.Error()
-	}
-
-	flow_path_manager := paths.NewFlowPathManager(
-		collection_context.ClientId, collection_context.SessionId)
-
-	return db.SetSubjectWithCompletion(
-		config_obj, flow_path_manager.Path(),
-		collection_context, collection_context.completer.GetCompletionFunc())
+	return launcher_service.Storage().WriteFlow(
+		ctx, config_obj, collection_context.ArtifactCollectorContext,
+		services.GetFlowOptions{},
+		collection_context.completer.GetCompletionFunc())
 }
 
 func flushContextUploadedFiles(
@@ -311,34 +332,32 @@ func flushContextUploadedFiles(
 // Load the collector context from storage.
 func LoadCollectionContext(
 	ctx context.Context, config_obj *config_proto.Config,
-	client_id, flow_id string) (*CollectionContext, error) {
+	client_id, flow_id string,
+	opts services.GetFlowOptions) (*CollectionContext, error) {
 
+	// Handle monitoring flows especially.
 	if flow_id == constants.MONITORING_WELL_KNOWN_FLOW {
-		result := NewCollectionContext(ctx, config_obj)
+		result := NewCollectionContext(ctx, config_obj,
+			&flows_proto.ArtifactCollectorContext{})
 		result.SessionId = flow_id
 		result.ClientId = client_id
 
 		return result, nil
 	}
 
-	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
-	collection_context := NewCollectionContext(ctx, config_obj)
-	db, err := datastore.GetDB(config_obj)
+	launcher_service, err := services.GetLauncher(config_obj)
 	if err != nil {
 		return nil, err
 	}
 
-	err = db.GetSubject(config_obj, flow_path_manager.Path(),
-		&collection_context.ArtifactCollectorContext)
+	context_obj, err := launcher_service.Storage().LoadCollectionContext(
+		ctx, config_obj, client_id, flow_id, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	if collection_context.SessionId == "" {
-		return nil, errors.New("Unknown flow " + client_id + " " + flow_id)
-	}
+	collection_context := NewCollectionContext(ctx, config_obj, context_obj)
 	collection_context.TotalLoads++
-	collection_context.Dirty = false
 
 	return collection_context, nil
 }
@@ -351,6 +370,11 @@ func ArtifactCollectorProcessOneMessage(
 
 	if message.Status != nil {
 		return CheckForStatus(config_obj, collection_context, message)
+	}
+
+	// Ignore new style messages
+	if message.UploadTransaction != nil {
+		return nil
 	}
 
 	// Check that this is not a retransmission - if it is we drop
@@ -425,12 +449,11 @@ func ArtifactCollectorProcessOneMessage(
 					rowCounter.Inc()
 				}
 
-				// New clients already encode the JSON
-				// as line delimited, so we only need
-				// to append to end of the log file -
-				// much faster!
+				// New clients already encode the JSON as line
+				// delimited, so we only need to append to end of the
+				// log file - much faster!
 			} else if len(response.JSONLResponse) > 0 {
-				rs_writer.WriteJSONL(
+				_ = rs_writer.WriteJSONL(
 					[]byte(response.JSONLResponse), response.TotalRows)
 				rows_written = response.TotalRows
 				rowCounter.Add(float64(response.TotalRows))
@@ -610,9 +633,9 @@ func appendUploadDataToFile(
 
 		return journal.PushRowsToArtifact(ctx, config_obj,
 			[]*ordereddict.Dict{row},
-			"System.Upload.Completion",
-			message.Source, collection_context.SessionId,
-		)
+			artifact_paths.UPLOAD_COMPLETION.
+				WithClientId(message.Source).
+				WithFlowId(collection_context.SessionId))
 	}
 
 	return nil
@@ -700,7 +723,7 @@ func (self *FlowRunner) ProcessSingleMessage(
 
 	// json.TraceMessage(job.Source+"_job", job)
 
-	// CSR messages are related to enrolment. By the time the
+	// CSR messages are related to enrollment. By the time the
 	// message arrives here, it is authenticated and the client is
 	// fully enrolled so it serves no purpose here - Just ignore it.
 	if job.CSR != nil {
@@ -725,7 +748,8 @@ func (self *FlowRunner) ProcessSingleMessage(
 		}
 
 		collection_context, err = LoadCollectionContext(ctx,
-			self.config_obj, job.Source, job.SessionId)
+			self.config_obj, job.Source, job.SessionId,
+			services.GetFlowOptions{})
 		if err != nil {
 			// Ignore logs and status messages from the
 			// client. These are generated by cancel
@@ -734,7 +758,7 @@ func (self *FlowRunner) ProcessSingleMessage(
 				return nil
 			}
 
-			logger.Error(fmt.Sprintf("Unable to load flow %s: %v", job.SessionId, err))
+			logger.Error("Unable to load flow %s: %v", job.SessionId, err)
 
 			client_manager, err := services.GetClientInfoManager(self.config_obj)
 			if err != nil {

@@ -3,6 +3,8 @@ package fuse
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -19,7 +21,12 @@ type Timestamps struct {
 
 var (
 	knownMetadataFiles = [][]string{
+		// 0.74 and below
 		{"results", "Windows.KapeFiles.Targets/All File Metadata.json"},
+
+		// 0.75 +
+		{"results", "Windows.KapeFiles.Targets/All Matches Metadata.json"},
+		{"results", "Windows.Triage.Targets/All Matches Metadata.json"},
 	}
 )
 
@@ -66,7 +73,7 @@ func (self *Options) parseTimestamps(
 		reader := bufio.NewReader(fd)
 		for {
 			row_data, err := reader.ReadBytes('\n')
-			if len(row_data) == 0 {
+			if len(row_data) == 0 || (err != nil && !errors.Is(err, io.EOF)) {
 				break
 			}
 

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -39,7 +40,7 @@ func (self *FormatFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("format", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "format", args)()
 
 	arg := &FormatArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -63,6 +64,15 @@ func (self *FormatFunction) Call(ctx context.Context,
 			}
 		}
 	}
+
+	// Formatting a timestamp should emit it as UTC
+	for idx, value := range format_args {
+		switch t := value.(type) {
+		case time.Time:
+			format_args[idx] = t.UTC().Format(time.RFC3339)
+		}
+	}
+
 	return fmt.Sprintf(arg.Format, format_args...)
 }
 

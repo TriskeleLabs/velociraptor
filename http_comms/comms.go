@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -22,8 +22,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -31,6 +29,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"www.velocidex.com/golang/velociraptor/utils/rand"
 
 	"github.com/go-errors/errors"
 	"github.com/sirupsen/logrus"
@@ -55,12 +55,10 @@ var (
 	RedirectError = errors.New("RedirectError")
 
 	// Can be sent from connector's Post() when the server requires
-	// enrolment (sending HTTP 406 status).
+	// enrollment (sending HTTP 406 status).
 	EnrolError = errors.New("EnrolError")
 
-	mu   sync.Mutex
-	Rand func(int) int = rand.Intn
-
+	mu           sync.Mutex
 	proxyHandler = http.ProxyFromEnvironment
 
 	MaxRetryCount = 2
@@ -81,12 +79,12 @@ type Enroller struct {
 // TODO: This is a hold over from GRR - do we need it?  GRR's
 // enrollments are very slow and launching flows very expensive so it
 // makes sense to delay this. Velociraptor's enrollments are very
-// cheap so perhaps we dont need to worry about it here?
+// cheap so perhaps we don't need to worry about it here?
 func (self *Enroller) MaybeEnrol() {
 	next_enrollment := self.last_enrollment_time.Add(1 * time.Minute)
 	now := self.clock.Now()
 
-	// Only send an enrolment request at most every minute so as
+	// Only send an enrollment request at most every minute so as
 	// not to overwhelm the server if it can not keep up.
 	if now.After(next_enrollment) {
 		csr_pem, err := self.manager.GetCSR()
@@ -103,7 +101,7 @@ func (self *Enroller) MaybeEnrol() {
 				Type: crypto_proto.Certificate_CSR,
 				Pem:  csr_pem,
 			},
-			// Enrolment messages should be sent
+			// Enrollment messages should be sent
 			// immediately and not queued client side.
 			Urgent: true,
 		})
@@ -180,10 +178,12 @@ func NewHTTPConnector(
 		maxPollDev = 30
 	}
 
-	transport, err := networking.GetHttpTransport(config_obj.Client, "")
+	transport, err := networking.GetNewHttpTransport(config_obj.Client, "")
 	if err != nil {
 		return nil, err
 	}
+
+	transport = networking.MaybeSpyOnTransport(config_obj, transport)
 
 	if config_obj.Client.UseSelfSignedSsl {
 		logger.Info("Expecting self signed certificate for server.")
@@ -208,7 +208,7 @@ func NewHTTPConnector(
 		// Start with a random URL from the set of
 		// preconfigured URLs. This should distribute clients
 		// randomly to all frontends.
-		current_url_idx: GetRand()(len(urls)),
+		current_url_idx: rand.Intn(len(urls)),
 
 		minPoll:    time.Duration(1) * time.Second,
 		maxPoll:    time.Duration(max_poll) * time.Second,
@@ -277,15 +277,31 @@ func (self *HTTPConnector) retryPost(
 	data []byte, urgent bool) (resp *http.Response, err error) {
 
 	logger := logging.GetLogger(self.config_obj, &logging.ClientComponent)
+
+	// Retry a limited number of times immediately. After this many
+	// immediate tries, this function will return the error and the
+	// limiter will be engaged before the next attempt.
 	count := 0
 
 	for {
+		// Exit if the retry count is exceeded. Our caller will retry
+		// after rate limiting.
+		if count > MaxRetryCount {
+			logger.Debug("%v: Exceeded retry times for %v",
+				name, handler)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			break
+		}
+
 		req, err := self.prepareRequest(ctx, name, handler, data, urgent)
 		if err != nil {
 			return nil, err
 		}
 
 		resp, err = self.client.Do(req)
+
 		// Represents a retryable error in websockets.
 		if resp != nil {
 			switch resp.StatusCode {
@@ -295,6 +311,9 @@ func (self *HTTPConnector) retryPost(
 			case http.StatusRequestTimeout:
 				logger.Debug("%v: Retrying connection to %v: Status %v",
 					name, handler, resp.StatusCode)
+				resp.Body.Close()
+
+				count++
 				continue
 
 				// 503 is retryable a couple times.
@@ -303,6 +322,7 @@ func (self *HTTPConnector) retryPost(
 					name, handler, resp.StatusCode, resp.Status)
 
 				count++
+				resp.Body.Close()
 				continue
 			}
 		}
@@ -312,6 +332,9 @@ func (self *HTTPConnector) retryPost(
 			logger.Debug("%v: Retrying connection to %v: %v",
 				name, handler, notConnectedError)
 			count++
+			if resp != nil {
+				resp.Body.Close()
+			}
 			continue
 		}
 
@@ -320,15 +343,12 @@ func (self *HTTPConnector) retryPost(
 			return resp, err
 		}
 
-		if count > MaxRetryCount {
-			logger.Debug("%v: Exceeded retry times for %v",
-				name, handler)
-			break
-		}
-
 		logger.Debug("%v: Retrying connection to %v for %v time",
 			name, handler, count)
 		count++
+		if resp != nil {
+			resp.Body.Close()
+		}
 	}
 
 	// Should not happen unless we messed up the logic above.
@@ -414,7 +434,7 @@ func (self *HTTPConnector) Post(
 			// For safety we wait after redirect in case we end up
 			// in a redirect loop.
 			wait := self.maxPoll + time.Duration(
-				GetRand()(int(self.maxPollDev)))*time.Second
+				rand.Intn(int(self.maxPollDev)))*time.Second
 			self.logger.Info("Waiting after redirect: %v", wait)
 			<-self.clock.After(wait)
 		}
@@ -424,7 +444,7 @@ func (self *HTTPConnector) Post(
 		// This error means something went wrong in processing the
 		// message we sent - we do not want to retry sending this
 		// message because the server already attempted to process it
-		// but it didnt work for some reason.
+		// but it didn't work for some reason.
 	case 400:
 		data := &bytes.Buffer{}
 		_, err := utils.Copy(ctx, data, resp.Body)
@@ -432,7 +452,8 @@ func (self *HTTPConnector) Post(
 			return nil, errors.Wrap(err, 0)
 		}
 
-		self.logger.Error("%s: Error: %v %v", name, resp.Status, string(data.Bytes()))
+		self.logger.Error("%s: Error: %v %v",
+			name, resp.Status, data.String())
 
 		return &bytes.Buffer{}, nil
 
@@ -442,8 +463,7 @@ func (self *HTTPConnector) Post(
 	case 200:
 		encrypted := &bytes.Buffer{}
 
-		// We need to be able to cancel the read here so we do not use
-		// ioutil.ReadAll()
+		// We need to be able to cancel the read here.
 		n, err := utils.Copy(ctx, encrypted, resp.Body)
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
@@ -490,7 +510,7 @@ func (self *HTTPConnector) advanceToNextServer(ctx context.Context) {
 	// sleep to back off.
 	if self.current_url_idx == self.last_success_idx {
 		wait := self.maxPoll + time.Duration(
-			GetRand()(int(self.maxPollDev)))*time.Second
+			rand.Intn(int(self.maxPollDev)))*time.Second
 
 		self.logger.Info(
 			"Waiting for a reachable server: %v", wait)
@@ -516,13 +536,6 @@ func (self *HTTPConnector) advanceToNextServer(ctx context.Context) {
 	} else {
 		self.mu.Unlock()
 	}
-}
-
-func GetRand() func(int) int {
-	mu.Lock()
-	defer mu.Unlock()
-
-	return Rand
 }
 
 func (self *HTTPConnector) String() string {
@@ -619,7 +632,7 @@ func (self *HTTPConnector) rekeyWithURL(ctx context.Context, url string) error {
 		return err
 	}
 
-	pem, err := ioutil.ReadAll(io.LimitReader(resp.Body, constants.MAX_MEMORY))
+	pem, err := utils.ReadAllWithLimit(resp.Body, constants.MAX_MEMORY)
 	if err != nil {
 		self.server_name = ""
 		self.logger.Info("While reading %v: %v", url, err)
@@ -665,6 +678,13 @@ func (self *HTTPConnector) rekeyWithURL(ctx context.Context, url string) error {
 
 // Manages reading jobs from the reader notification channel.
 type NotificationReader struct {
+	id uint64
+
+	// Pause the PumpRingBufferToSendMessage loop - stops transmitting
+	// data to the server temporarily. New data will still be queued
+	// in the ring buffer if there is room.
+	IsPaused int32
+
 	config_obj *config_proto.Config
 	connector  IConnector
 	manager    crypto.ICryptoManager
@@ -684,11 +704,6 @@ type NotificationReader struct {
 
 	limiter *rate.Limiter
 
-	// Pause the PumpRingBufferToSendMessage loop - stops transmitting
-	// data to the server temporarily. New data will still be queued
-	// in the ring buffer if there is room.
-	IsPaused int32
-
 	// A callback that will be notified when the reader
 	// completes. In the real client this is a fatal error since
 	// without notification comms the client is unreachable. In
@@ -700,10 +715,13 @@ type NotificationReader struct {
 	// Send the server Server.Internal.ClientInfo messages
 	// periodically. This is sent outside the executor queues to avoid
 	// having the message accumulate in the ring buffer file, but it
-	// looks just like a regular montoring event query result.
+	// looks just like a regular monitoring event query result.
 	mu                 sync.Mutex
 	last_update_time   time.Time
 	last_update_period time.Duration
+
+	// Cancellation can be called to restart the main loop.
+	cancel func()
 }
 
 func NewNotificationReader(
@@ -739,7 +757,8 @@ func NewNotificationReader(
 		last_update_period = 0
 	}
 
-	return &NotificationReader{
+	self := &NotificationReader{
+		id:                    utils.GetId(),
 		config_obj:            config_obj,
 		connector:             connector,
 		manager:               manager,
@@ -757,6 +776,13 @@ func NewNotificationReader(
 		clock:                 clock,
 		last_update_period:    last_update_period,
 	}
+
+	executor.Nanny().RegisterOnWarnings(self.id, func() {
+		self.logger.Info("<red>%s: Nanny issued first warning!</> Restarting Receiver comms",
+			self.name)
+		self.Restart()
+	})
+	return self
 }
 
 // Block until the messages are sent. Will retry, back off and rekey
@@ -776,7 +802,6 @@ func (self *NotificationReader) sendMessageList(
 
 			// If we are being redirected do not wait -
 			// just retry again.
-
 			if errors.Is(err, RedirectError) {
 				continue
 			}
@@ -794,7 +819,7 @@ func (self *NotificationReader) sendMessageList(
 		// Add random wait between polls to avoid
 		// synchronization of endpoints.
 		wait := self.maxPoll + time.Duration(
-			GetRand()(int(self.maxPollDev)))*time.Second
+			rand.Intn(int(self.maxPollDev)))*time.Second
 		self.logger.Info("Sleeping for %v", wait)
 
 		// While we wait to reconnect we need to update the nanny or
@@ -834,7 +859,10 @@ func (self *NotificationReader) SendToURL(
 
 	now := utils.Now()
 	if !urgent {
-		self.limiter.Wait(ctx)
+		err := self.limiter.Wait(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	self.logger.Info(
@@ -858,7 +886,11 @@ func (self *NotificationReader) SendToURL(
 		return err
 	}
 
-	message_info, err := self.manager.Decrypt(encrypted.Bytes())
+	if encrypted == nil {
+		return nil
+	}
+
+	message_info, err := self.manager.Decrypt(ctx, encrypted.Bytes())
 	if err != nil {
 		return err
 	}
@@ -887,6 +919,7 @@ func (self *NotificationReader) maybeCallOnExit() {
 	if self.on_exit != nil {
 		self.on_exit()
 	}
+	self.executor.Nanny().RegisterOnWarnings(self.id, nil)
 }
 
 // The Receiver channel is used to receive commands from the server:
@@ -901,50 +934,79 @@ func (self *NotificationReader) maybeCallOnExit() {
 func (self *NotificationReader) Start(
 	ctx context.Context, wg *sync.WaitGroup) {
 
-	compression := crypto_proto.PackedMessageList_ZCOMPRESSION
-	if self.config_obj.Client.DisableCompression {
-		compression = crypto_proto.PackedMessageList_UNCOMPRESSED
-	}
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer self.maybeCallOnExit()
 		defer utils.CheckForPanic("Panic in main loop")
 
-		// Periodically read from executor and push to ring buffer.
 		for {
-			self.executor.Nanny().UpdateReadFromServer()
-
-			// The Reader does not send any server bound
-			// messages - it is blocked reading server
-			// responses.
-			message_list := self.GetMessageList()
-			serialized_message_list, err := proto.Marshal(message_list)
-			if err == nil {
-				if compression == crypto_proto.PackedMessageList_ZCOMPRESSION {
-					compressed, err := utils.Compress(serialized_message_list)
-					if err == nil {
-						self.sendMessageList(
-							ctx, [][]byte{compressed}, !URGENT, compression)
-					}
-
-				} else {
-					self.sendMessageList(
-						ctx, [][]byte{serialized_message_list}, !URGENT, compression)
-				}
-			}
-
 			select {
 			case <-ctx.Done():
 				return
-
-				// Reconnect quickly for low latency.
-			case <-self.clock.After(self.minPoll):
-				continue
+			default:
 			}
+
+			// Allow cancellation of the main loop. This will restart
+			// it as needed.
+			sub_ctx, cancel := context.WithCancel(ctx)
+			self.cancel = cancel
+
+			self.mainLoop(sub_ctx)
+			cancel()
 		}
 	}()
+}
+
+func (self *NotificationReader) Restart() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.cancel != nil {
+		self.cancel()
+	}
+}
+
+func (self *NotificationReader) mainLoop(ctx context.Context) {
+
+	// Decide if we should compress the outer envelope.
+	compression := crypto_proto.PackedMessageList_ZCOMPRESSION
+	if self.config_obj.Client.DisableCompression {
+		compression = crypto_proto.PackedMessageList_UNCOMPRESSED
+	}
+
+	// Periodically read from executor and push to ring buffer.
+	for {
+		self.executor.Nanny().UpdateReadFromServer()
+
+		// The Reader does not send any server bound
+		// messages - it is blocked reading server
+		// responses.
+		message_list := self.GetMessageList()
+		serialized_message_list, err := proto.Marshal(message_list)
+		if err == nil {
+			if compression == crypto_proto.PackedMessageList_ZCOMPRESSION {
+				compressed, err := utils.Compress(serialized_message_list)
+				if err == nil {
+					self.sendMessageList(
+						ctx, [][]byte{compressed}, !URGENT, compression)
+				}
+
+			} else {
+				self.sendMessageList(
+					ctx, [][]byte{serialized_message_list}, !URGENT, compression)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+
+			// Reconnect quickly for low latency.
+		case <-self.clock.After(self.minPoll):
+			continue
+		}
+	}
 }
 
 // Velociraptor's foreman is very quick (since it is just an int
@@ -967,7 +1029,8 @@ func (self *NotificationReader) GetMessageList() *crypto_proto.MessageList {
 	// Attach the Server.Internal.ClientInfo message very
 	// infrequently.
 	now := utils.Now()
-	if now.Add(-self.last_update_period).After(self.last_update_time) {
+	if self.last_update_period > 0 &&
+		now.Add(-self.last_update_period).After(self.last_update_time) {
 		self.last_update_time = now
 
 		client_info := self.executor.GetClientInfo()
@@ -980,6 +1043,7 @@ func (self *NotificationReader) GetMessageList() *crypto_proto.MessageList {
 			result.Job = append(result.Job, &crypto_proto.VeloMessage{
 				SessionId: "F.Monitoring",
 				VQLResponse: &actions_proto.VQLResponse{
+					QueryId:       uint64(utils.GetGUID()),
 					JSONLResponse: string(client_info_data),
 					Query: &actions_proto.VQLRequest{
 						Name: "Server.Internal.ClientInfo",
@@ -1001,7 +1065,7 @@ type HTTPCommunicator struct {
 	// Read jobs from the servers notification channel.
 	receiver *NotificationReader
 
-	// Potentially enrols the client.
+	// Potentially enrolls the client.
 	enroller *Enroller
 
 	// Sends results back to the server.
@@ -1053,7 +1117,7 @@ func NewHTTPCommunicator(
 	}
 
 	// Shuffle the list of URLs so that if a server goes down,
-	// clients will be distributed better accross
+	// clients will be distributed better across
 	// the remaining servers.
 	rand.Seed(utils.Now().UnixNano())
 	rand.Shuffle(len(urls), func(i, j int) {
@@ -1081,6 +1145,7 @@ func NewHTTPCommunicator(
 		if on_exit != nil {
 			on_exit()
 		}
+		rb.Close()
 	}
 
 	// The sender sends messages to the server. We want the sender to
@@ -1114,7 +1179,7 @@ func NewHTTPCommunicator(
 	// the client/server connection is interrupted the client will
 	// attempt to reconnect immediately but will then back off to
 	// ensure it does not go into a reconnect loop. Since receiver
-	// connects happen all the time we are at risk of a reeive loop -
+	// connects happen all the time we are at risk of a receive loop -
 	// where the client reconnects very frequently. This limiter
 	// avoids this condition by rate limiting the frequency of reader
 	// connections.

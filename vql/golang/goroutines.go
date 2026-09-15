@@ -5,15 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"runtime/pprof"
 
 	"github.com/Velocidex/ordereddict"
 	"google.golang.org/protobuf/proto"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/services/debug"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -32,7 +31,7 @@ func (self GoRoutinesPlugin) Call(ctx context.Context,
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("profile_goroutines", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "profile_goroutines", args)()
 
 		defer utils.RecoverVQL(scope)
 
@@ -60,7 +59,8 @@ func (self GoRoutinesPlugin) Call(ctx context.Context,
 					return
 				}
 
-				cleartext, err := ioutil.ReadAll(reader)
+				cleartext, err := utils.ReadAllWithLimit(reader,
+					constants.MAX_MEMORY)
 				if err != nil {
 					return
 				}
@@ -127,10 +127,11 @@ func PrintProfile(profile *Profile, output_chan chan vfilter.Row, verbose bool) 
 func (self GoRoutinesPlugin) Info(
 	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "profile_goroutines",
-		Doc:      "Enumerates all running goroutines.",
-		ArgType:  type_map.AddType(scope, &GoRoutinesPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+		Name:    "profile_goroutines",
+		Doc:     "Enumerates all running goroutines.",
+		ArgType: type_map.AddType(scope, &GoRoutinesPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.MACHINE_STATE).Build(),
 	}
 }
 
@@ -139,6 +140,7 @@ func init() {
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
 		Name:        "goroutines",
 		Description: "Goroutine information",
+		Categories:  []string{"Global"},
 		ProfileWriter: func(
 			ctx context.Context, scope vfilter.Scope, output_chan chan vfilter.Row) {
 			plugin := GoRoutinesPlugin{}
@@ -152,6 +154,7 @@ func init() {
 	debug.RegisterProfileWriter(debug.ProfileWriterInfo{
 		Name:        "verbose goroutines",
 		Description: "Goroutine information (Verbose)",
+		Categories:  []string{"Global"},
 		ProfileWriter: func(
 			ctx context.Context, scope vfilter.Scope, output_chan chan vfilter.Row) {
 			plugin := GoRoutinesPlugin{}

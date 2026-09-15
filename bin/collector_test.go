@@ -23,6 +23,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 )
 
 var (
@@ -73,7 +74,7 @@ func (self *CollectorTestSuite) findAndPrepareBinary() {
 	self.binary, _ = filepath.Abs(binaries[0])
 	fmt.Printf("Found binary %v\n", self.binary)
 
-	self.tmpdir, err = ioutil.TempDir("", "tmp")
+	self.tmpdir, err = tempfile.TempDir("tmp")
 	assert.NoError(t, err)
 
 	// Copy the binary into the tmpdir
@@ -117,7 +118,7 @@ func (self *CollectorTestSuite) addArtifactDefinitions() {
 	t := self.T()
 
 	// Create new artifacts and just save them on the filesystem - we
-	// dont need a real repository manager.
+	// don't need a real repository manager.
 	file_store_factory := file_store.GetFileStore(self.config_obj)
 
 	fd, err := file_store_factory.WriteFile(paths.GetArtifactDefintionPath(
@@ -194,7 +195,7 @@ func (self *CollectorTestSuite) uploadToolDefinitions() {
 	fmt.Println(string(out))
 	require.NoError(t, err)
 
-	// Make sure the binary is proprly added.
+	// Make sure the binary is properly added.
 	assert.Regexp(t, "name: Velociraptor", string(out))
 
 	// Should have a hash
@@ -253,7 +254,6 @@ func (self *CollectorTestSuite) TestCollectorPlain() {
 		"--args", "target=ZIP",
 		"--args", "opt_admin=N",
 		"--args", "opt_prompt=N",
-		"--args", "template=Custom.TestArtifact",
 		"--output", output_zip,
 	}
 
@@ -341,7 +341,7 @@ func (self *CollectorTestSuite) TestCollectorPlain() {
 		rc, err := f.Open()
 		assert.NoError(t, err)
 
-		data, err := ioutil.ReadAll(rc)
+		data, err := io.ReadAll(rc)
 		assert.NoError(t, err)
 
 		// Make sure the data from the artifact contains the following

@@ -27,7 +27,9 @@ import { faHome, faCrosshairs, faWrench, faEye, faServer, faBook, faLaptop,
          faMinimize, faNoteSticky, faArrowsUpDown, faBan, faFileExport,
          faCircleExclamation, faTable, faHouse, faRotateLeft, faRotateRight,
          faChevronRight, faEllipsis, faLayerGroup, faBullseye, faPersonRunning,
-         faQuestion, faCalendarPlus, faForwardFast, faBackwardFast,
+         faQuestion, faCalendarPlus, faForwardFast, faBackwardFast, faSliders,
+         faRepeat, faBorderAll, faBell, faCircleQuestion, faLightbulb, faBomb,
+         faAngleDown, faAngleUp, faListOl,
        } from '@fortawesome/free-solid-svg-icons';
 
 import { faSquare, faSquareCheck, faSquareMinus,
@@ -51,8 +53,10 @@ library.add(faHome, faCrosshairs, faWrench, faEye, faServer, faBook, faLaptop,
             faArrowsUpDown, faBan, faFileExport, faCircleExclamation,
             faTable, faHouse, faRotateLeft, faRotateRight, faChevronRight,
             faEllipsis, faLayerGroup, faBullseye, faPersonRunning, faQuestion,
-            faCalendarPlus, faForwardFast, faBackwardFast, faSquareCheck, faSquare,
-            faSquareMinus,
+            faCalendarPlus, faForwardFast, faBackwardFast, faSquareCheck,
+            faSquare, faSquareMinus, faSliders, faRepeat, faBorderAll, faBell,
+            faCircleQuestion, faLightbulb, faBomb, faAngleDown, faAngleUp,
+            faListOl,
            );
 
 ReactDOM.render(

@@ -1,8 +1,9 @@
 name: Windows.System.DNSCache
 description: |
-  Windows maintains DNS lookups for a short time in the DNS cache.
+  Queries the Windows DNS client cache via WMI and reports cached DNS
+  records with types and status.
 
-  This artifact collects DNS cache entries using the WMI class MSFT_DNSClientCache.
+  Windows maintains DNS lookups for a short time in the DNS cache.
 
 parameters:
   - name: kMapOfRecordType

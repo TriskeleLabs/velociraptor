@@ -13,14 +13,15 @@ import (
 )
 
 type getChainArgs struct {
-	Id string `vfilter:"required,field=id,doc=Process ID."`
+	Id       string `vfilter:"required,field=id,doc=Process ID."`
+	MaxItems int64  `vfilter:"optional,field=max_items,doc=The maximum number of process entries to return (default 10)"`
 }
 
 type getChain struct{}
 
 func (self getChain) Call(ctx context.Context,
 	scope types.Scope, args *ordereddict.Dict) types.Any {
-	defer vql_subsystem.RegisterMonitor("process_tracker_callchain", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "process_tracker_callchain", args)()
 
 	arg := &getChainArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -35,7 +36,7 @@ func (self getChain) Call(ctx context.Context,
 		return &vfilter.Null{}
 	}
 
-	return tracker.CallChain(ctx, scope, arg.Id)
+	return tracker.CallChain(ctx, scope, arg.Id, arg.MaxItems)
 }
 
 func (self getChain) Info(scope types.Scope,
@@ -44,6 +45,7 @@ func (self getChain) Info(scope types.Scope,
 		Name:    "process_tracker_callchain",
 		Doc:     "Get a call chain from the global process tracker.",
 		ArgType: type_map.AddType(scope, &getChainArgs{}),
+		Version: 2,
 	}
 }
 

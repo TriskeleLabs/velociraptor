@@ -7,7 +7,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -30,16 +29,10 @@ func (self VFSListDirectoryPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("vfs_ls", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "vfs_ls", args)()
 
 		arg := &VFSListDirectoryPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-		if err != nil {
-			scope.Log("vfs_ls: %v", err)
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 		if err != nil {
 			scope.Log("vfs_ls: %v", err)
 			return
@@ -153,11 +146,12 @@ func listDir(
 
 func (self VFSListDirectoryPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "vfs_ls",
-		Doc:      "List directory and build a VFS object",
-		ArgType:  type_map.AddType(scope, &VFSListDirectoryPluginArgs{}),
-		Version:  1,
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Name:    "vfs_ls",
+		Doc:     "List directory and build a VFS object",
+		ArgType: type_map.AddType(scope, &VFSListDirectoryPluginArgs{}),
+		Version: 1,
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.FILESYSTEM_READ).Build(),
 	}
 }
 

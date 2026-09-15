@@ -18,6 +18,8 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/client_info"
 	"www.velocidex.com/golang/velociraptor/services/client_monitoring"
 	"www.velocidex.com/golang/velociraptor/services/ddclient"
+	"www.velocidex.com/golang/velociraptor/services/docs"
+	"www.velocidex.com/golang/velociraptor/services/exports"
 	"www.velocidex.com/golang/velociraptor/services/frontend"
 	"www.velocidex.com/golang/velociraptor/services/hunt_dispatcher"
 	"www.velocidex.com/golang/velociraptor/services/hunt_manager"
@@ -27,6 +29,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/services/labels"
 	"www.velocidex.com/golang/velociraptor/services/launcher"
+	"www.velocidex.com/golang/velociraptor/services/lsp"
 	"www.velocidex.com/golang/velociraptor/services/notebook"
 	"www.velocidex.com/golang/velociraptor/services/notifications"
 	"www.velocidex.com/golang/velociraptor/services/repository"
@@ -63,6 +66,9 @@ type ServiceContainer struct {
 	acl_manager             services.ACLManager
 	secrets                 services.SecretsService
 	backups                 services.BackupService
+	export_manager          services.ExportManager
+	doc_manager             services.DocManager
+	lsp_server              services.LSPServer
 }
 
 func (self *ServiceContainer) MockFrontendManager(svc services.FrontendManager) {
@@ -185,6 +191,17 @@ func (self *ServiceContainer) Indexer() (services.Indexer, error) {
 	return self.indexer, nil
 }
 
+func (self *ServiceContainer) LSPServer() (services.LSPServer, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.lsp_server == nil {
+		return nil, errors.New("LSP service not initialized")
+	}
+
+	return self.lsp_server, nil
+}
+
 func (self *ServiceContainer) RepositoryManager() (services.RepositoryManager, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -239,6 +256,16 @@ func (self *ServiceContainer) Journal() (services.JournalService, error) {
 	return self.journal, nil
 }
 
+func (self *ServiceContainer) DocManager() (services.DocManager, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.doc_manager == nil {
+		return nil, errors.New("Doc Manager service not ready")
+	}
+	return self.doc_manager, nil
+}
+
 func (self *ServiceContainer) ClientInfoManager() (services.ClientInfoManager, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -267,6 +294,16 @@ func (self *ServiceContainer) BroadcastService() (services.BroadcastService, err
 		return nil, errors.New("Broadcast Service not ready")
 	}
 	return self.broadcast, nil
+}
+
+func (self *ServiceContainer) ExportManager() (services.ExportManager, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if self.export_manager == nil {
+		return nil, errors.New("ExportManager Service not ready")
+	}
+	return self.export_manager, nil
 }
 
 func (self *ServiceContainer) BackupService() (services.BackupService, error) {
@@ -361,12 +398,6 @@ func (self *OrgManager) startRootOrgServices(
 	}
 
 	err = ddclient.StartDynDNSService(
-		ctx, wg, org_config)
-	if err != nil {
-		return err
-	}
-
-	err = datastore.StartDatastore(
 		ctx, wg, org_config)
 	if err != nil {
 		return err
@@ -471,13 +502,23 @@ func (self *OrgManager) startOrgFromContext(org_ctx *OrgContext) (err error) {
 			return err
 		}
 
-		err = repository.LoadArtifactsFromConfig(repo_manager, org_config)
+		err = repository.LoadArtifactsFromConfig(ctx, repo_manager, org_config)
 		if err != nil {
 			return err
 		}
 
 		service_container.mu.Lock()
 		service_container.repository = repo_manager
+		service_container.mu.Unlock()
+	}
+
+	if spec.ClientInfo {
+		c, err := client_info.NewClientInfoManager(ctx, wg, org_config)
+		if err != nil {
+			return err
+		}
+		service_container.mu.Lock()
+		service_container.client_info_manager = c
 		service_container.mu.Unlock()
 	}
 
@@ -496,8 +537,7 @@ func (self *OrgManager) startOrgFromContext(org_ctx *OrgContext) (err error) {
 	// Inventory service needs to start before we import built in
 	// artifacts so they can add their tool dependencies.
 	if spec.InventoryService {
-		i, err := inventory.NewInventoryService(
-			ctx, wg, org_config)
+		i, err := inventory.NewInventoryService(ctx, wg, org_config)
 		if err != nil {
 			return err
 		}
@@ -553,25 +593,22 @@ func (self *OrgManager) startOrgFromContext(org_ctx *OrgContext) (err error) {
 
 		// Load config artifacts last so they can override all the
 		// other artifacts.
-		err = repository.LoadArtifactsFromConfig(repo_manager, org_config)
+		err = repository.LoadArtifactsFromConfig(ctx, repo_manager, org_config)
 		if err != nil {
 			return err
 		}
+
+		dm, err := docs.NewDocManager(ctx, wg, org_config)
+		if err != nil {
+			return err
+		}
+
+		lsp_server := lsp.NewLSPServer(org_config)
 
 		service_container.mu.Lock()
 		service_container.repository = repo_manager
-		service_container.mu.Unlock()
-	}
-
-	if spec.HuntDispatcher {
-		hd, err := hunt_dispatcher.NewHuntDispatcher(
-			ctx, wg, org_config)
-		if err != nil {
-			return err
-		}
-
-		service_container.mu.Lock()
-		service_container.hunt_dispatcher = hd
+		service_container.doc_manager = dm
+		service_container.lsp_server = lsp_server
 		service_container.mu.Unlock()
 	}
 
@@ -592,18 +629,22 @@ func (self *OrgManager) startOrgFromContext(org_ctx *OrgContext) (err error) {
 		}
 	}
 
-	if spec.ClientInfo {
-		c, err := client_info.NewClientInfoManager(ctx, wg, org_config)
+	if spec.HuntDispatcher {
+		hd, err := hunt_dispatcher.NewHuntDispatcher(
+			ctx, wg, org_config)
 		if err != nil {
 			return err
 		}
-		err = c.Start(ctx, org_config, wg)
+
+		export_manager, err := exports.NewExportManager(
+			ctx, wg, org_config)
 		if err != nil {
 			return err
 		}
 
 		service_container.mu.Lock()
-		service_container.client_info_manager = c
+		service_container.hunt_dispatcher = hd
+		service_container.export_manager = export_manager
 		service_container.mu.Unlock()
 	}
 
@@ -714,8 +755,15 @@ func maybeFlushFilesOnClose(
 		defer wg.Done()
 		<-ctx.Done()
 
-		file_store.FlushFilestore(org_config)
-		datastore.FlushDatastore(org_config)
+		logger := logging.GetLogger(org_config, &logging.FrontendComponent)
+		err := file_store.FlushFilestore(org_config)
+		if err != nil {
+			logger.Error("<red>maybeFlushFilesOnClose FlushFilestore</> %v", err)
+		}
+		err = datastore.FlushDatastore(org_config)
+		if err != nil {
+			logger.Error("<red>maybeFlushFilesOnClose FlushDatastore</> %v", err)
+		}
 	}()
 
 	return nil

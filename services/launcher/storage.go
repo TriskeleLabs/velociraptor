@@ -5,26 +5,104 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
+	"time"
 
-	"github.com/Velocidex/ordereddict"
 	"github.com/go-errors/errors"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
-type FlowStorageManager struct{}
+type FlowStorageManager struct {
+	mu sync.Mutex
+
+	indexBuilders map[string]*flowIndexBuilder
+
+	// Protects the global flows journal
+	flow_journal_mu sync.Mutex
+
+	// Throttle index rebuilds so they are not too frequent.
+	throttler          *utils.Throttler
+	concurrencyControl *utils.Concurrency
+}
 
 func (self *FlowStorageManager) WriteFlow(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	flow *flows_proto.ArtifactCollectorContext,
+	options services.GetFlowOptions,
+	completion func()) error {
+
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return err
+	}
+
+	session_id, _ := utils.SplitSessionIdToParentAndChild(flow.SessionId)
+	flow_path_manager := paths.NewFlowPathManager(flow.ClientId, session_id)
+
+	completer, closer := utils.NewCompleter(completion)
+	defer closer()
+
+	// Write the requests to a separate file to ensure they are not
+	// too large.
+
+	// Make a shallow copy to store.
+	reducted := *flow
+
+	// The request is valid, so we need to overwrite it.
+	if options.Request && flow.Request != nil {
+
+		// Make a smaller representation of the request.
+		reducted.Request = &flows_proto.ArtifactCollectorArgs{
+			Creator:   flow.Request.Creator,
+			ClientId:  flow.Request.ClientId,
+			FlowId:    flow.SessionId,
+			Artifacts: flow.Request.Artifacts,
+			Urgent:    flow.Request.Urgent,
+
+			// Keep the various limits so we can check them without
+			// loading the large object
+			CpuLimit:        flow.Request.CpuLimit,
+			IopsLimit:       flow.Request.IopsLimit,
+			ProgressTimeout: flow.Request.ProgressTimeout,
+			Timeout:         flow.Request.Timeout,
+			MaxRows:         flow.Request.MaxRows,
+			MaxLogs:         flow.Request.MaxLogs,
+			MaxUploadBytes:  flow.Request.MaxUploadBytes,
+		}
+		reducted.PreviousFlows = nil
+
+		requests := &flows_proto.ArtifactCollectorContext{
+			Request:       flow.Request,
+			PreviousFlows: flow.PreviousFlows,
+		}
+
+		err = db.SetSubjectWithCompletion(
+			config_obj, flow_path_manager.Requests(),
+			requests, completer.GetCompletionFunc())
+		if err != nil {
+			return fmt.Errorf(
+				"While writing flow %v: %w", session_id, err)
+		}
+	}
+
+	return db.SetSubjectWithCompletion(
+		config_obj, flow_path_manager.Path(),
+		&reducted, completer.GetCompletionFunc())
+}
+
+func (self *FlowStorageManager) WriteFlowStats(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	flow *flows_proto.ArtifactCollectorContext,
@@ -35,9 +113,10 @@ func (self *FlowStorageManager) WriteFlow(
 		return err
 	}
 
-	flow_path_manager := paths.NewFlowPathManager(flow.ClientId, flow.SessionId)
+	sesion_id, _ := utils.SplitSessionIdToParentAndChild(flow.SessionId)
+	flow_path_manager := paths.NewFlowPathManager(flow.ClientId, sesion_id)
 	return db.SetSubjectWithCompletion(
-		config_obj, flow_path_manager.Path(), flow, completion)
+		config_obj, flow_path_manager.Stats(), flow, completion)
 }
 
 // Write the flow to the flow resultset index - this is only used for
@@ -47,25 +126,16 @@ func (self *FlowStorageManager) WriteFlowIndex(
 	config_obj *config_proto.Config,
 	flow *flows_proto.ArtifactCollectorContext) error {
 
-	if flow.Request == nil || flow.SessionId == "" {
-		return errors.New("Invalid flow")
-	}
+	return self.GetIndexBuilder(flow.ClientId).WriteFlowIndex(
+		ctx, config_obj, flow)
+}
 
-	client_path_manager := paths.NewClientPathManager(flow.ClientId)
-	journal, err := services.GetJournal(config_obj)
-	if err != nil {
-		return err
-	}
+func (self *FlowStorageManager) RemoveClientFlowsFromIndex(
+	ctx context.Context, config_obj *config_proto.Config,
+	client_id string, flows map[string]bool) error {
 
-	return journal.AppendToResultSet(config_obj, client_path_manager.FlowIndex(),
-		[]*ordereddict.Dict{ordereddict.NewDict().
-			Set("FlowId", flow.SessionId).
-			Set("Artifacts", flow.Request.Artifacts).
-			Set("Created", flow.CreateTime).
-			Set("Creator", flow.Request.Creator)},
-		services.JournalOptions{
-			Sync: true,
-		})
+	return self.GetIndexBuilder(client_id).
+		RemoveClientFlowsFromIndex(ctx, config_obj, self, flows)
 }
 
 func (self *FlowStorageManager) WriteTask(
@@ -78,12 +148,41 @@ func (self *FlowStorageManager) WriteTask(
 		return err
 	}
 
-	flow_path_manager := paths.NewFlowPathManager(client_id, msg.SessionId)
+	// The task contains the client's view of the flow id, but we must
+	// store everything in the parent flow.
+	sesion_id, _ := utils.SplitSessionIdToParentAndChild(msg.SessionId)
+	flow_path_manager := paths.NewFlowPathManager(client_id, sesion_id)
 	return db.SetSubjectWithCompletion(
 		config_obj, flow_path_manager.Task(),
 		&api_proto.ApiFlowRequestDetails{
 			Items: []*crypto_proto.VeloMessage{msg},
 		}, utils.BackgroundWriter)
+}
+
+func (self *FlowStorageManager) shouldRefreshRS(
+	config_obj *config_proto.Config,
+	rs_reader result_sets.ResultSetReader) bool {
+
+	if rs_reader.TotalRows() <= 0 {
+		return true
+	}
+
+	now := utils.GetTime().Now()
+	max_age := 600 * time.Second
+	if config_obj.Defaults != nil &&
+		config_obj.Defaults.ReindexPeriodSeconds > 0 {
+		max_age = time.Duration(config_obj.Defaults.ReindexPeriodSeconds) * time.Second
+	}
+
+	// The reader is not older than max_age, lets just use it.
+	if now.Add(-max_age).Before(rs_reader.MTime()) {
+		return false
+	}
+
+	// Only reindex if we are ready - this helps to spread out the
+	// load when we read flow indexes very quickly (e.g in a VQL
+	// query)
+	return self.throttler.Ready()
 }
 
 func (self *FlowStorageManager) ListFlows(
@@ -98,18 +197,27 @@ func (self *FlowStorageManager) ListFlows(
 	rs_reader, err := result_sets.NewResultSetReaderWithOptions(
 		ctx, config_obj, file_store_factory,
 		client_path_manager.FlowIndex(), options)
-	if err != nil || rs_reader.TotalRows() <= 0 {
-		// Try to rebuild the index
-		err = self.buildFlowIndexFromLegacy(ctx, config_obj, client_id)
-		if err != nil {
-			return nil, 0, fmt.Errorf("buildFlowIndexFromLegacy %w", err)
+
+	if err != nil || self.shouldRefreshRS(config_obj, rs_reader) {
+		// Try to get concurrency here - if we fail, we just make do
+		// with the old result set - no big deal.
+		closer, err := self.concurrencyControl.StartConcurrencyControl(ctx)
+		if err == nil {
+			defer closer()
+
+			// Try to rebuild the index
+			err = self.buildFlowIndexFromDatastore(
+				ctx, config_obj, client_id)
+			if err != nil {
+				return nil, 0, fmt.Errorf("buildFlowIndexFromDatastore %w", err)
+			}
 		}
 
 		rs_reader, err = result_sets.NewResultSetReaderWithOptions(
 			ctx, config_obj, file_store_factory,
 			client_path_manager.FlowIndex(), options)
 		if err != nil {
-			return nil, 0, fmt.Errorf("NewResultSetReaderWithOptions %w", err)
+			return nil, 0, fmt.Errorf("ListFlows %w", err)
 		}
 	}
 
@@ -147,75 +255,82 @@ func (self *FlowStorageManager) ListFlows(
 	return result, rs_reader.TotalRows(), nil
 }
 
-// Rebuild the flow index from individual flow context files.
-func (self *FlowStorageManager) buildFlowIndexFromLegacy(
+// Rebuild flow indexes periodically as required.
+func (self *FlowStorageManager) houseKeeping(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	wg *sync.WaitGroup) {
+
+	defer wg.Done()
+
+	delay := time.Second * 60
+	if config_obj.Defaults != nil &&
+		config_obj.Defaults.ClientInfoHousekeepingPeriod > 0 {
+		delay = time.Duration(
+			config_obj.Defaults.ClientInfoHousekeepingPeriod) * time.Second
+	}
+
+	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+
+	for {
+		last_try := utils.GetTime().Now()
+
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-utils.GetTime().After(utils.Jitter(delay)):
+			// Avoid retrying too quickly. This is mainly for
+			// tests where the time is mocked for the After(delay)
+			// above does not work.
+			if utils.GetTime().Now().Sub(last_try) < time.Second*10 {
+				if !utils.SleepWithCtx(ctx, time.Minute) {
+					return
+				}
+				continue
+			}
+
+			err := self.RemoveFlowsFromJournal(ctx, config_obj)
+			if err != nil {
+				logger.Error("RemoveFlowsFromJournal: %v", err)
+			}
+		}
+	}
+}
+
+func (self *FlowStorageManager) GetIndexBuilder(
+	client_id string) *flowIndexBuilder {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	builder, pres := self.indexBuilders[client_id]
+	if !pres {
+		builder = &flowIndexBuilder{
+			client_id: client_id,
+		}
+		self.indexBuilders[client_id] = builder
+	}
+
+	return builder
+}
+
+func (self *FlowStorageManager) buildFlowIndexFromDatastore(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	client_id string) error {
 
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		return err
-	}
-
-	flow_path_manager := paths.NewFlowPathManager(client_id, "")
-	all_flow_urns, err := db.ListChildren(
-		config_obj, flow_path_manager.ContainerPath())
-	if err != nil {
-		return err
-	}
-
-	seen := make(map[string]bool)
-
-	// We only care about the flow contexts
-	for _, urn := range all_flow_urns {
-		flow_id := urn.Base()
-		// Hide the monitoring flow since it is not a real flow.
-		if flow_id == constants.MONITORING_WELL_KNOWN_FLOW {
-			continue
-		}
-
-		seen[flow_id] = true
-	}
-
-	flow_reader := NewFlowReader(
-		ctx, config_obj, self, client_id)
-
-	go func() {
-		defer flow_reader.Close()
-
-		for k := range seen {
-			flow_reader.In <- k
-		}
-	}()
-
-	client_path_manager := paths.NewClientPathManager(client_id)
-	file_store_factory := file_store.GetFileStore(config_obj)
-
-	rs_writer, err := result_sets.NewResultSetWriter(file_store_factory,
-		client_path_manager.FlowIndex(),
-		json.DefaultEncOpts(), utils.SyncCompleter, result_sets.TruncateMode)
-	if err != nil {
-		return err
-	}
-	defer rs_writer.Close()
-
-	for flow := range flow_reader.Out {
-		rs_writer.Write(ordereddict.NewDict().
-			Set("FlowId", flow.SessionId).
-			Set("Artifacts", flow.Request.Artifacts).
-			Set("Created", flow.CreateTime).
-			Set("Creator", flow.Request.Creator))
-	}
-
-	return nil
+	// Do not hold the lock while we build different clients.
+	return self.GetIndexBuilder(client_id).
+		BuildFlowIndexFromDatastore(ctx, config_obj, self)
 }
 
 // Load the collector context from storage.
 func (self *FlowStorageManager) LoadCollectionContext(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	client_id, flow_id string) (*flows_proto.ArtifactCollectorContext, error) {
+	client_id, flow_id string,
+	options services.GetFlowOptions) (
+	*flows_proto.ArtifactCollectorContext, error) {
 
 	in_flight_time := int64(0)
 	client_info_manager, err := services.GetClientInfoManager(config_obj)
@@ -227,7 +342,7 @@ func (self *FlowStorageManager) LoadCollectionContext(
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 			if client_info != nil &&
 				client_info.InFlightFlows != nil {
-				in_flight_time, _ = client_info.InFlightFlows[flow_id]
+				in_flight_time = client_info.InFlightFlows[flow_id]
 			}
 			return nil, nil
 		})
@@ -252,6 +367,16 @@ func (self *FlowStorageManager) LoadCollectionContext(
 		return nil, err
 	}
 
+	if options.Request {
+		requests := &flows_proto.ArtifactCollectorContext{}
+		err = db.GetSubject(
+			config_obj, flow_path_manager.Requests(), requests)
+		if err == nil {
+			collection_context.Request = requests.Request
+			collection_context.PreviousFlows = requests.PreviousFlows
+		}
+	}
+
 	if collection_context.SessionId == "" {
 		return nil, fmt.Errorf("%w: %v in client '%v'",
 			services.FlowNotFoundError, flow_id, client_id)
@@ -262,6 +387,7 @@ func (self *FlowStorageManager) LoadCollectionContext(
 	err = db.GetSubject(
 		config_obj, flow_path_manager.Stats(), stats_context)
 
+	collection_context.TransactionsOutstanding = stats_context.TransactionsOutstanding
 	collection_context.InflightTime = uint64(in_flight_time)
 
 	// Stats file is missing that is ok and not an error.
@@ -275,10 +401,11 @@ func (self *FlowStorageManager) LoadCollectionContext(
 	}
 
 	UpdateFlowStats(collection_context)
+
 	return collection_context, nil
 }
 
-func (self *FlowStorageManager) GetFlowRequests(
+func (self *FlowStorageManager) GetFlowTasks(
 	ctx context.Context,
 	config_obj *config_proto.Config,
 	client_id string, flow_id string,
@@ -300,7 +427,7 @@ func (self *FlowStorageManager) GetFlowRequests(
 		config_obj, flow_path_manager.Task(), flow_details)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %v in client '%v'",
-			services.FlowNotFoundError, flow_id, client_id)
+			services.FlowRequestNotFoundError, flow_id, client_id)
 	}
 
 	if err != nil {
@@ -318,4 +445,31 @@ func (self *FlowStorageManager) GetFlowRequests(
 
 	result.Items = flow_details.Items[offset:end]
 	return result, nil
+}
+
+func NewFlowStorageManager(
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	wg *sync.WaitGroup) (*FlowStorageManager, error) {
+	res := &FlowStorageManager{
+		indexBuilders: make(map[string]*flowIndexBuilder),
+		throttler:     utils.NewThrottlerWithDuration(time.Second),
+
+		// Do not allow more than one reindex at the same time. If we
+		// cant get to reindex quickly, we just don't worry about it
+		// and use the old index snapshot.
+		concurrencyControl: utils.NewConcurrencyControl(
+			1, 100*time.Millisecond),
+	}
+
+	// We need the client info manager to be up first
+	_, err := services.GetClientInfoManager(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	wg.Add(1)
+	go res.houseKeeping(ctx, config_obj, wg)
+
+	return res, nil
 }

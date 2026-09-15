@@ -5,14 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/utils"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
@@ -55,13 +54,6 @@ func GetMultiPartReader(
 		}
 
 		// Check the user's access to this file.
-		err = vql_subsystem.CheckFilesystemAccess(scope, file_spec.Accessor)
-		if err != nil {
-			scope.Log("http_client: When uploading %v: %v",
-				file_spec.Path.String(), err)
-			continue
-		}
-
 		accessor, err := accessors.GetAccessor(file_spec.Accessor, scope)
 		if err != nil {
 			scope.Log("http_client: When uploading %v: %v",
@@ -97,14 +89,17 @@ func GetMultiPartReader(
 	result.multipart_writer = multipart.NewWriter(
 		result.parameters_buffer)
 	if BoundaryForTests != "" {
-		result.multipart_writer.SetBoundary(BoundaryForTests)
+		err := result.multipart_writer.SetBoundary(BoundaryForTests)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Encode any parameters into the form first
 	if params != nil {
-		for _, k := range params.Keys() {
-			v, _ := params.Get(k)
-			err := result.multipart_writer.WriteField(k, utils.ToString(v))
+		for _, i := range params.Items() {
+			err := result.multipart_writer.WriteField(
+				i.Key, utils.ToString(i.Value))
 			if err != nil {
 				return nil, err
 			}
@@ -118,7 +113,9 @@ func GetMultiPartReader(
 		result.multipart_writer.Boundary()))
 
 	// Start streaming output
-	go result.Start()
+	go func() {
+		_ = result.Start()
+	}()
 
 	return result, nil
 }
@@ -168,7 +165,8 @@ func (self *multiPartReader) Reader() io.Reader {
 }
 
 func (self *multiPartReader) Debug() string {
-	result, err := ioutil.ReadAll(self.pipe_reader)
+	result, err := utils.ReadAllWithLimit(self.pipe_reader,
+		constants.MAX_MEMORY)
 	if err != nil {
 		return fmt.Sprintf("Error: %v\n", err)
 	}
@@ -206,7 +204,10 @@ func (self *multiPartReader) Start() error {
 		}
 
 		// Now close the file.
-		file_info.closer()
+		err = file_info.closer()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write the end boundary

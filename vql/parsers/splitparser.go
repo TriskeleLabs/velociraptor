@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -29,7 +29,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -73,12 +72,6 @@ func processFile(
 	line_regex *regexp.Regexp,
 	arg *_SplitRecordParserArgs,
 	output_chan chan vfilter.Row) {
-
-	err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("split_records: %s", err)
-		return
-	}
 
 	accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 	if err != nil {
@@ -174,7 +167,7 @@ func (self SplitRecordParser) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("split_records", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "split_records", args)()
 
 		arg := _SplitRecordParserArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, &arg)
@@ -227,7 +220,8 @@ func (self SplitRecordParser) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:     "split_records",
 		Doc:      "Parses files by splitting lines into records.",
 		ArgType:  type_map.AddType(scope, &_SplitRecordParserArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 

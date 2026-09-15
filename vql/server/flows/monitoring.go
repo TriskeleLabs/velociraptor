@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -22,13 +22,11 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/file_store"
-	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -45,7 +43,6 @@ type MonitoringPluginArgs struct {
 	EndTime   vfilter.Any `vfilter:"optional,field=end_time,doc=Stop end events reach this time (event sources)."`
 
 	StartRow int64 `vfilter:"optional,field=start_row,doc=Start reading the result set from this row"`
-	Limit    int64 `vfilter:"optional,field=count,doc=Maximum number of clients to fetch (default unlimited)'"`
 }
 
 type MonitoringPlugin struct{}
@@ -58,6 +55,7 @@ func (self MonitoringPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "monitoring", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -99,9 +97,8 @@ func (self MonitoringPlugin) Call(
 			return
 		}
 
-		file_store_factory := file_store.GetFileStore(config_obj)
 		reader, err := result_sets.NewTimedResultSetReader(
-			ctx, file_store_factory, path_manager)
+			ctx, config_obj, path_manager)
 		if err != nil {
 			scope.Log("monitoring: %v", err)
 			return
@@ -149,7 +146,7 @@ func (self MonitoringPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "monitoring",
 		Doc:      "Read event monitoring log from a client (i.e. that was collected using client event artifacts).",
 		ArgType:  type_map.AddType(scope, &MonitoringPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 
@@ -169,6 +166,7 @@ func (self WatchMonitoringPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_monitoring", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -188,7 +186,7 @@ func (self WatchMonitoringPlugin) Call(
 			return
 		}
 
-		journal, _ := services.GetJournal(config_obj)
+		journal, err := services.GetJournal(config_obj)
 		if err != nil {
 			return
 		}
@@ -213,7 +211,9 @@ func (self WatchMonitoringPlugin) Call(
 		}
 
 		switch mode {
-		case paths.MODE_SERVER_EVENT, paths.MODE_CLIENT_EVENT, paths.INTERNAL:
+		case artifact_modes.MODE_SERVER_EVENT,
+			artifact_modes.MODE_CLIENT_EVENT,
+			artifact_modes.MODE_INTERNAL:
 			break
 
 		default:
@@ -222,19 +222,20 @@ func (self WatchMonitoringPlugin) Call(
 		}
 
 		// Ask the journal service to watch the event queue for us.
-		qm_chan, cancel := journal.Watch(
+		qm_chan, cancel := journal.WatchArtifact(
 			ctx, arg.Artifact, "watch_monitoring plugin")
 
 		// Make sure to call this at shutdown (defer is not guaranteed
 		// to run).
-		scope.AddDestructor(cancel)
+		_ = scope.AddDestructor(cancel)
 
 		for row := range qm_chan {
 			select {
 			case <-ctx.Done():
 				return
 
-			case output_chan <- row:
+			case output_chan <- row.
+				Update("_Source", arg.Artifact):
 			}
 		}
 	}()
@@ -250,7 +251,7 @@ func (self WatchMonitoringPlugin) Info(scope vfilter.Scope,
 			"client_id is not provided we watch the global journal which contains " +
 			"events from all clients.",
 		ArgType:  type_map.AddType(scope, &WatchMonitoringPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 

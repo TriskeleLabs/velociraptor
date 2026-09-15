@@ -3,6 +3,7 @@ import hex2a from "./utils";
 import React from 'react';
 import Alert from 'react-bootstrap/Alert';
 import humanizeDuration from "humanize-duration";
+import api from '../core/api-service.jsx';
 
 import automated from "./vi.json";
 
@@ -67,10 +68,10 @@ const Vietnamese = {
     <>
    Công cụ sẽ được cung cấp từ máy chủ Velociraptor cho máy trạm nếu cần. Máy trạm sẽ lưu công cụ vào bộ nhớ cache trên ổ cứng và so sánh hàm băm vào lần chạy tiếp theo. Các công cụ sẽ chỉ được tải xuống nếu hàm băm của chúng đã thay đổi.
     </>,
-    "ServedFromURL": (base_path, url)=>
+    "ServedFromURL": (url)=>
     <>
     Máy trạm sẽ tải trực tiếp công cụ
-    từ <a href={base_path + url}>{url}</a> nếu cần thiết. Lưu ý rằng nếu hàm băm không khớp với hàm băm dự kiến, máy trạm sẽ từ chối tệp.
+    từ <a href={api.href(url)}>{url}</a> nếu cần thiết. Lưu ý rằng nếu hàm băm không khớp với hàm băm dự kiến, máy trạm sẽ từ chối tệp.
     </>,
     "ServedFromGithub": (github_project, github_asset_regex)=>
     <>
@@ -128,7 +129,6 @@ const Vietnamese = {
      "Role_artifact_writer": "Artifact Writer",
      "Role_api": "API Client",
 
-    "Perm_ALL_QUERY": "All Query",
      "Perm_ANY_QUERY": "Any Query",
      "Perm_PUBISH": "Publish",
      "Perm_READ_RESULTS" : "Đọc kết quả",
@@ -149,9 +149,7 @@ const Vietnamese = {
      "Perm_PREPARE_RESULTS": "Chuẩn bị kết quả",
      "Perm_DATASTORE_ACCESS": "Truy cập Datastore",
 
-
-     "ToolPerm_ALL_QUERY" : "Thực hiện tất cả các query không bị giới hạn",
-     "ToolPerm_ANY_QUERY": "Thực hiện query bất kỳ trên tất cả (AllQuery bao gồm AnyQuery)",
+     "ToolPerm_ANY_QUERY": "Thực hiện query bất kỳ trên tất cả",
      "ToolPerm_PUBISH": "Xuất sự kiện lên hàng đợi của máy chủ (thường không cần thiết)",
      "ToolPerm_READ_RESULTS": "Đọc kết quả từ các lần hunt đã chạy, flows hoặc ghi chú",
      "ToolPerm_LABEL_CLIENT": "Có thể thao tác với nhãn và metadata",

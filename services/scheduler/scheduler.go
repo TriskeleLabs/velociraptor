@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"sort"
 	"sync"
 	"time"
+
+	"www.velocidex.com/golang/velociraptor/utils/rand"
 
 	"github.com/Velocidex/ordereddict"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -26,8 +27,6 @@ type Worker struct {
 
 	// Freestyle name to report in stats
 	name string
-
-	org_id string
 
 	// If this is busy we do not assign any requests to it.
 	busy bool
@@ -96,7 +95,7 @@ func (self *Scheduler) RegisterWorker(
 		self.mu.Lock()
 		defer self.mu.Unlock()
 
-		queues, _ := self.queues[queue]
+		queues := self.queues[queue]
 		new_queue := make([]*Worker, 0, len(queues))
 		for _, q := range queues {
 			if q.id != worker.id {
@@ -107,7 +106,7 @@ func (self *Scheduler) RegisterWorker(
 	}()
 
 	self.mu.Lock()
-	queues, _ := self.queues[queue]
+	queues := self.queues[queue]
 	queues = append(queues, worker)
 	self.queues[queue] = queues
 	self.mu.Unlock()
@@ -118,19 +117,45 @@ func (self *Scheduler) RegisterWorker(
 func (self *Scheduler) WriteProfile(ctx context.Context,
 	scope vfilter.Scope, output_chan chan vfilter.Row) {
 
+	var rows []*ordereddict.Dict
+
 	self.mu.Lock()
 	for queue_name, queues := range self.queues {
 		for _, q := range queues {
-			output_chan <- ordereddict.NewDict().
+			rows = append(rows, ordereddict.NewDict().
 				Set("Type", "Worker").
 				Set("Name", q.name).
 				Set("Priority", q.priority).
 				Set("Queue", queue_name).
 				Set("IsBusy", q.IsBusy()).
-				Set("Request", q.Request())
+				Set("Request", q.Request()))
 		}
 	}
 	self.mu.Unlock()
+
+	for _, r := range rows {
+		select {
+		case <-ctx.Done():
+			return
+		case output_chan <- r:
+		}
+	}
+}
+
+func (self *Scheduler) AvailableWorkers() int {
+	count := 0
+
+	self.mu.Lock()
+
+	for _, workers := range self.queues {
+		for _, w := range workers {
+			if !w.IsBusy() {
+				count++
+			}
+		}
+	}
+	self.mu.Unlock()
+	return count
 }
 
 func (self *Scheduler) Schedule(ctx context.Context,
@@ -158,7 +183,7 @@ func (self *Scheduler) Schedule(ctx context.Context,
 			self.mu.Lock()
 
 			// Find a ready worker
-			workers, _ := self.queues[job.Queue]
+			workers := self.queues[job.Queue]
 			for _, w := range workers {
 				if !w.IsBusy() {
 					available_workers = append(available_workers, w)
@@ -176,7 +201,8 @@ func (self *Scheduler) Schedule(ctx context.Context,
 
 			// Give up after 10 seconds.
 			if utils.GetTime().Now().Sub(start) > wait_time {
-				return nil, fmt.Errorf("No workers available on queue %v!", job.Queue)
+				return nil, fmt.Errorf(
+					"No workers available on queue %v!", job.Queue)
 			}
 
 			// Try again soon
@@ -254,6 +280,8 @@ func (self *Scheduler) Schedule(ctx context.Context,
 	}
 }
 
+// The scheduler service is only started for the root org. Workers
+// will switch orgs as needed.
 func StartSchedulerService(
 	ctx context.Context,
 	wg *sync.WaitGroup,
@@ -261,7 +289,7 @@ func StartSchedulerService(
 
 	if !services.IsMaster(config_obj) {
 		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-		logger.Info("Starting Minion Scheduler Service for %v", services.GetOrgName(config_obj))
+		logger.Info("Starting Minion Scheduler Service")
 
 		scheduler := &MinionScheduler{
 			config_obj: config_obj,
@@ -274,7 +302,7 @@ func StartSchedulerService(
 	}
 
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
-	logger.Info("Starting Server Scheduler Service for %v", services.GetOrgName(config_obj))
+	logger.Info("Starting Server Scheduler Service")
 
 	scheduler := &Scheduler{
 		queues:     make(map[string][]*Worker),
@@ -287,6 +315,7 @@ func StartSchedulerService(
 		Name:          "worker",
 		Description:   "Reporting information about current worker tasks.",
 		ProfileWriter: scheduler.WriteProfile,
+		Categories:    []string{"Global", "Services"},
 	})
 
 	return nil

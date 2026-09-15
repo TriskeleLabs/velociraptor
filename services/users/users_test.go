@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
@@ -12,6 +11,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/orgs"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 type UserManagerTestSuite struct {
@@ -37,7 +37,7 @@ func (self *UserManagerTestSuite) makeUserWithRoles(username, org_id, role strin
 
 	_, err = org_manager.GetOrgConfig(org_id)
 	if err != nil {
-		_, err = org_manager.CreateNewOrg(org_id, org_id)
+		_, err = org_manager.CreateNewOrg(org_id, org_id, services.RandomNonce)
 		assert.NoError(self.T(), err)
 	}
 
@@ -87,7 +87,7 @@ func (self *UserManagerTestSuite) TestMakeUsers() {
 	assert.NoError(self.T(), err)
 	golden.Set("AdminO1 UserO1", user_record)
 
-	user_record, err = users_manager.GetUser(self.Ctx, "AdminO2", "UserO1")
+	_, err = users_manager.GetUser(self.Ctx, "AdminO2", "UserO1")
 	assert.ErrorContains(self.T(), err, "PermissionDenied")
 	golden.Set("AdminO2 UserO1", err.Error())
 
@@ -99,7 +99,7 @@ func (self *UserManagerTestSuite) TestMakeUsers() {
 	assert.NoError(self.T(), err)
 	golden.Set("AdminO2 UserO2", user_record)
 
-	user_record, err = users_manager.GetUser(self.Ctx, "AdminO1", "UserO2")
+	_, err = users_manager.GetUser(self.Ctx, "AdminO1", "UserO2")
 	assert.ErrorContains(self.T(), err, "PermissionDenied")
 	golden.Set("AdminO1 UserO2", err.Error())
 

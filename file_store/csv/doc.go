@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-// Velociraptor's flavour of Comma Separated Value (CSV) files.
+// Velociraptor's flavor of Comma Separated Value (CSV) files.
 
 // Velociraptor requires a file format that stores tabulated data. CSV
 // seems like the perfect choice because it is well supported by
@@ -25,7 +25,7 @@
 
 //  1. CSV are just flat files, which can be appended to without
 //     modifying previous data. This is perfect for many uses within
-//     Velociraptor: For example as more data is retreived from
+//     Velociraptor: For example as more data is retrieved from
 //     clients, we can just append to the end of an existing CSV file.
 
 //  2. CSV Readers can watch the end of the file and when it grows

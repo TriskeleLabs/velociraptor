@@ -17,6 +17,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -48,7 +49,7 @@ func (self *ServerCryptoManager) AddCertificateRequest(
 	// client is free to generate its own private/public key pair
 	// and just uses those to communicate with the server we just
 	// store its public key so we can verify its
-	// transmissions. The most important thing here is to verfiy
+	// transmissions. The most important thing here is to verify
 	// that the client id this packet claims to come from
 	// corresponds with the public key this client presents. This
 	// avoids the possibility of impersonation since the
@@ -101,7 +102,7 @@ func NewServerCryptoManager(
 	}
 
 	err = journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"Server.Internal.ClientDelete",
+		artifacts.CLIENT_DELETE_QUEUE,
 		"CryptoServerManager",
 		func(ctx context.Context,
 			config_obj *config_proto.Config,
@@ -116,7 +117,7 @@ func NewServerCryptoManager(
 			return nil
 		})
 
-	return server_manager, nil
+	return server_manager, err
 }
 
 type serverPublicKeyResolver struct {
@@ -127,7 +128,7 @@ type serverPublicKeyResolver struct {
 }
 
 func (self *serverPublicKeyResolver) DeleteSubject(client_id string) {
-	self.negative_lru.Remove(client_id)
+	_ = self.negative_lru.Remove(client_id)
 }
 
 func (self *serverPublicKeyResolver) GetPublicKey(
@@ -135,7 +136,7 @@ func (self *serverPublicKeyResolver) GetPublicKey(
 	client_id string) (*rsa.PublicKey, bool) {
 
 	// Check if we failed to get this key recently - this reduces IO
-	// while clients enrol.
+	// while clients enroll.
 	_, err := self.negative_lru.Get(client_id)
 	if err == nil {
 		return nil, false
@@ -150,13 +151,13 @@ func (self *serverPublicKeyResolver) GetPublicKey(
 	pem := &crypto_proto.PublicKey{}
 	err = db.GetSubject(config_obj, client_path_manager.Key(), pem)
 	if err != nil {
-		self.negative_lru.Set(client_id, true)
+		_ = self.negative_lru.Set(client_id, true)
 		return nil, false
 	}
 
 	key, err := crypto_utils.PemToPublicKey(pem.Pem)
 	if err != nil {
-		self.negative_lru.Set(client_id, true)
+		_ = self.negative_lru.Set(client_id, true)
 		return nil, false
 	}
 
@@ -167,7 +168,7 @@ func (self *serverPublicKeyResolver) SetPublicKey(
 	config_obj *config_proto.Config,
 	client_id string, key *rsa.PublicKey) error {
 
-	self.negative_lru.Remove(client_id)
+	_ = self.negative_lru.Remove(client_id)
 
 	client_path_manager := paths.NewClientPathManager(client_id)
 	db, err := datastore.GetDB(config_obj)
@@ -207,7 +208,7 @@ func NewServerPublicKeyResolver(
 		}
 	}
 
-	result.negative_lru.SetTTL(timeout)
+	_ = result.negative_lru.SetTTL(timeout)
 	result.negative_lru.SkipTTLExtensionOnHit(true)
 
 	// Close the LRU when we are done here.

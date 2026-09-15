@@ -12,6 +12,7 @@ import "google/protobuf/empty.proto";
 import "artifacts.proto";
 import "clients.proto";
 import "datastore.proto";
+import "docs.proto";
 import "health.proto";
 import "hunts.proto";
 import "flows.proto";
@@ -23,6 +24,8 @@ import "completions.proto";
 import "vfs_api.proto";
 import "scheduler.proto";
 import "secrets.proto";
+import "timeline_api.proto";
+import "lsp.proto";
 
 package proto;
 
@@ -60,6 +63,8 @@ message VFSFileBuffer {
     uint32 length = 4;
     bytes data = 5;
     repeated string components = 6;
+    string org_id = 7;
+    optional bool padding = 8;
 }
 
 
@@ -99,6 +104,15 @@ message PushEventRequest {
     int64 rows = 5;
 
     string org_id = 6;
+
+    // If false we do not write but just broadcast to all
+    // listeners. But if true we also write to the local filestore.
+    bool write = 7;
+
+    // The username source for the event. This can only be set by the
+    // minion as a trusted impersonation. Other callers will have this
+    // set to their real username.
+    string username = 8;
 }
 
 
@@ -145,7 +159,7 @@ service API {
         };
     }
 
-    rpc ModifyHunt(Hunt) returns (google.protobuf.Empty) {
+    rpc ModifyHunt(HuntMutation) returns (google.protobuf.Empty) {
         option (google.api.http) = {
             post: "/api/v1/ModifyHunt",
             body: "*"
@@ -346,6 +360,13 @@ service API {
         };
     }
 
+    rpc ResumeFlow(ApiFlowRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/ResumeFlow",
+            body: "*"
+        };
+    }
+
     rpc GetFlowDetails(ApiFlowRequest) returns (FlowDetails) {
         option (google.api.http) = {
             get: "/api/v1/GetFlowDetails",
@@ -386,7 +407,7 @@ service API {
         };
     }
 
-    rpc SetArtifactFile(SetArtifactRequest) returns (APIResponse) {
+    rpc SetArtifactFile(SetArtifactRequest) returns (SetArtifactResponse) {
         option (google.api.http) = {
             post: "/api/v1/SetArtifactFile",
             body: "*",
@@ -397,6 +418,13 @@ service API {
         option (google.api.http) = {
             post: "/api/v1/LoadArtifactPack",
             body: "*",
+        };
+    }
+
+    // Documentation
+    rpc SearchDocs(DocSearchRequest) returns (DocSearchResponses) {
+        option (google.api.http) = {
+            get: "/api/v1/SearchDocs",
         };
     }
 
@@ -493,6 +521,13 @@ service API {
         };
     }
 
+   rpc DeleteNotebook(NotebookMetadata) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/DeleteNotebook",
+            body: "*",
+        };
+    }
+
     rpc NewNotebookCell(NotebookCellRequest) returns (NotebookMetadata) {
         option (google.api.http) = {
             post: "/api/v1/NewNotebookCell",
@@ -549,21 +584,14 @@ service API {
         };
     }
 
+    rpc AnnotateTimeline(AnnotationRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/AnnotateTimeline",
+            body: "*",
+        };
+    }
+
     // Secret management
-    rpc DefineSecret(SecretDefinition) returns (google.protobuf.Empty) {
-        option (google.api.http) = {
-            post: "/api/v1/DefineSecret",
-            body: "*",
-        };
-    }
-
-    rpc DeleteSecretDefinition(SecretDefinition) returns (google.protobuf.Empty) {
-        option (google.api.http) = {
-            post: "/api/v1/DeleteSecretDefinition",
-            body: "*",
-        };
-    }
-
     rpc GetSecretDefinitions(google.protobuf.Empty) returns (SecretDefinitionList) {
         option (google.api.http) = {
             get: "/api/v1/GetSecretDefinitions",
@@ -622,4 +650,7 @@ service API {
 
     // Health check protocol as in https://github.com/grpc/grpc/blob/master/doc/health-checking.md
     rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+    // LSP only accessible over the API
+    rpc LSP(LSPRequest) returns (LSPResponse);
 }

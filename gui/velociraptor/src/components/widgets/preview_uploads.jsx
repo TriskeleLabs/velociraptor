@@ -7,7 +7,6 @@ import React, { Component } from 'react';
 import {CancelToken} from 'axios';
 import api from '../core/api-service.jsx';
 import Button from 'react-bootstrap/Button';
-import qs from 'qs';
 import Modal from 'react-bootstrap/Modal';
 import Container from  'react-bootstrap/Container';
 import HexView from '../utils/hex.jsx';
@@ -107,6 +106,8 @@ class TextViewTab extends React.Component {
 
         api.get_blob(this.props.url, params, this.source.token).then(
             response=>{
+                if (response.cancel) return;
+
                 let content_range = response.blob && response.blob.headers &&
                     response.blob.headers["content-range"];
                 if(content_range) {
@@ -270,6 +271,8 @@ class HexViewTab  extends React.Component {
 
         api.get_blob(this.props.url, params, this.source.token).then(
             response=>{
+                if (response.cancel) return;
+
                 const view = new Uint8Array(response.data);
                 this.setState({
                     base_offset: params.offset,
@@ -412,7 +415,7 @@ class InspectDialog extends React.Component {
                                     size={this.props.size}/>
                     }
                   </Tab>
-                  <Tab eventKey="details" title={T("Details")}>
+                  <Tab eventKey="details" title={T("Download")}>
                     { this.state.tab === "details" &&
                       <>
                         <Download fs_components={components}
@@ -480,7 +483,12 @@ export default class PreviewUpload extends Component {
     }
 
     fetchPreview_ = () => {
-        let accessor = this.props.upload.Accessor || "auto";
+        let upload = this.props.upload;
+        if (_.isEmpty(upload)) {
+            return;
+        }
+
+        let accessor = upload.Accessor || "auto";
         let components = this.props.upload.Components;
         if (_.isUndefined(components)) {
             // No components available - do our best
@@ -522,6 +530,7 @@ export default class PreviewUpload extends Component {
 
         api.get_blob(url, params, this.source.token).then(
             response=>{
+                if (response.cancel) return;
                 if(response.data && response.data.error) {
                     this.setState({error: true});
 
@@ -568,9 +577,8 @@ export default class PreviewUpload extends Component {
                 // Only view first 1mb
                 length: 1000000,
             };
-            params["fs_components[]"] = this.state.params.fs_components;
-            let url = api.base_path + "/api/" + this.state.url + "?" +
-                 qs.stringify(params, {indices: false});
+            params["fs_components"] = this.state.params.fs_components;
+            let url = api.href("/api/" + this.state.url, params);
             string_data = <img className="preview-thumbnail"
                                src={url} alt="preview upload" />;
         }

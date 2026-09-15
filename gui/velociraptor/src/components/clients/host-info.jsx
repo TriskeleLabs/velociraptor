@@ -192,7 +192,7 @@ class VeloHostInfo extends Component {
     }
 
     state = {
-        // Current inflight interrogate.
+        // Current in-flight interrogate.
         interrogateOperationId: null,
 
         // The mode of the host info tab set.
@@ -387,7 +387,9 @@ class VeloHostInfo extends Component {
                           <InFlightViewer client_info={info}/>
                           <hr />
                         </>}
-                      <Card.Header>{T("Client Metadata")}</Card.Header>
+                    </Card.Body>
+                    <Card.Header>{T("Client Metadata")}</Card.Header>
+                    <Card.Body>
                       <MetadataEditor client_id={client_id} />
                     </Card.Body>
                   </Card>
@@ -407,9 +409,13 @@ class VeloHostInfo extends Component {
         }
 
         if (this.state.mode === 'shell') {
+            let system = this.props.client && this.props.client.os_info &&
+                this.props.client.os_info.system;
             return (
                 <div className="client-details shell">
-                  <ShellViewer client={this.props.client} />
+                  <ShellViewer
+                    system={system}
+                    client_id={this.props.client.client_id} />
                 </div>
             );
         }
@@ -421,49 +427,34 @@ class VeloHostInfo extends Component {
         if (this.state.interrogateOperationId) {
             return;
         }
-        let interrogate_artifact = "Custom.Generic.Client.Info";
-
-        // 1. Check for custom interrogate artifact
-        // 2. Launch the correct interrogate artifact
-        // 3. Wait for the flow to complete.
-        api.post("v1/GetArtifacts", {
-            fields: {name: true},
-            name: true,
-            number_of_results: 1000,
-            search_term: interrogate_artifact,
+        let interrogate_artifact = "Generic.Client.Info";
+        api.post("v1/CollectArtifact", {
+            urgent: true,
+            client_id: this.props.client.client_id,
+            allow_custom_overrides: true,
+            artifacts: [interrogate_artifact],
         }, this.source.token).then((response) => {
-            if (_.isEmpty(response.data.items)) {
-                interrogate_artifact = "Generic.Client.Info";
-            }
+            this.setState({interrogateOperationId: response.data.flow_id});
 
-            api.post("v1/CollectArtifact", {
-                urgent: true,
-                client_id: this.props.client.client_id,
-                allow_custom_overrides: true,
-                artifacts: [interrogate_artifact],
-            }, this.source.token).then((response) => {
-                this.setState({interrogateOperationId: response.data.flow_id});
+            // Start polling for flow completion.
+            this.interrogate_interval = setInterval(() => {
+                api.get("v1/GetFlowDetails", {
+                    client_id: this.props.client.client_id,
+                    flow_id: this.state.interrogateOperationId,
+                }, this.source.token).then((response) => {
+                    let context = response.data.context;
+                    if (!context || context.state === "RUNNING") {
+                        return;
+                    }
 
-                // Start polling for flow completion.
-                this.interrogate_interval = setInterval(() => {
-                    api.get("v1/GetFlowDetails", {
-                        client_id: this.props.client.client_id,
-                        flow_id: this.state.interrogateOperationId,
-                    }, this.source.token).then((response) => {
-                        let context = response.data.context;
-                        if (!context || context.state === "RUNNING") {
-                            return;
-                        }
+                    // The node is refreshed with the correct flow id,
+                    // we can stop polling.
+                    clearInterval(this.interrogate_interval);
+                    this.interrogate_interval = undefined;
 
-                        // The node is refreshed with the correct flow id,
-                        // we can stop polling.
-                        clearInterval(this.interrogate_interval);
-                        this.interrogate_interval = undefined;
-
-                        this.setState({interrogateOperationId: null});
-                    });
-                }, INTERROGATE_POLL_TIME);
-            });
+                    this.setState({interrogateOperationId: null});
+                });
+            }, INTERROGATE_POLL_TIME);
         });
     }
 

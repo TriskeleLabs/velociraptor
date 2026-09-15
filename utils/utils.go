@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -25,9 +26,7 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	errors "github.com/go-errors/errors"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"www.velocidex.com/golang/velociraptor/json"
 	vjson "www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
@@ -129,23 +128,7 @@ func BytesEqual(a []byte, b []byte) bool {
 	return true
 }
 
-func ToString(x interface{}) string {
-	switch t := x.(type) {
-	case string:
-		return t
-
-	case []byte:
-		return string(t)
-
-	case fmt.Stringer:
-		return t.String()
-
-	default:
-		return fmt.Sprintf("%v", x)
-	}
-}
-
-// Force coersion to int64
+// Force coercion to int64
 func ToInt64(x interface{}) (int64, bool) {
 	switch t := x.(type) {
 	case bool:
@@ -190,10 +173,23 @@ func ParseIntoProtobuf(source interface{}, destination proto.Message) error {
 		return errors.New("Nil")
 	}
 
-	serialized, err := json.Marshal(source)
+	serialized, err := vjson.Marshal(source)
 	if err != nil {
 		return err
 	}
 
-	return protojson.Unmarshal(serialized, destination)
+	return vjson.Unmarshal(serialized, destination)
+}
+
+func ParseIntoStruct(source interface{}, destination interface{}) error {
+	if source == nil {
+		return errors.New("Nil")
+	}
+
+	serialized, err := vjson.Marshal(source)
+	if err != nil {
+		return err
+	}
+
+	return vjson.Unmarshal(serialized, destination)
 }

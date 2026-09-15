@@ -1,19 +1,35 @@
 name: Windows Test
-on: [pull_request]
+on:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
     name: Windows Test
-    runs-on: windows-2019
+    runs-on: windows-2022
     steps:
-    - name: Set up Go 1.22
-      uses: actions/setup-go@v3
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       with:
-        go-version: 1.22
+        fetch-depth: 50
+
+    - name: Set up Go 1.26
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-version: "^1.26"
+
+        # Caching seems to really slow down the build due to the time
+        # taken to save the cache.
+        cache: false
       id: go
 
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v3
+    - name: Check Plugin Versions
+      shell: bash
+      if: always()
+      # Check the last 3 commits for API changes.
+      run: |
+        pip install pyyaml
+        python3 -X utf8 ./scripts/check_versions.py 3
 
     - name: Configure test environment
       shell: cmd
@@ -37,11 +53,12 @@ jobs:
         regedit /S artifacts/testdata/windows/init.reg
 
     - name: Build
-      if: always()
+      if: success()
       env:
         CC: x86_64-w64-mingw32-gcc
       shell: bash
       run: |
+        go run make.go -v BasicAssets
         go run make.go -v WindowsTest
 
     - name: Prepare second stage
@@ -66,7 +83,7 @@ jobs:
 
     - name: Test
       shell: bash
-      if: always()
+      if: success()
       env:
         # Disable CGO for building tests - it takes too long and it is
         # not needed (mainly disables Yara building again).
@@ -109,7 +126,8 @@ jobs:
         mkdir -p artifact_output/server/
         cp artifacts/testdata/server/testcases/*.out* artifact_output/server/
 
-    - uses: actions/upload-artifact@v3
+    - name: StoreBinaries
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       if: always()
       with:
         name: artifact

@@ -65,5 +65,15 @@ Queries:
   # Test default value handling - The key itself looks like a regular directory
   - SELECT OSPath.Path AS Key, Data FROM glob(globs='Test', root='HKEY_CURRENT_USER/Software', accessor='registry')
 
-  # Listing the key shows a single value with name @
-  - SELECT OSPath.Path AS Key, Data FROM glob(globs='Test/*', root='HKEY_CURRENT_USER/Software', accessor='registry')
+  # Listing the key shows a value with name @ as well as one subkey
+  # with name KeyWithValue and a value with name KeyWithValue. We can
+  # have key and values with the same name.
+  # Reading such a path with read_file() will open the value in preference to the key.
+  - SELECT OSPath.Path AS Key, Data, Data.type AS Type, read_file(accessor='registry', filename=OSPath) AS Content
+    FROM glob(globs='Test/*', root='HKEY_CURRENT_USER/Software', accessor='registry')
+    ORDER BY Type
+
+  # Make sure MULTI_SZ are parsed correctly https://github.com/Velocidex/velociraptor/issues/4970
+  - SELECT Name, Data.value
+    FROM glob(globs='software/test*', root='HKEY_CURRENT_USER', accessor='registry')
+    WHERE Name =~ 'test' ORDER BY Name

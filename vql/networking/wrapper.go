@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/smb"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/faults"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -25,6 +27,7 @@ var (
 // Create a HTTPClient with superpowers to be used everywhere.
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
+	Transport() http.RoundTripper
 }
 
 type fdWrapper struct {
@@ -44,7 +47,22 @@ type httpClientWrapper struct {
 	ctx   context.Context
 }
 
+func (self *httpClientWrapper) Transport() http.RoundTripper {
+	return self.Client.Transport
+}
+
+func GetHTTPClient(client HTTPClient) (*http.Client, error) {
+	wrapper, ok := client.(*httpClientWrapper)
+	if !ok {
+		return nil, utils.Wrap(utils.InvalidArgError, "HTTPClient is not a wrapper")
+	}
+	return &wrapper.Client, nil
+}
+
 func (self httpClientWrapper) Do(req *http.Request) (*http.Response, error) {
+	// Emulate a significant network delay on HTTP
+	defer faults.FaultInjector.BlockHTTPDo(req.Context())
+
 	if req.URL != nil {
 		// Handle different url schemes
 		switch req.URL.Scheme {
@@ -53,9 +71,27 @@ func (self httpClientWrapper) Do(req *http.Request) (*http.Response, error) {
 
 		case "file":
 			return self.doFile(req)
+
+		case "unix":
+			return self.doUnix(req)
 		}
 	}
 	return self.Client.Do(req)
+}
+
+// Handle Unix URLs. The client is already created and connected to
+// the socket file, but the req contains the Path that should be
+// retrieved from the socket using http.
+func (self httpClientWrapper) doUnix(req *http.Request) (*http.Response, error) {
+
+	new_req := *req
+	new_req.URL = &url.URL{
+		Scheme: "http",
+		Host:   "unix", // Does not matter as transport is already established in the client.
+		Path:   req.URL.Path,
+	}
+
+	return self.Client.Do(&new_req)
 }
 
 // Use the file accessor to access file urls.
@@ -63,12 +99,6 @@ func (self httpClientWrapper) doFile(
 	req *http.Request) (*http.Response, error) {
 	if req.Method != "GET" {
 		return nil, unsupportedMethod
-	}
-
-	// Make sure the principal is allowed to access files.
-	err := vql_subsystem.CheckFilesystemAccess(self.scope, req.URL.Scheme)
-	if err != nil {
-		return nil, err
 	}
 
 	accessor, err := accessors.GetAccessor(req.URL.Scheme, self.scope)

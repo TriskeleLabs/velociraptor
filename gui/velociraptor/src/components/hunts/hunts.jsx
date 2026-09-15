@@ -7,6 +7,7 @@ import HuntInspector from './hunt-inspector.jsx';
 import _ from 'lodash';
 import api from '../core/api-service.jsx';
 
+import {getItem, setItem, schema} from '../core/storage.jsx';
 import  {CancelToken} from 'axios';
 
 import { withRouter }  from "react-router-dom";
@@ -20,10 +21,10 @@ class VeloHunts extends React.Component {
 
     state = {
         // The currently selected hunt summary.
-        selected_hunt_id: {},
+        selected_hunt_id: undefined,
 
         // The full detail of the current selected hunt.
-        full_selected_hunt: {},
+        selected_hunt: {},
 
         // A list of hunt summary objects - contains just enough info
         // to render tables.
@@ -37,6 +38,7 @@ class VeloHunts extends React.Component {
 
     componentDidMount = () => {
         this.get_hunts_source = CancelToken.source();
+        this.fetchSelectedHunt();
     }
 
     componentWillUnmount() {
@@ -44,24 +46,45 @@ class VeloHunts extends React.Component {
     }
 
     collapse = level=> {
+        setItem(schema.HuntSplitKey, level);
         this.setState({topPaneSize: level});
     }
 
     setSelectedHuntId = (hunt_id) => {
         if (!hunt_id) {
+            this.setState({
+                selected_hunt: {},
+                selected_hunt_id: undefined,
+            });
+            this.props.history.push("/hunts");
             return;
         }
-        let tab = this.props.match && this.props.match.params && this.props.match.params.tab;
+
+        let tab = this.props.match && this.props.match.params &&
+            this.props.match.params.tab;
+        if(!tab) {
+            tab = getItem(schema.CurrentHuntTabKey);
+        }
+
         if (tab) {
             this.props.history.push("/hunts/" + hunt_id + "/" + tab);
         } else {
             this.props.history.push("/hunts/" + hunt_id);
         }
+        setItem(schema.CurrentHuntIdKey, hunt_id);
         this.setState({selected_hunt_id: hunt_id});
-        this.loadFullHunt(hunt_id);
+        this.loadHunt(hunt_id);
     }
 
-    loadFullHunt = (hunt_id) => {
+    loadHunt = (hunt_id) => {
+        if(!hunt_id){
+            hunt_id = this.state.selected_hunt_id;
+        };
+
+        if(!hunt_id || hunt_id === "new") {
+            return;
+        }
+
         this.get_hunts_source.cancel();
         this.get_hunts_source = CancelToken.source();
 
@@ -71,36 +94,56 @@ class VeloHunts extends React.Component {
             if (response.cancel) return;
 
             if(_.isEmpty(response.data)) {
-                this.setState({full_selected_hunt: {}});
+                this.setState({selected_hunt: {}});
             } else {
-                this.setState({full_selected_hunt: response.data});
+                this.setState({selected_hunt: response.data});
             }
+
+        }).catch(response=>{
+            // The current hunt is not found, navigate away from it.
+            let status = response.response && response.response.status;
+            if(status === 404) {
+                setItem(schema.CurrentHuntIdKey, "");
+                this.props.history.push("/hunts");
+            };
         });
     }
 
     fetchSelectedHunt = () => {
-        let selected_hunt_id = this.props.match && this.props.match.params &&
+        let selected_hunt_id = this.props.match &&
+            this.props.match.params &&
             this.props.match.params.hunt_id;
 
+        if (!selected_hunt_id) {
+            selected_hunt_id = getItem(schema.CurrentHuntIdKey);
+        }
+
         if (!selected_hunt_id) return;
-        this.loadFullHunt(selected_hunt_id);
+
+        setItem(schema.CurrentHuntIdKey, selected_hunt_id);
+        this.loadHunt(selected_hunt_id);
     }
 
     render() {
+        let size = getItem(schema.HuntSplitKey) || this.state.topPaneSize;
+
         return (
             <>
               <SplitPane
-                size={this.state.topPaneSize}
+                onChange={size=>{
+                    setItem(schema.HuntSplitKey, size + "px");
+                }}
                 split="horizontal"
-                defaultSize="30%">
+                defaultSize="30%"
+                size={size}>
                 <HuntList
                   collapseToggle={this.collapse}
                   updateHunts={this.fetchSelectedHunt}
-                  selected_hunt={this.state.full_selected_hunt}
+                  selected_hunt={this.state.selected_hunt}
                   setSelectedHuntId={this.setSelectedHuntId} />
                 <HuntInspector
                   fetch_hunts={this.fetchSelectedHunt}
-                  hunt={this.state.full_selected_hunt} />
+                  hunt={this.state.selected_hunt} />
               </SplitPane>
             </>
         );

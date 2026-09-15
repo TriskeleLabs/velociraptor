@@ -119,7 +119,11 @@ func (self *CSVWatcherService) findLastEvent(
 	defer fd.Close()
 
 	// Skip all the rows until the end.
-	csv_reader := csv.NewReader(fd)
+	csv_reader, err := csv.NewReader(fd)
+	if err != nil {
+		return 0
+	}
+
 	for {
 		_, err := csv_reader.ReadAny()
 		if err != nil {
@@ -155,7 +159,11 @@ func (self *CSVWatcherService) monitorOnce(
 	}
 	defer fd.Close()
 
-	csv_reader := csv.NewReader(fd)
+	csv_reader, err := csv.NewReader(fd)
+	if err != nil {
+		return 0, false
+	}
+
 	csv_reader.RequireLineSeperator = true
 
 	headers, err := csv_reader.Read()
@@ -201,7 +209,7 @@ func (self *CSVWatcherService) monitorOnce(
 			}
 		}
 
-		// No more listeners - we dont care any more.
+		// No more listeners - we don't care any more.
 		if len(new_handles) == 0 {
 			delete(self.registrations, key)
 			return last_event, true

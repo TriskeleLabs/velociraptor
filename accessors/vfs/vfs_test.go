@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/artifacts/assets"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/glob"
@@ -22,6 +22,7 @@ import (
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	"www.velocidex.com/golang/velociraptor/accessors/file_store"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
@@ -47,8 +48,8 @@ var (
 	}
 
 	artifacts_used = []string{
-		"artifacts/definitions/System/VFS/ListDirectory.yaml",
-		"artifacts/definitions/System/VFS/DownloadFile.yaml",
+		"/artifacts/definitions/System/VFS/ListDirectory.yaml",
+		"/artifacts/definitions/System/VFS/DownloadFile.yaml",
 	}
 )
 
@@ -65,7 +66,10 @@ func setVirtualFilesystem() {
 	}
 
 	// Install this under a new accessor name.
-	accessors.Register("vfs_test", root_fs_accessor, "")
+	accessors.Register(accessors.DescribeAccessor(
+		root_fs_accessor, accessors.AccessorDescriptor{
+			Name: "vfs_test",
+		}))
 }
 
 type TestSuite struct {
@@ -80,23 +84,17 @@ func (self *TestSuite) SetupTest() {
 	self.ConfigObj.Services.VfsService = true
 
 	self.TestSuite.SetupTest()
-
-	launcher, err := services.GetLauncher(self.ConfigObj)
-	assert.NoError(self.T(), err)
-	launcher.SetFlowIdForTests("F.1234")
 }
 
 func (self *TestSuite) TestVFSAccessor() {
-	closer := utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))
-	defer closer()
+	defer utils.MockTime(utils.NewMockClock(time.Unix(10, 10)))()
+	defer utils.SetFlowIdForTests("F.1234")()
 
 	setVirtualFilesystem()
 
 	manager, _ := services.GetRepositoryManager(self.ConfigObj)
 	repository, err := manager.GetGlobalRepository(self.ConfigObj)
 	assert.NoError(self.T(), err)
-
-	assets.Init()
 
 	options := services.ArtifactOptions{
 		ValidateArtifact:     true,
@@ -160,13 +158,15 @@ func (self *TestSuite) TestVFSAccessor() {
 						},
 					}},
 			},
-			ClientId: "server",
+			ClientId: constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 		}, utils.SyncCompleter)
 	assert.NoError(self.T(), err)
 
 	// Wait here until the collection is completed.
 	vtesting.WaitUntil(time.Second*5, self.T(), func() bool {
-		flow, err := launcher.GetFlowDetails(self.Ctx, self.ConfigObj, "server", flow_id)
+		flow, err := launcher.GetFlowDetails(
+			self.Ctx, self.ConfigObj, services.GetFlowOptions{},
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID, flow_id)
 		assert.NoError(self.T(), err)
 
 		return flow.Context.State == flows_proto.ArtifactCollectorContext_FINISHED
@@ -182,7 +182,7 @@ func (self *TestSuite) TestVFSAccessor() {
 		dir, err := vfs_service.ListDirectoryFiles(self.Ctx, self.ConfigObj,
 			&api_proto.GetTableRequest{
 				Rows:          10,
-				ClientId:      "server",
+				ClientId:      constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
 				VfsComponents: []string{"vfs_test", "C:", "Windows"},
 			})
 		if err != nil {
@@ -192,14 +192,18 @@ func (self *TestSuite) TestVFSAccessor() {
 	})
 
 	fs_factory := file_store.NewFileStoreFileSystemAccessor(self.ConfigObj)
-	accessors.Register("fs", fs_factory, "")
+	accessors.Register(accessors.DescribeAccessor(fs_factory,
+		accessors.AccessorDescriptor{
+			Name: "fs",
+		}))
 
 	// Now create a download of this collection.
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
 		ACLManager: acl_managers.NullACLManager{},
 		Logger:     logging.NewPlainLogger(self.ConfigObj, &logging.FrontendComponent),
-		Env:        ordereddict.NewDict().Set("ClientId", "server"),
+		Env: ordereddict.NewDict().
+			Set("ClientId", constants.VELOCIRAPTOR_SERVER_CLIENT_ID),
 	}
 
 	scope := manager.BuildScope(builder)
@@ -209,6 +213,8 @@ func (self *TestSuite) TestVFSAccessor() {
 	assert.NoError(self.T(), err)
 
 	globber := glob.NewGlobber()
+	defer globber.Close()
+
 	glob_path, err := accessors.NewGenericOSPath("/**")
 	assert.NoError(self.T(), err)
 

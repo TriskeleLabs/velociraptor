@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"www.velocidex.com/golang/velociraptor/acls"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -21,6 +22,8 @@ type ACLManager interface {
 
 type OrgACLManager interface {
 	CheckAccessInOrg(org_id string, permission ...acls.ACL_PERMISSION) (bool, error)
+
+	SwitchDefaultOrg(config_obj *config_proto.Config)
 }
 
 type PrincipalACLManager interface {
@@ -52,8 +55,7 @@ func CheckAccess(scope vfilter.Scope, permissions ...acls.ACL_PERMISSION) error 
 			return fmt.Errorf("%w: Permission denied: %v",
 				acls.PermissionDenied, permissions)
 		}
-		return fmt.Errorf("%W: %v: %v",
-			acls.PermissionDenied, err, permissions)
+		return fmt.Errorf("%w: %v", err, permissions)
 	}
 
 	return nil
@@ -107,26 +109,6 @@ func CheckAccessWithArgs(scope vfilter.Scope, permissions acls.ACL_PERMISSION,
 	}
 
 	return nil
-}
-
-func CheckFilesystemAccess(scope vfilter.Scope, accessor string) error {
-	switch accessor {
-
-	// These accessor are OK to use at any time.
-	case "data":
-		return nil
-
-		// Direct filestore access only allowed for server
-		// admins.
-	case "filestore", "fs":
-		return CheckAccess(scope, acls.SERVER_ADMIN)
-
-	case "process":
-		return CheckAccess(scope, acls.MACHINE_STATE)
-
-	default:
-		return CheckAccess(scope, acls.FILESYSTEM_READ)
-	}
 }
 
 // Get the principal that is running the query if possible.

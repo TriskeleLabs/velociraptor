@@ -4,7 +4,13 @@ import React from 'react';
 import PropTypes from 'prop-types';
 import T from '../i8n/i8n.jsx';
 import _ from 'lodash';
-import VeloPagedTable, { TablePaginationControl } from '../core/paged-table.jsx';
+import VeloPagedTable, {
+    TablePaginationControl,
+    TransformViewer,
+} from '../core/paged-table.jsx';
+
+import VeloTable, { getFormatter } from '../core/table.jsx';
+
 import Navbar from 'react-bootstrap/Navbar';
 import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Button from 'react-bootstrap/Button';
@@ -16,14 +22,16 @@ import OfflineCollectorWizard from './offline-collector.jsx';
 import DeleteNotebookDialog from '../notebooks/notebook-delete.jsx';
 import ExportNotebook from '../notebooks/export-notebook.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { HotKeys } from "react-hotkeys";
 import { withRouter } from "react-router-dom";
-import { runArtifact } from "./utils.jsx";
+import { runArtifact, getNotebookId } from "./utils.jsx";
+import Spinner from '../utils/spinner.jsx';
 
 import Modal from 'react-bootstrap/Modal';
 import UserConfig from '../core/user.jsx';
 import VeloForm from '../forms/form.jsx';
 import AddFlowToHuntDialog from './flows-add-to-hunt.jsx';
+import { EditNotebook } from '../notebooks/new-notebook.jsx';
+import TransactionDialog from "./transactions.jsx";
 
 import {CancelToken} from 'axios';
 
@@ -43,7 +51,9 @@ const SLIDE_STATES = [{
 export class DeleteFlowDialog extends React.PureComponent {
     static propTypes = {
         client: PropTypes.object,
-        flow: PropTypes.object,
+        flows: PropTypes.array,
+
+        // onClose(ok bool) -> did the user select to delete
         onClose: PropTypes.func.isRequired,
     }
 
@@ -61,34 +71,48 @@ export class DeleteFlowDialog extends React.PureComponent {
 
     startDeleteFlow = () => {
         let client_id = this.props.client && this.props.client.client_id;
-        let flow_id = this.props.flow && this.props.flow.session_id;
+        let flow_ids = _.map(this.props.flows, x=>x.session_id);
 
-        if (flow_id && client_id) {
+        if (!_.isEmpty(flow_ids) && client_id) {
             this.setState({loading: true});
             runArtifact("server",   // This collection happens on the server.
                         "Server.Utils.DeleteFlow",
-                        {FlowId: flow_id,
+                        {FlowIds: JSON.stringify(flow_ids),
                          ClientId: client_id,
+                         Sync: "Y",
                          ReallyDoIt: "Y"}, ()=>{
-                             this.props.onClose();
+                             this.props.onClose(true);
                              this.setState({loading: false});
                          }, this.source.token);
         }
     }
 
     render() {
-        let collected_artifacts = this.props.flow.artifacts_with_results || [];
-        let artifacts = collected_artifacts.join(",");
-        let total_bytes = this.props.flow.total_uploaded_bytes/1024/1024 || 0;
-        let total_rows = this.props.flow.total_collected_rows || 0;
         return (
-            <Modal show={true} onHide={this.props.onClose}>
+            <Modal show={true}
+                   size="lg"
+                   dialogClassName="modal-90w"
+                   onHide={this.props.onClose}>
               <Modal.Header closeButton>
-            <Modal.Title>{T("Permanently delete collection")}</Modal.Title>
+            <Modal.Title>{T("Permanently delete collections")}</Modal.Title>
               </Modal.Header>
               <Modal.Body>
-                {T("ArtifactDeletionDialog", this.props.flow.session_id,
-                   artifacts, total_bytes, total_rows)}
+                <div className="delete-flow-table">
+                  <VeloTable
+                    rows={this.props.flows}
+                    columns={["session_id", "artifacts_with_results",
+                              "total_collected_rows", "total_uploaded_bytes"]}
+                    column_renderers={{
+                        artifacts_with_results: flowRowRenderer.Artifacts,
+                        total_uploaded_bytes: getFormatter("mb"),
+                    }}
+                    header_renderers={{session_id: "FlowId",
+                                       artifacts_with_results: "Artifacts",
+                                       total_collected_rows: "Rows",
+                                       total_uploaded_bytes: "Bytes",
+                                      }}
+                  />
+                </div>
               </Modal.Body>
               <Modal.Footer>
                 <Button variant="secondary" onClick={this.props.onClose}>
@@ -187,6 +211,7 @@ class FlowsList extends React.Component {
     static propTypes = {
         client: PropTypes.object,
         setSelectedFlow: PropTypes.func,
+        setMultiSelectedFlow: PropTypes.func,
         selected_flow: PropTypes.object,
         collapseToggle: PropTypes.func,
 
@@ -207,6 +232,7 @@ class FlowsList extends React.Component {
         version: {version: 0},
         slider: 0,
         transform: undefined,
+        multiSelectedFlows: [],
     }
 
     incrementVersion = () => {
@@ -216,10 +242,30 @@ class FlowsList extends React.Component {
     componentDidMount = () => {
         this.source = CancelToken.source();
         this.interval = setInterval(this.incrementVersion, POLL_TIME);
+        this.setStateFromRouter();
+    }
 
-        let slider = SLIDE_STATES[this.state.slider];
-        this.props.collapseToggle(slider.level);
+    componentWillUnmount() {
+        this.source.cancel("unmounted");
+        if (this.interval) {
+            clearInterval(this.interval);
+        }
+    }
 
+    // Set the table in focus when the component mounts for the first time.
+    componentDidUpdate = (prevProps, prevState, rootNode) => {
+        let selected_flow = this.props.selected_flow &&
+            this.props.selected_flow.session_id;
+        let prev_selection = prevProps.selected_flow &&
+            prevProps.selected_flow.session_id;
+
+        if(selected_flow != prev_selection) {
+            this.setStateFromRouter();
+        }
+        return false;
+    }
+
+    setStateFromRouter = ()=>{
         let action = this.props.match && this.props.match.params &&
             this.props.match.params.flow_id;
 
@@ -234,40 +280,49 @@ class FlowsList extends React.Component {
         }
 
         if (action === "new") {
-            let specs = {};
-            specs[name] = {};
+            // Special handling for the offline collector builder.
+            if(name==="Server.Utils.CreateCollector") {
+                this.setState({showOfflineWizard: true});
+                return;
+            }
 
+            let params_json = this.props.match && this.props.match.params &&
+                this.props.match.params.params_json;
+            let flow_params = {};
+
+            if(params_json) {
+                try {
+                    flow_params = JSON.parse(
+                        decodeURIComponent(params_json));
+                } catch(e) {
+                    console.log("Error parsing params_json ", e, params_json);
+                };
+            }
+
+            let specs = flow_params.specs || {};
+            if(_.isEmpty(specs)) {
+                specs[name] = {};
+            }
+
+            let env = _.map(specs[name], (v, k)=>{
+                return {key: k, value: str(v)};
+            });
+
+            // Create a fake flow so we can pretend to copy it.
             let initial_flow = {
                 request: {
                     client_id: client_id,
                     artifacts: [name],
+                    specs: [{artifact: name, parameters: {env: env}}],
                 },
             };
+
             this.setState({
                 showNewFromRouterWizard: true,
                 client_id: client_id,
                 initial_flow: initial_flow,
             });
             this.props.history.push("/collected/" + client_id);
-        }
-    }
-
-    componentWillUnmount() {
-        this.source.cancel("unmounted");
-        if (this.interval) {
-            clearInterval(this.interval);
-        }
-    }
-
-    // Set the table in focus when the component mounts for the first time.
-    componentDidUpdate = (prevProps, prevState, rootNode) => {
-        let selected_flow = this.props.selected_flow && this.props.selected_flow.session_id;
-        if (!this.state.initialized_from_parent && selected_flow) {
-            const el = document.getElementById(selected_flow);
-            if (el) {
-                this.setState({initialized_from_parent: true});
-                el.focus();
-            }
         }
     }
 
@@ -287,22 +342,19 @@ class FlowsList extends React.Component {
 
     cancelButtonClicked = () => {
         let client_id = this.props.selected_flow && this.props.selected_flow.client_id;
-        let flow_id = this.props.selected_flow && this.props.selected_flow.session_id;
+        let flow_ids = {};
 
-        if (client_id && flow_id) {
+        _.each(this.state.multiSelectedFlows, x=>{
+            flow_ids[x.session_id] = true;
             api.post("v1/CancelFlow", {
-                client_id: client_id, flow_id: flow_id
+                client_id: client_id, flow_id: x.session_id,
             }, this.source.token).then((response) => {
-                this.incrementVersion();
+                delete flow_ids[x.session_id];
+                if(_.isEmpty(flow_ids)) {
+                    this.incrementVersion();
+                };
             });
-        }
-    }
-
-    gotoTab = (tab) => {
-        let client_id = this.props.selected_flow && this.props.selected_flow.client_id;
-        let selected_flow = this.props.selected_flow && this.props.selected_flow.session_id;
-        this.props.history.push(
-            "/collected/" + client_id + "/" + selected_flow + "/" + tab);
+        });
     }
 
     setFullScreen = () => {
@@ -340,62 +392,94 @@ class FlowsList extends React.Component {
             this.setState({
                 offlineSpecs: specs[0].parameters,
                 showOfflineWizard: true});
-        } else {
-            this.setState({showCopyWizard: true});
+
+            return;
         }
+
+        // Get the full flow request so we can copy it into the
+        // GUI.
+        let flow_id = this.props.selected_flow &&
+            this.props.selected_flow.session_id;
+        let client_id = this.props.selected_flow &&
+            this.props.selected_flow.client_id;
+
+        if (!flow_id || !client_id) {
+            return;
+        }
+
+        api.get("v1/GetFlowDetails", {
+            flow_id: flow_id,
+            client_id: client_id,
+            include_full_request: true,
+        }, this.source.token).then((response) => {
+            if (response.cancel) {
+                return;
+            };
+
+            let flow = response.data.context;
+            this.setState({
+                full_request: flow,
+                showCopyWizard: true,
+            });
+        });
     };
 
     render() {
         let tab = this.props.match && this.props.match.params &&
             this.props.match.params.tab;
         let client_id = this.props.client && this.props.client.client_id;
-        let selected_flow = this.props.selected_flow && this.props.selected_flow.session_id;
+        let selected_flow = this.props.selected_flow &&
+            this.props.selected_flow.session_id;
         let username = this.context &&
             this.context.traits && this.context.traits.username;
         let router_flow_id = this.props.match && this.props.match.params &&
             this.props.match.params.flow_id;
 
-        const selectRow = {
+        let selectRow = {
             mode: "radio",
             clickToSelect: true,
             hideSelectColumn: true,
             classes: "row-selected",
             onSelect: row=>{
-                this.props.setSelectedFlow(row._Flow);
-                this.setState({selectedFlowId: row._id});
+                if(row) {
+                    this.props.setSelectedFlow(row._Flow);
+                    this.setState({selectedFlowId: row._id});
+                }
             },
-            selected: [this.state.selectedFlowId],
+            onMultiSelect: rows=>{
+                let flows = [];
+                _.each(rows, x=>{
+                    if(x && !_.isEmpty(x._Flow)) {
+                        flows.push(x._Flow);
+                    }
+                });
+                this.setState({multiSelectedFlows: flows});
+            },
+            isSelectedCB: (row, idx)=>{
+                return row.FlowId === selected_flow;
+            },
         };
 
         // When running on the server we have some special GUI.
         let isServer = client_id === "server";
-        let KeyMap = {
-            GOTO_RESULTS: {
-                name: "Display server dashboard",
-                sequence: "r",
-            },
-            GOTO_LOGS: "l",
-            GOTO_OVERVIEW: "o",
-            GOTO_UPLOADS: "u",
-            COLLECT: "c",
-        };
-
-        let keyHandlers={
-            GOTO_RESULTS: (e)=>this.gotoTab("results"),
-            GOTO_LOGS: (e)=>this.gotoTab("logs"),
-            GOTO_UPLOADS: (e)=>this.gotoTab("uploads"),
-            GOTO_OVERVIEW: (e)=>this.gotoTab("overview"),
-            COLLECT: ()=>this.setState({showWizard: true}),
-        };
+        let transform = this.state.transform || {};
 
         return (
             <>
+              <Spinner loading={this.state.loading } />
               { this.state.showDeleteWizard &&
                 <DeleteFlowDialog
                   client={this.props.client}
-                  flow={this.props.selected_flow}
-                  onClose={e=>{
+                  flows={this.state.multiSelectedFlows}
+                  onClose={ok=>{
                       this.setState({showDeleteWizard: false});
+                      if(ok) {
+                          this.setState({
+                              selectedFlowId: undefined,
+                              multiSelectedFlows: [],
+                          });
+                          this.props.setSelectedFlow({});
+                      };
                       this.incrementVersion();
                   }}/>
               }
@@ -447,15 +531,35 @@ class FlowsList extends React.Component {
 
               { this.state.showDeleteNotebook &&
                 <DeleteNotebookDialog
-                  notebook_id={"N." + selected_flow + "-" + client_id}
+                  notebook_id={getNotebookId(selected_flow, client_id)}
                   onClose={(e) => this.setState({showDeleteNotebook: false})}/>
               }
 
               { this.state.showExportNotebook &&
                 <ExportNotebook
-                  notebook={{notebook_id: "N." + selected_flow + "-" + client_id}}
+                  notebook={{
+                      notebook_id: getNotebookId( selected_flow, client_id)}}
                   onClose={(e) => this.setState({showExportNotebook: false})}/>
               }
+
+              { this.state.showEditNotebookDialog &&
+                <EditNotebook
+                  notebook={this.state.notebook}
+                  updateNotebooks={()=>{
+                      this.setState({showEditNotebookDialog: false});
+                  }}
+                  closeDialog={() => this.setState({showEditNotebookDialog: false})}
+                />
+              }
+
+              { this.state.showTransactionsDialog &&
+                <TransactionDialog
+                  onClose={e=>{
+                      this.setState({showTransactionsDialog: false});
+                      this.incrementVersion();
+                  }}
+                  flow={this.props.selected_flow}
+                />}
 
               <Navbar className="flow-toolbar">
                 <ButtonGroup>
@@ -484,8 +588,9 @@ class FlowsList extends React.Component {
                     </Button>
                   </ToolTip>
                   <ToolTip tooltip={T("Cancel Artifact Collection")}>
-                    <Button disabled={this.props.selected_flow.state === "FINISHED" ||
-                                      this.props.selected_flow.state === "ERROR"}
+                    <Button disabled={this.state.multiSelectedFlows.length < 2 &&
+                                      (this.props.selected_flow.state === "FINISHED" ||
+                                       this.props.selected_flow.state === "ERROR")}
                             onClick={this.cancelButtonClicked}
                             variant="default">
                       <FontAwesomeIcon icon="stop"/>
@@ -515,7 +620,7 @@ class FlowsList extends React.Component {
                     </Button>
                   </ToolTip>
 
-                  { _.isEmpty(this.state.transform) ?
+                  { transform.filter_column !== "Creator" ?
                     <ToolTip tooltip={T("Show only my collections")}>
                       <Button onClick={()=>{
                                   this.setState({transform: {
@@ -525,7 +630,7 @@ class FlowsList extends React.Component {
                               }}
                               variant="default">
                         <FontAwesomeIcon icon="user" />
-                        <span className="sr-only">{T("Show only my hunts")}</span>
+                        <span className="sr-only">{T("Show only my collections")}</span>
                       </Button>
                     </ToolTip>
                     :
@@ -536,11 +641,19 @@ class FlowsList extends React.Component {
                               }}
                               variant="default">
                         <FontAwesomeIcon icon="user-large-slash" />
-                        <span className="sr-only">{T("Show all hunts")}</span>
+                        <span className="sr-only">{T("Show all collections")}</span>
                       </Button>
                     </ToolTip>
                   }
-
+                  { this.props.selected_flow &&
+                    this.props.selected_flow.transactions_outstanding ?
+                    <ToolTip tooltip={T("Resume Uploads")}>
+                      <Button onClick={()=>this.setState({showTransactionsDialog: true})}
+                              variant="default">
+                        <FontAwesomeIcon icon="repeat" />
+                        <span className="sr-only">{T("Resume Uploads")}</span>
+                      </Button>
+                    </ToolTip> : <></> }
                   { isServer &&
                     <ToolTip tooltip={T("Build offline collector")}>
                       <Button onClick={() => this.setState({showOfflineWizard: true})}
@@ -550,11 +663,9 @@ class FlowsList extends React.Component {
                       </Button>
                     </ToolTip>
                   }
-
                 </ButtonGroup>
-
-                { this.state.page_state &&
-                  <ButtonGroup>
+                <ButtonGroup>
+                  { this.state.page_state ?
                     <TablePaginationControl
                       total_size={this.state.page_state.total_size}
                       start_row={this.state.page_state.start_row}
@@ -564,7 +675,12 @@ class FlowsList extends React.Component {
                       onRowChange={this.state.page_state.onRowChange}
                       onPageSizeChange={this.state.page_state.onPageSizeChange}
                     />
-                  </ButtonGroup> }
+                    : <TablePaginationControl total_size={0}/> }
+                  <TransformViewer
+                    transform={this.state.transform}
+                    setTransform={t=>this.setState({transform: t})}
+                  />
+                </ButtonGroup>
 
                 { tab === "notebook" &&
                   <ButtonGroup className="float-right">
@@ -573,6 +689,30 @@ class FlowsList extends React.Component {
                               variant="outline-dark">
                         <FontAwesomeIcon icon="book"/>
                         <span className="sr-only">{T("Notebooks")}</span>
+                      </Button>
+                    </ToolTip>
+                    <ToolTip tooltip={T("Edit Notebook")}>
+                      <Button onClick={()=>{
+                          this.setState({loading: true});
+
+                          api.get("v1/GetNotebooks", {
+                              include_uploads: true,
+                              notebook_id: getNotebookId(
+                                  selected_flow, client_id),
+                          }, this.source.token).then(resp=>{
+                              let items = resp.data.items;
+                              if (_.isEmpty(items)) {
+                                  return;
+                              }
+
+                              this.setState({notebook: items[0],
+                                             loading: false,
+                                             showEditNotebookDialog: true});
+                          });
+                      }}
+                              variant="default">
+                        <FontAwesomeIcon icon="wrench"/>
+                        <span className="sr-only">{T("Edit Notebook")}</span>
                       </Button>
                     </ToolTip>
                     <ToolTip tooltip={T("Full Screen")}>
@@ -604,28 +744,26 @@ class FlowsList extends React.Component {
               </Navbar>
 
               <div className="fill-parent no-margins toolbar-margin selectable">
-                <HotKeys keyMap={KeyMap} handlers={keyHandlers}>
-                  <VeloPagedTable
-                    url="v1/GetClientFlows"
-                    params={{client_id: client_id}}
-                    translate_column_headers={true}
-                    prevent_transformations={{
-                        Mb: true, Rows: true,
-                        State: true, "Last Active": true}}
-                    selectRow={selectRow}
-                    renderers={flowRowRenderer}
-                    version={this.state.version}
-                    no_spinner={true}
-                    row_classes={rowClassRenderer(router_flow_id)}
-                    transform={this.state.transform}
-                    setTransform={x=>{
-                        this.setState({transform: x});
-                    }}
-                    no_toolbar={true}
-                    name={"GetClientFlows" + client_id}
-                    setPageState={x=>this.setState({page_state: x})}
-                  />
-                </HotKeys>
+                <VeloPagedTable
+                  url="v1/GetClientFlows"
+                  params={{client_id: client_id}}
+                  translate_column_headers={true}
+                  prevent_transformations={{
+                      Mb: true, Rows: true,
+                      State: true, "Last Active": true}}
+                  selectRow={selectRow}
+                  renderers={flowRowRenderer}
+                  version={this.state.version}
+                  no_spinner={true}
+                  row_classes={rowClassRenderer(router_flow_id)}
+                  transform={this.state.transform}
+                  setTransform={x=>{
+                      this.setState({transform: x});
+                  }}
+                  no_toolbar={true}
+                  name={"GetClientFlows" + client_id}
+                  setPageState={x=>this.setState({page_state: x})}
+                />
               </div>
             </>
         );
@@ -649,7 +787,16 @@ const stateRenderer = (cell, row) => {
         result = <FontAwesomeIcon icon="hourglass"/>;
 
     } else if (cell === "IN_PROGRESS") {
-        result = <FontAwesomeIcon icon="person-running"/>;
+        // An error occurred but the flow is still running.
+        if(row && row._Flow && row._Flow.status) {
+            result = <>
+                       <FontAwesomeIcon icon="person-running"/>&nbsp;
+                       <FontAwesomeIcon icon="exclamation"/>
+                     </>;
+        } else {
+
+            result = <FontAwesomeIcon icon="person-running"/>;
+        }
 
     } else if (cell === "UNRESPONSIVE") {
         result = <FontAwesomeIcon icon="question"/>;
@@ -687,6 +834,7 @@ export class SimpleFlowsList extends React.Component {
         client_id: PropTypes.string,
         setSelectedFlow: PropTypes.func,
         selected_flow: PropTypes.object,
+        version: PropTypes.object,
     };
 
     render() {
@@ -707,10 +855,26 @@ export class SimpleFlowsList extends React.Component {
                     State: true, "Last Active": true}}
                 selectRow={selectRow}
                 renderers={flowRowRenderer}
-                version={this.state.version}
+                version={this.props.version}
                 setPageState={x=>this.setState({page_state: x})}
               />
             </>
         );
     }
+};
+
+const str = x=>{
+    if(_.isNumber(x)) {
+        return x.toString();
+    }
+
+    if(_.isString(x)) {
+        return x;
+    };
+
+    if(_.isUndefined(x)) {
+        return x;
+    }
+
+    return JSON.stringify(x);
 };

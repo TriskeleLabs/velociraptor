@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -27,9 +27,7 @@ import (
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vql/tools/collector"
 	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
@@ -38,6 +36,7 @@ import (
 
 type ScheduleCollectionFunctionArg struct {
 	ClientId     string            `vfilter:"required,field=client_id,doc=The client id to schedule a collection on"`
+	FlowId       string            `vfilter:"optional,field=flow_id,doc=If a flow id is specified we do not create a new flow, but instead add the collection to this flow."`
 	Artifacts    []string          `vfilter:"required,field=artifacts,doc=A list of artifacts to collect"`
 	Env          *ordereddict.Dict `vfilter:"optional,field=env,doc=Parameters to apply to the artifact (an alternative to a full spec)"`
 	Spec         *ordereddict.Dict `vfilter:"optional,field=spec,doc=Parameters to apply to the artifacts"`
@@ -64,7 +63,7 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	// If a full spec is provided we dont need to provide the
+	// If a full spec is provided we don't need to provide the
 	// artifacts again.
 	if arg.Spec != nil && len(arg.Artifacts) == 0 {
 		arg.Artifacts = arg.Spec.Keys()
@@ -81,10 +80,44 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
+	// NOTE: Permission check is already made by
+	// ScheduleArtifactCollection(). It is more complex as it depends
+	// on permissions like:
+	// COLLECT_CLIENT for clients
+	// COLLECT_SERVER for server
+	// COLLECT_BASIC for artifacts with the basic metadata set
+	// SERVER_ADMIN to append to a flow
+	acl_manager, err := artifacts.GetACLManager(scope)
+	if err != nil {
+		return err
+	}
+
 	config_obj, ok := vql_subsystem.GetServerConfig(scope)
 	if !ok {
-		scope.Log("collect_client: Command can only run on the server")
+		scope.Log("collect_client: %v", err)
 		return vfilter.Null{}
+	}
+
+	// If we are required to switch orgs do so now.
+	if arg.OrgId != "" {
+		org_manager, err := services.GetOrgManager()
+		if err != nil {
+			scope.Log("collect_client: %v", err)
+			return vfilter.Null{}
+		}
+
+		// If an org is specified we use the config obj from the org.
+		config_obj, err = org_manager.GetOrgConfig(arg.OrgId)
+		if err != nil {
+			scope.Log("collect_client: %v", err)
+			return vfilter.Null{}
+		}
+
+		// Switch the ACL manager into the required org
+		org_acl_manager, ok := acl_manager.(vql_subsystem.OrgACLManager)
+		if ok {
+			org_acl_manager.SwitchDefaultOrg(config_obj)
+		}
 	}
 
 	client_info_manager, err := services.GetClientInfoManager(config_obj)
@@ -93,45 +126,10 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	// Scheduling artifacts on the server requires higher
-	// permissions.
-	var permission acls.ACL_PERMISSION
-	if arg.ClientId == "server" {
-		permission = acls.SERVER_ADMIN
-	} else if client_info_manager.ValidateClientId(arg.ClientId) == nil {
-		permission = acls.COLLECT_CLIENT
-	} else {
-		scope.Log("collect_client: unsupported client id")
+	err = client_info_manager.ValidateClientId(arg.ClientId)
+	if err != nil {
+		scope.Log("collect_client: %v", err)
 		return vfilter.Null{}
-	}
-
-	// Which org should this be collected on
-	if arg.OrgId == "" {
-		err = vql_subsystem.CheckAccess(scope, permission)
-		if err != nil {
-			scope.Log("collect_client: %v", err)
-			return vfilter.Null{}
-		}
-
-	} else {
-		err = vql_subsystem.CheckAccessInOrg(scope, arg.OrgId, permission)
-		if err != nil {
-			scope.Log("collect_client: %v", err)
-			return vfilter.Null{}
-		}
-
-		org_manager, err := services.GetOrgManager()
-		if err != nil {
-			scope.Log("collect_client: %v", err)
-			return vfilter.Null{}
-		}
-
-		// If an org is specied we use the config obj from the org.
-		config_obj, err = org_manager.GetOrgConfig(arg.OrgId)
-		if err != nil {
-			scope.Log("collect_client: %v", err)
-			return vfilter.Null{}
-		}
 	}
 
 	repository, err := vql_utils.GetRepository(scope)
@@ -142,6 +140,7 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 
 	request := &flows_proto.ArtifactCollectorArgs{
 		ClientId:       arg.ClientId,
+		FlowId:         arg.FlowId,
 		Artifacts:      arg.Artifacts,
 		Creator:        vql_subsystem.GetPrincipal(scope),
 		OpsPerSecond:   float32(arg.OpsPerSecond),
@@ -171,23 +170,20 @@ func (self *ScheduleCollectionFunction) Call(ctx context.Context,
 	}
 
 	result := &flows_proto.ArtifactCollectorResponse{Request: request}
-	acl_manager, ok := artifacts.GetACLManager(scope)
-	if !ok {
-		acl_manager = acl_managers.NullACLManager{}
-	}
 
 	launcher, err := services.GetLauncher(config_obj)
 	if err != nil {
 		return vfilter.Null{}
 	}
 
+	// ScheduleArtifactCollection already checks permissions.
 	flow_id, err := launcher.ScheduleArtifactCollection(
 		ctx, config_obj, acl_manager, repository, request,
 		func() {
 			// Notify the client about it.
 			notifier, err := services.GetNotifier(config_obj)
 			if err == nil {
-				notifier.NotifyListener(ctx,
+				_ = notifier.NotifyListener(ctx,
 					config_obj, arg.ClientId, "collect_client")
 			}
 		})
@@ -205,8 +201,9 @@ func (self ScheduleCollectionFunction) Info(scope vfilter.Scope, type_map *vfilt
 		Name:    "collect_client",
 		Doc:     "Launch an artifact collection against a client.",
 		ArgType: type_map.AddType(scope, &ScheduleCollectionFunctionArg{}),
-		Metadata: vql.VQLMetadata().Permissions(
-			acls.COLLECT_CLIENT, acls.COLLECT_SERVER).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.COLLECT_CLIENT, acls.COLLECT_SERVER, acls.COLLECT_BASIC).Build(),
+		Version: 3,
 	}
 }
 

@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -21,26 +21,27 @@ package hunts
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/paths"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/hunt_dispatcher"
-	"www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
 )
 
 type HuntsPluginArgs struct {
-	HuntId string `vfilter:"optional,field=hunt_id,doc=A hunt id to read, if not specified we list all of them."`
+	HuntId  string `vfilter:"optional,field=hunt_id,doc=A hunt id to read, if not specified we list all of them."`
+	Summary bool   `vfilter:"optional,field=summary,doc=If specified we fetch just the basic summary of the flow. This is a bit faster."`
 }
 
 type HuntsPlugin struct{}
@@ -52,6 +53,7 @@ func (self HuntsPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "hunts", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -86,7 +88,9 @@ func (self HuntsPlugin) Call(
 
 		// Show a specific hunt
 		if arg.HuntId != "" {
-			hunt_obj, pres := hunt_dispatcher.GetHunt(ctx, arg.HuntId)
+			hunt_obj, pres := hunt_dispatcher.GetHunt(ctx,
+				services.GetHuntOptions{Request: !arg.Summary},
+				arg.HuntId)
 			if pres {
 				select {
 				case <-ctx.Done():
@@ -98,12 +102,13 @@ func (self HuntsPlugin) Call(
 		}
 
 		// Show all hunts.
-		var hunts []*api_proto.Hunt
+		var hunts []*ordereddict.Dict
 
 		err = hunt_dispatcher.ApplyFuncOnHunts(
 			ctx, services.AllHunts,
+			services.GetHuntOptions{Request: !arg.Summary},
 			func(hunt *api_proto.Hunt) error {
-				hunts = append(hunts, hunt)
+				hunts = append(hunts, json.ConvertProtoToOrderedDict(hunt))
 				return nil
 			})
 		if err != nil {
@@ -115,7 +120,7 @@ func (self HuntsPlugin) Call(
 			select {
 			case <-ctx.Done():
 				return
-			case output_chan <- json.ConvertProtoToOrderedDict(hunt_obj):
+			case output_chan <- hunt_obj:
 			}
 		}
 	}()
@@ -128,7 +133,8 @@ func (self HuntsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:     "hunts",
 		Doc:      "Retrieve the list of hunts.",
 		ArgType:  type_map.AddType(scope, &HuntsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 
@@ -150,6 +156,7 @@ func (self HuntResultsPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "hunt_results", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -176,51 +183,30 @@ func (self HuntResultsPlugin) Call(
 			return
 		}
 
+		available_artifacts, err := self.GetAvailableArtifacts(ctx, config_obj, arg.HuntId)
+		if err != nil {
+			scope.Log("hunt_results: %v", err)
+			return
+		}
+
+		if len(available_artifacts) == 0 {
+			scope.Log("hunt_results: not artifacts available")
+			return
+		}
+
 		// If no artifact is specified, get the first one from
 		// the hunt.
 		if arg.Artifact == "" {
-			hunt_dispatcher_service, err := services.GetHuntDispatcher(config_obj)
-			if err != nil {
-				scope.Log("hunt_results: %v", err)
-				return
-			}
-
-			hunt_obj, pres := hunt_dispatcher_service.GetHunt(ctx, arg.HuntId)
-			if !pres {
-				return
-			}
-
-			hunt_dispatcher.FindCollectedArtifacts(ctx, config_obj, hunt_obj)
-			if len(hunt_obj.Artifacts) == 0 {
-				scope.Log("hunt_results: no artifacts in hunt")
-				return
-			}
-
-			if arg.Source == "" {
-				arg.Artifact, arg.Source = paths.SplitFullSourceName(
-					hunt_obj.Artifacts[0])
-			}
-
-			// If the source is not specified find the first named
-			// source from the artifact definition.
-			if arg.Source == "" {
-				repo, err := vql_utils.GetRepository(scope)
-				if err == nil {
-					artifact_def, ok := repo.Get(ctx, config_obj, arg.Artifact)
-					if ok {
-						for _, source := range artifact_def.Sources {
-							if source.Name != "" {
-								arg.Source = source.Name
-								break
-							}
-						}
-					}
-				}
-			}
+			arg.Artifact = available_artifacts[0]
+		} else if arg.Source != "" {
+			arg.Artifact += "/" + arg.Source
 		}
 
-		if arg.Source != "" {
-			arg.Artifact += "/" + arg.Source
+		if !utils.InString(available_artifacts, arg.Artifact) {
+			scope.Log("hunt_results: artifact %v not available in hunt. "+
+				"Available artifacts are %v",
+				arg.Artifact, strings.Join(available_artifacts, ", "))
+			return
 		}
 
 		if len(arg.Orgs) == 0 {
@@ -289,7 +275,7 @@ func (self HuntResultsPlugin) Call(
 					ctx, org_config_obj,
 					flow_details.Context.ClientId,
 					flow_details.Context.SessionId,
-					arg.Artifact)
+					artifact_name)
 				if err != nil {
 					continue
 				}
@@ -324,12 +310,61 @@ func (self HuntResultsPlugin) Call(
 	return output_chan
 }
 
+func (self HuntResultsPlugin) GetAvailableArtifacts(
+	ctx context.Context,
+	config_obj *config_proto.Config, hunt_id string) ([]string, error) {
+
+	hunt_dispatcher_service, err := services.GetHuntDispatcher(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	hunt_obj, pres := hunt_dispatcher_service.GetHunt(ctx,
+		services.GetHuntOptions{Request: false},
+		hunt_id)
+	if !pres {
+		return nil, utils.Wrap(utils.NotFoundError, "Hunt not found")
+	}
+
+	hunt_dispatcher.FindCollectedArtifacts(ctx, config_obj, hunt_obj)
+
+	var artifacts []string
+
+	manager, err := services.GetRepositoryManager(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	repository, err := manager.GetGlobalRepository(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, artifact := range hunt_obj.Artifacts {
+		artifact_def, ok := repository.Get(ctx, config_obj, artifact)
+		if ok {
+			for _, source := range artifact_def.Sources {
+				name := artifact_def.Name
+
+				if source.Name != "" {
+					name += "/" + source.Name
+				}
+
+				artifacts = append(artifacts, name)
+			}
+		}
+	}
+
+	return artifacts, nil
+}
+
 func (self HuntResultsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
 		Name:     "hunt_results",
 		Doc:      "Retrieve the results of a hunt.",
 		ArgType:  type_map.AddType(scope, &HuntResultsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 
@@ -349,6 +384,7 @@ func (self HuntFlowsPlugin) Call(
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "hunt_flows", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -424,7 +460,8 @@ func (self HuntFlowsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name:     "hunt_flows",
 		Doc:      "Retrieve the flows launched by a hunt.",
 		ArgType:  type_map.AddType(scope, &HuntFlowsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 

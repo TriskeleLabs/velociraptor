@@ -4,17 +4,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie/v2"
 	"github.com/stretchr/testify/suite"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
-	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
@@ -22,9 +22,15 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/simple"
+)
+
+const (
+	FORCE_REFRESH = true
 )
 
 var (
@@ -77,7 +83,9 @@ func (self *TestSuite) TestArtifactSource() {
 	}
 	rs_writer.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
+	defer cancel()
+
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
 		ACLManager: acl_managers.NullACLManager{},
@@ -89,14 +97,17 @@ func (self *TestSuite) TestArtifactSource() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
+	arg := &ParallelPluginArgs{
+		Artifact:  "Test.Artifact",
+		FlowId:    self.flow_id,
+		ClientId:  self.client_id,
+		BatchSize: 10,
+	}
+	err = arg.DetermineMode(ctx, self.ConfigObj, scope, nil)
+	assert.NoError(self.T(), err)
+
 	row_chan, err := breakIntoScopes(
-		ctx, self.ConfigObj, scope,
-		&ParallelPluginArgs{
-			Artifact:  "Test.Artifact",
-			FlowId:    self.flow_id,
-			ClientId:  self.client_id,
-			BatchSize: 10,
-		})
+		ctx, self.ConfigObj, scope, arg)
 	assert.NoError(self.T(), err)
 
 	for args := range row_chan {
@@ -138,7 +149,8 @@ func (self *TestSuite) TestHuntsSource() {
 		ArtifactIsBuiltIn: true})
 
 	assert.NoError(self.T(), err)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
+	defer cancel()
 
 	hunt_dispatcher, err := services.GetHuntDispatcher(self.ConfigObj)
 	assert.NoError(self.T(), err)
@@ -161,12 +173,24 @@ func (self *TestSuite) TestHuntsSource() {
 	hunt_rs_writer, err := result_sets.NewResultSetWriter(
 		file_store_factory, hunt_path_manager, nil,
 		utils.SyncCompleter, true /* truncate */)
+	assert.NoError(self.T(), err)
+
+	gen := &ConstantIdGenerator{}
+	defer utils.SetIdGenerator(gen)()
+
+	client_info_manager, err := services.GetClientInfoManager(self.ConfigObj)
+	assert.NoError(self.T(), err)
 
 	for client_number := 0; client_number < 10; client_number++ {
-		launcher.SetFlowIdForTests(fmt.Sprintf(
-			"%s_%v", self.flow_id, client_number))
+		gen.SetId(fmt.Sprintf("%s_%v", self.flow_id, client_number))
 
 		client_id := fmt.Sprintf("%s_%v", self.client_id, client_number)
+		err = client_info_manager.Set(self.Ctx, &services.ClientInfo{
+			&actions_proto.ClientInfo{
+				ClientId: client_id,
+			}})
+		assert.NoError(self.T(), err)
+
 		flow_id, err := launcher.ScheduleArtifactCollection(self.Ctx,
 			self.ConfigObj, acl_managers.NullACLManager{},
 			repository, &flows_proto.ArtifactCollectorArgs{
@@ -201,7 +225,7 @@ func (self *TestSuite) TestHuntsSource() {
 	}
 
 	hunt_rs_writer.Close()
-	hunt_dispatcher.Refresh(self.Ctx, self.ConfigObj)
+	hunt_dispatcher.Refresh(self.Ctx, self.ConfigObj, FORCE_REFRESH)
 
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
@@ -212,13 +236,15 @@ func (self *TestSuite) TestHuntsSource() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	row_chan, err := breakIntoScopes(
-		ctx, self.ConfigObj, scope,
-		&ParallelPluginArgs{
-			Artifact:  "Test.Artifact",
-			HuntId:    hunt_id,
-			BatchSize: 10,
-		})
+	arg := &ParallelPluginArgs{
+		Artifact:  "Test.Artifact",
+		HuntId:    hunt_id,
+		BatchSize: 10,
+	}
+	err = arg.DetermineMode(ctx, self.ConfigObj, scope, nil)
+	assert.NoError(self.T(), err)
+
+	row_chan, err := breakIntoScopes(ctx, self.ConfigObj, scope, arg)
 	assert.NoError(self.T(), err)
 
 	sections := []string{}
@@ -233,11 +259,7 @@ func (self *TestSuite) TestHuntsSource() {
 	// Stable sort the section list so we can goldie it.
 	sort.Strings(sections)
 
-	g := goldie.New(self.T(),
-		goldie.WithFixtureDir("fixtures"),
-		goldie.WithDiffEngine(goldie.ClassicDiff))
-
-	g.Assert(self.T(), "TestHuntsSource", json.MustMarshalIndent(sections))
+	goldie.AssertJson(self.T(), "TestHuntsSource", sections)
 
 	vql, err := vfilter.Parse(`
 SELECT * FROM parallelize(
@@ -263,4 +285,23 @@ func TestParallelPlugin(t *testing.T) {
 		client_id: "C.123",
 		flow_id:   "F.123",
 	})
+}
+
+type ConstantIdGenerator struct {
+	mu sync.Mutex
+	id string
+}
+
+func (self *ConstantIdGenerator) Next(client_id string) string {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	return self.id
+}
+
+func (self *ConstantIdGenerator) SetId(id string) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.id = id
 }

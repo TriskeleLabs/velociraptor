@@ -16,7 +16,7 @@ import (
 	"www.velocidex.com/golang/vfilter/types"
 )
 
-// A pipe is a VQL constract that emulates a file from a query.
+// A pipe is a VQL construct that emulates a file from a query.
 //
 // For example:
 // LET MyPipe = Pipe(query={
@@ -45,43 +45,59 @@ func (self *Pipe) Stat() (os.FileInfo, error) {
 	return nil, errors.New("Not implemented")
 }
 
+// Read a non empty data from the query.
 func (self *Pipe) Read(buff []byte) (int, error) {
-	select {
-
-	case <-self.ctx.Done():
-		return 0, io.EOF
-
-	case row, ok := <-self.output_chan:
-		if !ok {
+	// Keep trying to read something until the first non empty result
+getrow:
+	for {
+		select {
+		case <-self.ctx.Done():
 			return 0, io.EOF
-		}
 
-		switch t := row.(type) {
-		case *ordereddict.Dict:
-			keys := t.Keys()
-			if len(keys) >= 1 {
-				value, _ := t.Get(keys[0])
+		case row, ok := <-self.output_chan:
+			if !ok {
+				return 0, io.EOF
+			}
 
-				switch t := value.(type) {
-				case string:
-					out := append([]byte(t), self.sep...)
-					return utils.MemCpy(buff, out), nil
+			switch t := row.(type) {
+			case *ordereddict.Dict:
+				for _, v := range t.Values() {
+					switch t := v.(type) {
+					case string:
+						if t == "" {
+							continue getrow
+						}
 
-				case []byte:
-					return utils.MemCpy(buff,
-						append(t, self.sep...)), nil
+						out := append([]byte(t), self.sep...)
+						return utils.MemCpy(buff, out), nil
 
-				default:
-					data := fmt.Sprintf("%v", value)
-					out := append([]byte(data), self.sep...)
-					return utils.MemCpy(buff, out), nil
+					case []byte:
+						if len(t) == 0 {
+							continue getrow
+						}
+
+						return utils.MemCpy(buff,
+							append(t, self.sep...)), nil
+
+					default:
+						data := fmt.Sprintf("%v", v)
+						if len(data) == 0 {
+							continue getrow
+						}
+						out := append([]byte(data), self.sep...)
+						return utils.MemCpy(buff, out), nil
+					}
 				}
 			}
-		}
 
-		data := fmt.Sprintf("%v", row)
-		out := append([]byte(data), self.sep...)
-		return utils.MemCpy(buff, out), nil
+			data := fmt.Sprintf("%v", row)
+			if len(data) == 0 {
+				continue getrow
+			}
+
+			out := append([]byte(data), self.sep...)
+			return utils.MemCpy(buff, out), nil
+		}
 	}
 }
 
@@ -141,6 +157,13 @@ func (self PipeFilesystemAccessor) ParsePath(path string) (*accessors.OSPath, er
 	return accessors.NewLinuxOSPath(path)
 }
 
+func (self PipeFilesystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "pipe",
+		Description: `Read from a VQL pipe.`,
+	}
+}
+
 func (self PipeFilesystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 	return PipeFilesystemAccessor{scope}, nil
@@ -178,18 +201,23 @@ func (self PipeFilesystemAccessor) ReadDirWithOSPath(path *accessors.OSPath) (
 func (self PipeFilesystemAccessor) Open(variable string) (accessors.ReadSeekCloser, error) {
 	variable_data, pres := self.scope.Resolve(variable)
 	if !pres || utils.IsNil(variable_data) {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 	variable_data_lazy, ok := variable_data.(types.StoredExpression)
 	if ok {
 		ctx, cancel := context.WithCancel(context.Background())
-		vql_subsystem.GetRootScope(self.scope).AddDestructor(cancel)
+		err := vql_subsystem.GetRootScope(self.scope).AddDestructor(cancel)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+
 		variable_data = variable_data_lazy.Reduce(ctx, self.scope)
 	}
 
 	pipe, ok := variable_data.(*Pipe)
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 
 	return pipe, nil
@@ -198,25 +226,12 @@ func (self PipeFilesystemAccessor) Open(variable string) (accessors.ReadSeekClos
 func (self PipeFilesystemAccessor) OpenWithOSPath(
 	path *accessors.OSPath) (accessors.ReadSeekCloser, error) {
 	if len(path.Components) != 1 {
-		return nil, os.ErrNotExist
+		return nil, utils.NotFoundError
 	}
 	return self.Open(path.Components[0])
 }
 
 func init() {
-	accessors.Register("pipe", &PipeFilesystemAccessor{},
-		`Read from a VQL pipe.
-
-A VQL pipe allows data to be generated from a VQL query, as the pipe is read, the query proceeds to feed more data to it.
-
-Example:
-
-  LET MyPipe = pipe(query={
-        SELECT _value FROM range(start=0, end=10, step=1)
-  }, sep="\n")
-
-  SELECT read_file(filename="MyPipe", accessor="pipe")
-  FROM scope()
-`)
+	accessors.Register(&PipeFilesystemAccessor{})
 	vql_subsystem.RegisterFunction(&PipeFunction{})
 }

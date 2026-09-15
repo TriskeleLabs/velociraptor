@@ -3,7 +3,7 @@
 
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -189,6 +189,7 @@ const (
 
 	// NtQueryInformationThread
 	ThreadBasicInformation   = 0
+	ThreadTimes              = 1
 	ThreadImpersonationToken = 5
 
 	PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -254,6 +255,13 @@ type THREAD_BASIC_INFORMATION struct {
 	AffinityMask    uint64
 	Priority        uint32
 	BasePriority    uint32
+}
+
+type KERNEL_USER_TIMES struct {
+	CreateTime uint64 // The creation time of the process or thread.
+	ExitTime   uint64 // The exit time of the process or thread.
+	KernelTime uint64 // The amount of time the process has executed in kernel mode.
+	UserTime   uint64
 }
 
 type OBJECT_TYPE_INFORMATION struct {
@@ -549,7 +557,7 @@ type CMSG_SIGNER_INFO struct {
 	HashEncryptionAlgorithm CRYPT_ALGORITHM_IDENTIFIER
 	EncryptedHash           CRYPTOAPI_BLOB
 
-	// Some extra fields we dont use
+	// Some extra fields we don't use
 	//CRYPT_ATTRIBUTES           AuthAttrs;
 	//CRYPT_ATTRIBUTES           UnauthAttrs;
 }
@@ -567,7 +575,7 @@ type CRYPT_ALGORITHM_IDENTIFIER struct {
 type CRYPT_PROVIDER_CERT struct {
 	CbStruct uint32
 	PCert    *CERT_CONTEXT
-	// More fields we dont care about
+	// More fields we don't care about
 }
 
 type CERT_CONTEXT struct {

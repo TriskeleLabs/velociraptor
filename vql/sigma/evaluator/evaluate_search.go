@@ -9,7 +9,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/vql/sigma/evaluator/modifiers"
 	"www.velocidex.com/golang/vfilter/types"
 
-	"github.com/bradleyjkemp/sigma-go"
+	"github.com/Velocidex/sigma-go"
 )
 
 func (self *VQLRuleEvaluator) evaluateSearchExpression(
@@ -178,10 +178,9 @@ func (self *VQLRuleEvaluator) GetFieldValuesFromEvent(
 	field string, event *Event) ([]interface{}, error) {
 
 	// There is a field mapping - lets evaluate it
-	for _, m := range self.fieldmappings {
-		if m.Name == field {
-			return toGenericSlice(event.Reduce(ctx, scope, field, m.Lambda)), nil
-		}
+	lambda, err := self.fieldmappings.Get(field)
+	if err == nil {
+		return toGenericSlice(event.Reduce(ctx, scope, field, lambda)), nil
 	}
 
 	value, ok := event.Get(field)

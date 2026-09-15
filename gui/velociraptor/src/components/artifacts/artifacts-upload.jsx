@@ -9,15 +9,12 @@ import Col from 'react-bootstrap/Col';
 import Button from 'react-bootstrap/Button';
 import InputGroup from 'react-bootstrap/InputGroup';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import classNames from "classnames";
 import api from '../core/api-service.jsx';
-import BootstrapTable from 'react-bootstrap-table-next';
 import {CancelToken} from 'axios';
-import filterFactory from 'react-bootstrap-table2-filter';
-import { formatColumns } from "../core/table.jsx";
 import T from '../i8n/i8n.jsx';
 import Alert from 'react-bootstrap/Alert';
 import ToolTip from '../widgets/tooltip.jsx';
+import VeloTable from '../core/table.jsx';
 
 import "./artifacts-upload.css";
 
@@ -30,6 +27,7 @@ export default class ArtifactsUpload extends React.Component {
     state = {
         pack_file: null,
         prefix: "",
+        tags: "",
         loading: false,
         uploaded: [],
         filter: "",
@@ -37,10 +35,13 @@ export default class ArtifactsUpload extends React.Component {
         // after upload the server will cache the file here.
         vfs_path: [],
         errors: [],
+        imported: [],
     }
 
     componentDidMount() {
         this.source = CancelToken.source();
+        this.setState({id: crypto.randomUUID()});
+
     }
 
     componentWillUnmount() {
@@ -50,6 +51,7 @@ export default class ArtifactsUpload extends React.Component {
     componentDidUpdate = (prevProps, prevState, rootNode) => {
         if(!_.isEqual(prevState.filter, this.state.filter) ||
            !_.isEqual(prevState.prefix, this.state.prefix) ||
+           !_.isEqual(prevState.tags, this.state.tags) ||
            !_.isEqual(prevState.vfs_path, this.state.vfs_path)) {
             this.updateFile();
             return true;
@@ -60,44 +62,28 @@ export default class ArtifactsUpload extends React.Component {
     // The first call uploads the file and records the cached
     // filestore path
     uploadFile = () => {
-        if (!this.state.pack_file) {
+        if (!this.state.pack_file.name) {
             return;
         }
 
-        var reader = new FileReader();
-        reader.onload = (event) => {
-            var request = {
-                prefix: this.state.prefix,
-                filter: this.state.filter,
-                data: reader.result.split(",")[1],
-            };
+        this.setState({loading: true});
+        api.upload("v1/UploadFormFile",
+                   {file: this.state.pack_file},
+                   {name: "ArtifactPack", type: "upload_file"}).then(
+                       response=>{
+                           this.setState({
+                               loading: false,
+                               upload_info: response.data,
+                           }, this.updateFile);
 
-            this.setState({loading: true});
-            api.post("v1/LoadArtifactPack", request,
-                     this.source.token).then(response => {
-                         if (response.data.cancel) {
-                             return ;
-                         }
+                       }).catch(response=>{
+                           return this.setState({
+                               loading:false, upload_info: {}});
+                       });
+    }
 
-                         let uploaded = _.map(
-                             response.data.successful_artifacts,
-                             (x, idx)=>{
-                                 return {name: x, id: idx};
-                             });
-                         this.setState({loading:false,
-                                        current_error: undefined,
-                                        errors: response.data.errors || [],
-                                        vfs_path: response.data.vfs_path,
-                                        uploaded: uploaded});
-                     }).catch(err=>{
-                         let data = err.response &&
-                             err.response.data && err.response.data.message;
-                         this.setState({current_error: data,
-                                        loading:false,
-                                        pack_file: undefined});
-                     });
-        };
-        reader.readAsDataURL(this.state.pack_file);
+    tags = ()=>{
+        return _.filter(_.map(this.state.tags.split(" "), x=>x.trim()));
     }
 
     updateFile = () => {
@@ -105,10 +91,12 @@ export default class ArtifactsUpload extends React.Component {
             return;
         }
 
+        this.setState({loading: true});
         var request = {
             prefix: this.state.prefix,
+            tags: this.tags(),
             filter: this.state.filter,
-            vfs_path: this.state.vfs_path,
+            vfs_path: this.state.upload_info.VfsPath,
         };
         api.post("v1/LoadArtifactPack", request,
                  this.source.token).then(response => {
@@ -123,13 +111,18 @@ export default class ArtifactsUpload extends React.Component {
 
                      this.setState({loading:false,
                                     vfs_path: response.data.vfs_path,
-                                    uploaded: uploaded});
+                                    uploaded: uploaded,
+                                    errors: response.data.errors || []});
+                 }).catch(err=>{
+                     this.setState({loading: false});
                  });
     };
 
+    // Called when the user really wants the import.
     importFile = () => {
         var request = {
             prefix: this.state.prefix,
+            tags: this.tags(),
             filter: this.state.filter,
             vfs_path: this.state.vfs_path,
             really_do_it: true,
@@ -139,15 +132,24 @@ export default class ArtifactsUpload extends React.Component {
                      if (response.data.cancel) {
                          return ;
                      }
+                     let errors = response.data.errors || [];
+                     let imported = response.data.successful_artifacts || [];
+                     if (errors.length > 0) {
+                         this.setState({loading: false,
+                                        errors: errors,
+                                        imported: imported});
+                         return;
+                     }
                      this.props.onClose();
+                 }).catch(response=>{
+                     this.setState({loading: false});
                  });
     };
 
     render() {
-        let columns = formatColumns([
-            {dataField: "name", text: T("Artifact Name"),
-             sort: true, filtered: true}
-        ]);
+        let headers = {
+            name: T("Artifact Name"),
+        };
 
         return (
             <>
@@ -162,24 +164,28 @@ export default class ArtifactsUpload extends React.Component {
                     <Form.Group as={Row}>
                       <Col sm="12">
                         <InputGroup className="full-width custom-file-button">
-                          <Button variant="default"
-                            className={classNames({"disabled": !this.state.pack_file})}
-                            onClick={()=>this.uploadFile()}>
-                            { this.state.loading ?
-                              <FontAwesomeIcon icon="spinner" spin/> :
-                              T("Click to Upload") }
-                          </Button>
-                          <Form.Control type="file" id="upload"
+                          { this.state.pack_file &&
+                            <Button variant="default"
+                                    onClick={()=>this.uploadFile()}>
+                              { this.state.loading ?
+                                <FontAwesomeIcon icon="spinner" spin/> :
+                                T("Click to Upload") }
+                            </Button> }
+                          <Form.Control type="file" id={this.state.id}
+                                        className="hidden-file-upload"
+                                        placeholder={T("Select a file")}
                                         onChange={e => {
                                             if (!_.isEmpty(e.currentTarget.files)) {
-                                                this.setState({pack_file: e.currentTarget.files[0]});
+                                                this.setState({
+                                                    upload_info: {},
+                                                    pack_file: e.currentTarget.files[0]});
                                             }
                                         }}
                           />
                           <ToolTip tooltip={T("Select artifact pack (Zip file with YAML definitions)")}>
                             <Button variant="default-outline"
                                     className="flush-right">
-                              <Form.Label data-browse="Select file" htmlFor="upload">
+                              <Form.Label data-browse="Select file" htmlFor={this.state.id}>
                                 {this.state.pack_file ? this.state.pack_file.name :
                                  T("Select artifact pack (Zip file with YAML definitions)")}
                               </Form.Label>
@@ -211,6 +217,19 @@ export default class ArtifactsUpload extends React.Component {
                         </Col>
                       </Form.Group>
                       <Form.Group as={Row}>
+                        <Form.Label column sm="3">{T("Tags")}</Form.Label>
+                        <Col sm="8">
+                          <Form.Control as="input" rows={3}
+                                        placeholder={T("Set these tags on all artifacts")}
+                                        spellCheck="false"
+                                        value={this.state.tags}
+                                        onChange={e => {
+                                            this.setState({tags: e.target.value});
+                                        }}
+                          />
+                        </Col>
+                      </Form.Group>
+                     <Form.Group as={Row}>
                         <Form.Label column sm="3">{T("Filter")}</Form.Label>
                         <Col sm="8">
                           <Form.Control as="input"
@@ -224,18 +243,18 @@ export default class ArtifactsUpload extends React.Component {
                         </Col>
                       </Form.Group>
 
-                      <BootstrapTable
-                        hover
-                        condensed
-                        keyField="id"
-                        bootstrap4
-                        headerClasses="alert alert-secondary"
-                        bodyClasses="fixed-table-body"
-                        data={this.state.uploaded}
-                        columns={columns}
-                        filter={ filterFactory() }
+                      <VeloTable
+                        rows={this.state.uploaded}
+                        columns={["name"]}
+                        header_renderers={headers}
+                        no_toolbar={true}
                       />
                     </Form> }
+
+                  { this.state.imported.length > 0 &&
+                    <Alert variant="success">
+                      {T("Successfully imported")} {this.state.imported.length}
+                    </Alert> }
 
                   { this.state.errors.length > 0 &&
                     <Container className="artifact-import-errors">

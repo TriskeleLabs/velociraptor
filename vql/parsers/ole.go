@@ -1,19 +1,19 @@
 /*
-   Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+Velociraptor - Dig Deeper
+Copyright (C) 2019-2025 Rapid7 Inc.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package parsers
 
@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/oleparse"
@@ -30,7 +29,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -51,12 +49,6 @@ func _OLEVBAPlugin_ParseFile(
 	arg *_OLEVBAArgs) ([]*oleparse.VBAModule, error) {
 
 	defer utils.RecoverVQL(scope)
-
-	err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-	if err != nil {
-		scope.Log("olevba: %s", err)
-		return nil, err
-	}
 
 	accessor, err := accessors.GetAccessor(arg.Accessor, scope)
 	if err != nil {
@@ -99,7 +91,12 @@ func _OLEVBAPlugin_ParseFile(
 			defer fd.Close()
 		}
 
-		data, err := ioutil.ReadAll(io.LimitReader(fd, constants.MAX_MEMORY))
+		max_memory := arg.MaxSize
+		if max_memory == 0 {
+			max_memory = constants.MAX_MEMORY
+		}
+
+		data, err := utils.ReadAllWithLimit(fd, int(max_memory))
 		if err != nil {
 			return nil, err
 		}
@@ -121,8 +118,12 @@ func _OLEVBAPlugin_ParseFile(
 				if err != nil {
 					return nil, err
 				}
-				data, err := ioutil.ReadAll(
-					io.LimitReader(rc, constants.MAX_MEMORY))
+				max_memory := constants.MAX_MEMORY
+				if max_memory == 0 {
+					max_memory = constants.MAX_MEMORY
+				}
+
+				data, err := utils.ReadAllWithLimit(rc, max_memory)
 				if err != nil {
 					return nil, err
 				}
@@ -145,6 +146,8 @@ func (self _OLEVBAPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "olevba", args)()
+		defer utils.RecoverVQL(scope)
 
 		arg := &_OLEVBAArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -181,7 +184,7 @@ func (self _OLEVBAPlugin) Info(scope vfilter.Scope,
 		Name:     "olevba",
 		Doc:      "Extracts VBA Macros from Office documents.",
 		ArgType:  type_map.AddType(scope, &_OLEVBAArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 

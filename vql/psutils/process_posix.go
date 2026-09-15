@@ -7,15 +7,30 @@ package psutils
 
 import (
 	"context"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 func GetProcess(ctx context.Context, pid int32) (*ordereddict.Dict, error) {
 	process_obj, err := process.NewProcessWithContext(ctx, pid)
 	if err != nil {
-		return nil, err
+		p := &process.Process{
+			Pid: pid,
+		}
+		p.CreateTimeWithContext(ctx)
+
+		// Check if the process is really there.
+		_, errs := p.Status()
+		if errs != nil {
+			return nil, err
+		}
+
+		// Mark the process as hidden
+		return getProcessData(p).
+			Set("Hidden", true), nil
 	}
 
 	return getProcessData(process_obj), nil
@@ -52,7 +67,9 @@ func getProcessData(process *process.Process) *ordereddict.Dict {
 	result.Set("CommandLine", cmdline)
 
 	create_time, _ := process.CreateTime()
-	result.Set("CreateTime", create_time)
+	create_time_string := time.Unix(create_time/1000, create_time%1000).
+		Format(time.RFC3339)
+	result.Set("CreateTime", create_time_string)
 
 	times, _ := process.Times()
 	result.Set("Times", times)
@@ -115,4 +132,10 @@ func IOCountersWithContext(ctx context.Context, pid int32) (*IOCountersStat, err
 		ReadBytes:  counters.ReadBytes,
 		WriteBytes: counters.WriteBytes,
 	}, nil
+}
+
+// Pretty cheap as it is just a /proc read.
+func HostID() string {
+	id, _ := host.HostID()
+	return id
 }

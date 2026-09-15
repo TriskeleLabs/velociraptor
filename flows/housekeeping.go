@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	utils "www.velocidex.com/golang/velociraptor/utils"
 )
@@ -74,12 +75,15 @@ func CheckClientStatus(
 
 		// Inform the client manager that this client will now receive
 		// the latest event table.
-		client_manager.UpdateStats(ctx, client_id, &services.Stats{
+		err := client_manager.UpdateStats(ctx, client_id, &services.Stats{
 			LastEventTableVersion: update_message.UpdateEventTable.Version,
 		})
+		if err != nil {
+			return err
+		}
 
 		clientEventUpdateCounter.Inc()
-		err := client_manager.QueueMessageForClient(
+		err = client_manager.QueueMessageForClient(
 			ctx, client_id, update_message,
 			services.NOTIFY_CLIENT, utils.BackgroundWriter)
 		if err != nil {
@@ -94,7 +98,7 @@ func CheckClientStatus(
 		return err
 	}
 
-	// If the client is already up to date we dont need to look
+	// If the client is already up to date we don't need to look
 	// further.
 	hunts_last_timestamp := dispatcher.GetLastTimestamp()
 	if stats.LastHuntTimestamp >= hunts_last_timestamp {
@@ -105,8 +109,11 @@ func CheckClientStatus(
 	// client to reduce the time under lock.
 	hunts := make([]*api_proto.Hunt, 0)
 	err = dispatcher.ApplyFuncOnHunts(ctx, services.OnlyRunningHunts,
+		services.GetHuntOptions{
+			Request: false,
+		},
 		func(hunt *api_proto.Hunt) error {
-			// Hunt is stopped we dont care about it.
+			// Hunt is stopped we don't care about it.
 			if hunt.State != api_proto.Hunt_RUNNING {
 				return nil
 			}
@@ -148,15 +155,14 @@ func CheckClientStatus(
 			ordereddict.NewDict().
 				Set("HuntId", hunt.HuntId).
 				Set("ClientId", client_id),
-			"System.Hunt.Participation")
+			artifacts.HUNT_PARTICIPATION)
 
 		if hunt.StartTime > latest_timestamp {
 			latest_timestamp = hunt.StartTime
 		}
 	}
 
-	client_manager.UpdateStats(ctx, client_id, &services.Stats{
+	return client_manager.UpdateStats(ctx, client_id, &services.Stats{
 		LastHuntTimestamp: latest_timestamp,
 	})
-	return nil
 }

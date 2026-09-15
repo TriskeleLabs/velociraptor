@@ -5,7 +5,6 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -41,6 +40,11 @@ func runEfiVariables(
 	}
 
 	firmwareVariables, err := GetEfiVariables()
+	if err != nil {
+		scope.Error("efivariables: %v", err)
+		return result
+	}
+
 	for _, item := range firmwareVariables {
 		if (arg.Namespace == "" || arg.Namespace == item.Namespace) && (arg.Name == "" || arg.Name == item.Name) {
 			if arg.Value {
@@ -63,6 +67,7 @@ func init() {
 		Doc:        "Enumerate efi variables.",
 		Function:   runEfiVariables,
 		ArgType:    &EfiVariablesArgs{},
-		Metadata:   vql.VQLMetadata().Permissions(acls.MACHINE_STATE).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.MACHINE_STATE).Build(),
 	})
 }

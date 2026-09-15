@@ -4,7 +4,6 @@ package ewf
 import (
 	"errors"
 	"io"
-	"os"
 
 	"github.com/Velocidex/go-ewf/parser"
 	"www.velocidex.com/golang/velociraptor/accessors"
@@ -54,9 +53,11 @@ func (self *EWFReader) Read(buff []byte) (int, error) {
 }
 
 func (self *EWFReader) Seek(offset int64, whence int) (int64, error) {
-	if whence == os.SEEK_SET {
+	switch whence {
+	case io.SeekStart:
 		self.offset = offset
-	} else if whence == os.SEEK_CUR {
+
+	case io.SeekCurrent:
 		self.offset += offset
 	}
 	return self.offset, nil
@@ -78,7 +79,10 @@ func GetEWFImage(full_path *accessors.OSPath, scope vfilter.Scope) (
 		pathspec.DelegatePath = pathspec.Path
 		pathspec.DelegateAccessor = "auto"
 		pathspec.Path = "/"
-		full_path.SetPathSpec(pathspec)
+		err := full_path.SetPathSpec(pathspec)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	accessor, err := accessors.GetAccessor(pathspec.DelegateAccessor, scope)
@@ -91,34 +95,11 @@ func GetEWFImage(full_path *accessors.OSPath, scope vfilter.Scope) (
 }
 
 func init() {
-	accessors.Register("ewf", zip.NewGzipFileSystemAccessor(
-		accessors.MustNewLinuxOSPath(""), GetEWFImage),
-		`Allow reading an ewf file.
-
-Note that usually EWF files form a set of files with extensions
-like .E01, .E02 etc. This accessor will automatically try to find
-all parts of the same volume set if the file name ends with a '.E01'.
-
-For Example
-
-SELECT * FROM glob(
-  globs="*", accessor="raw_ntfs", root=pathspec(
-    Path="/",
-    DelegateAccessor="ewf",
-    DelegatePath="C:/test.ntfs.dd.E01"))
-
-The next example reads a FAT partition through the offset
-accessor (32256 is the byte offset of the first FAT partition).
-
-    SELECT OSPath.Path AS OSPath, Size, Mode.String
-    FROM glob(
-       globs="*", accessor="fat", root=pathspec(
-          Path="/",
-          DelegateAccessor="offset",
-          DelegatePath=pathspec(
-            Path="/32256",
-            DelegateAccessor="ewf",
-            DelegatePath="/tmp/ubnist1.gen3.E01")))
-
-`)
+	accessors.Register(accessors.DescribeAccessor(
+		zip.NewGzipFileSystemAccessor(
+			accessors.MustNewLinuxOSPath(""), GetEWFImage),
+		accessors.AccessorDescriptor{
+			Name:        "ewf",
+			Description: `Allow reading an EWF file.`,
+		}))
 }

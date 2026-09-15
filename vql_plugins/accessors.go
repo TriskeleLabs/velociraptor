@@ -12,8 +12,10 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/accessors/mscfb"
 	_ "www.velocidex.com/golang/velociraptor/accessors/ntfs"
 	_ "www.velocidex.com/golang/velociraptor/accessors/offset"
+	_ "www.velocidex.com/golang/velociraptor/accessors/overlay"
 	_ "www.velocidex.com/golang/velociraptor/accessors/pipe"
 	_ "www.velocidex.com/golang/velociraptor/accessors/process"
+	_ "www.velocidex.com/golang/velociraptor/accessors/pst"
 	_ "www.velocidex.com/golang/velociraptor/accessors/raw_file"
 	_ "www.velocidex.com/golang/velociraptor/accessors/raw_registry"
 	_ "www.velocidex.com/golang/velociraptor/accessors/registry"
@@ -23,5 +25,6 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/accessors/ssh"
 	_ "www.velocidex.com/golang/velociraptor/accessors/vfs"
 	_ "www.velocidex.com/golang/velociraptor/accessors/vhdx"
+	_ "www.velocidex.com/golang/velociraptor/accessors/vmdk"
 	_ "www.velocidex.com/golang/velociraptor/accessors/zip"
 )

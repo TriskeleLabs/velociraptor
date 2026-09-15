@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -22,7 +22,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"www.velocidex.com/golang/velociraptor/config"
-	assets "www.velocidex.com/golang/velociraptor/gui/velociraptor"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/server"
 	"www.velocidex.com/golang/velociraptor/services"
@@ -66,13 +65,13 @@ func doFrontend() error {
 		return fmt.Errorf("loading config file: %w", err)
 	}
 
-	ctx, cancel := install_sig_handler()
+	ctx, cancel := Install_sig_handler()
 	defer cancel()
 
 	// Come up with a suitable services plan depending on the frontend
 	// role.
 	if config_obj.Services == nil {
-		if *frontend_cmd_minion {
+		if config_obj.Frontend != nil && config_obj.Frontend.IsMinion {
 			config_obj.Services = services.MinionServicesSpec()
 		} else {
 			config_obj.Services = services.AllServerServicesSpec()
@@ -89,11 +88,6 @@ func doFrontend() error {
 	if *compression_flag {
 		logger.Info("Disabling artifact compression.")
 		config_obj.Frontend.DoNotCompressArtifacts = true
-	}
-
-	// Load the assets into memory if we are the master node.
-	if services.IsMaster(config_obj) {
-		assets.InitOnce()
 	}
 
 	// Increase resource limits.

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"gopkg.in/yaml.v2"
+	"github.com/Velocidex/yaml/v2"
 	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
@@ -19,6 +19,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/flows"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
@@ -28,9 +29,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/launcher"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
-	"www.velocidex.com/golang/velociraptor/vql/psutils"
 	"www.velocidex.com/golang/velociraptor/vql/remapping"
 	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
@@ -55,7 +53,7 @@ type collectionManager struct {
 	collection_context *flows.CollectionContext
 	logger             *logWriter
 
-	// The VQL requests we actuall collected. We store those in the
+	// The VQL requests we actually collected. We store those in the
 	// container for provenance.
 	requests api_proto.ApiFlowRequestDetails
 
@@ -183,7 +181,10 @@ func (self *collectionManager) AddThrottler(
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	self.throttler = actions.NewThrottler(self.ctx, self.scope,
+	var closer func()
+
+	self.throttler, closer = throttler.NewThrottler(
+		self.ctx, self.scope, self.config_obj,
 		ops_per_sec, cpu_limit, iops_limit)
 
 	if progress_timeout > 0 {
@@ -193,6 +194,10 @@ func (self *collectionManager) AddThrottler(
 	}
 
 	self.scope.SetThrottler(self.throttler)
+	err := self.scope.AddDestructor(closer)
+	if err != nil {
+		self.scope.Log("collect: %v", err)
+	}
 }
 
 func (self *collectionManager) SetMetadata(metadata vfilter.StoredQuery) {
@@ -212,28 +217,29 @@ func (self *collectionManager) SetFormat(
 }
 
 func (self *collectionManager) storeHostInfo() error {
-	return nil
-
-	fd, err := self.container.Create("info.json", Clock.Now())
+	fd, err := self.container.Create("client_info.json", Clock.Now())
 	if err != nil {
 		return err
 	}
 	defer fd.Close()
 
-	version := config.GetVersion()
-	var info_dict *ordereddict.Dict
-	host_info, err := psutils.InfoWithContext(self.ctx)
-	if err != nil {
-		info_dict = ordereddict.NewDict()
-	} else {
-		info_dict = vql.GetInfo(host_info)
+	// Call the info plugin so it can be mocked
+	info, ok := self.scope.GetPlugin("info")
+	if !ok {
+		return nil
 	}
 
-	fd.Write(json.MustMarshalIndent(info_dict.
-		Set("Name", version.Name).
-		Set("BuildTime", version.BuildTime).
-		Set("build_url", version.CiBuildUrl)))
-
+	version := config.GetVersion()
+	for row := range info.Call(self.ctx, self.scope, ordereddict.NewDict()) {
+		info_dict := vfilter.RowToDict(self.ctx, self.scope, row)
+		_, err := fd.Write(json.MustMarshalIndent(info_dict.
+			Set("Name", version.Name).
+			Set("BuildTime", version.BuildTime).
+			Set("build_url", version.CiBuildUrl)))
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -243,7 +249,11 @@ func (self *collectionManager) storeCollectionMetadata() error {
 		return err
 	}
 
-	fd.Write(json.MustMarshalIndent(self.requests))
+	_, err = fd.Write(json.MustMarshalIndent(&self.requests))
+	if err != nil {
+		return err
+	}
+
 	fd.Close()
 
 	if len(self.custom_artifacts) > 0 {
@@ -252,7 +262,10 @@ func (self *collectionManager) storeCollectionMetadata() error {
 			return err
 		}
 
-		fd.Write(json.MustMarshalIndent(self.custom_artifacts))
+		_, err = fd.Write(json.MustMarshalIndent(self.custom_artifacts))
+		if err != nil {
+			return err
+		}
 		fd.Close()
 	}
 
@@ -358,9 +371,9 @@ func (self *collectionManager) Collect(request *flows_proto.ArtifactCollectorArg
 	// When run within an ACL context, copy the ACL manager to the
 	// subscope - otherwise the user can bypass the ACL manager and
 	// get more permissions.
-	acl_manager, ok := artifacts.GetACLManager(scope)
-	if !ok {
-		acl_manager = acl_managers.NullACLManager{}
+	acl_manager, err := artifacts.GetACLManager(scope)
+	if err != nil {
+		return err
 	}
 
 	launcher, err := services.GetLauncher(self.config_obj)
@@ -458,7 +471,7 @@ func (self *collectionManager) SetTimeout(ns float64) {
 
 		case <-time.After(time.Duration(ns) * time.Nanosecond):
 			self.scope.Log("collect: <red>Timeout Error:</> Collection timed out after %v",
-				time.Now().Sub(start))
+				time.Since(start))
 			// Cancel the main context.
 			self.cancel()
 		}
@@ -479,14 +492,15 @@ func newCollectionManager(
 	}
 
 	return &collectionManager{
-		ctx:                subctx,
-		cancel:             cancel,
-		config_obj:         config_obj,
-		collection_context: flows.NewCollectionContext(ctx, config_obj),
-		concurrency:        utils.NewConcurrencyControl(concurrency, time.Hour),
-		output_chan:        output_chan,
-		scope:              scope,
-		throttler:          &actions.DummyThrottler{},
+		ctx:        subctx,
+		cancel:     cancel,
+		config_obj: config_obj,
+		collection_context: flows.NewCollectionContext(
+			ctx, config_obj, &flows_proto.ArtifactCollectorContext{}),
+		concurrency: utils.NewConcurrencyControl(concurrency, time.Hour),
+		output_chan: output_chan,
+		scope:       scope,
+		throttler:   &throttler.DummyThrottler{},
 	}
 }
 
@@ -533,7 +547,7 @@ func (self *collectionManager) Close() error {
 		self.collection_context.StartTime = uint64(self.start_time.UnixNano())
 		self.collection_context.CreateTime = uint64(self.start_time.UnixNano())
 
-		launcher.UpdateFlowStats(&self.collection_context.ArtifactCollectorContext)
+		launcher.UpdateFlowStats(self.collection_context.ArtifactCollectorContext)
 
 		// Merge in the container stats
 		container_stats := self.container.Stats()
@@ -541,7 +555,11 @@ func (self *collectionManager) Close() error {
 		self.collection_context.TotalUploadedBytes = container_stats.TotalUploadedBytes
 		self.collection_context.TotalExpectedUploadedBytes = container_stats.TotalUploadedBytes
 
-		fd.Write([]byte(json.MustMarshalIndent(self.collection_context)))
+		_, err := fd.Write([]byte(json.MustMarshalIndent(self.collection_context)))
+		if err != nil {
+			fd.Close()
+			return err
+		}
 		fd.Close()
 	}
 
@@ -567,7 +585,8 @@ func (self *collectionManager) Close() error {
 		return err
 
 	case self.output_chan <- ordereddict.NewDict().
-		Set("Container", self.Output):
+		Set("Container", self.Output).
+		Set("Error", utils.Errf(err)):
 	}
 
 	return err
@@ -601,6 +620,6 @@ func (self *logWriter) Write(b []byte) (int, error) {
 	level, msg := logging.SplitIntoLevelAndLog(b)
 	now := int(Clock.Now().Unix())
 	return self.log_file.WriteJSONL([]byte(json.Format(
-		"{\"_ts\":%d,\"client_time\":%d,\"level\":%q,\"message\":%q}\n",
+		`{"_ts":%d,"client_time":%d,"level":%q,"message":%q}`,
 		now, now, level, msg)))
 }

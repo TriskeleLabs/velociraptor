@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils/rand"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 )
 
@@ -20,10 +21,13 @@ func (self *SchedulerTestSuite) SetupTest() {
 	self.ConfigObj.Services.NotebookService = true
 	self.ConfigObj.Services.SchedulerService = true
 	self.ConfigObj.Services.ApiServer = true
+	self.ConfigObj.Defaults.NotebookWaitTimeForWorkerMs = 100
 	self.TestSuite.SetupTest()
 }
 
 func (self *SchedulerTestSuite) TestScheduler() {
+	defer rand.DisableRand()()
+
 	scheduler, err := services.GetSchedulerService(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
@@ -53,7 +57,7 @@ func (self *SchedulerTestSuite) TestScheduler() {
 
 	result := <-res_chan
 	assert.NoError(self.T(), result.Err)
-	assert.Contains(self.T(), string(received_jobs.Bytes()), "Hello world")
+	assert.Contains(self.T(), received_jobs.String(), "Hello world")
 
 	// The schedule had now exited so we can not schedule any more
 	_, err = scheduler.Schedule(self.Ctx, services.SchedulerJob{

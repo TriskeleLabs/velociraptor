@@ -8,7 +8,6 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 
 import parseHTML from '../core/sanitize.jsx';
 
-import VeloTable from '../core/table.jsx';
 import TimelineRenderer from "../timeline/timeline.jsx";
 import { VeloLineChart, VeloTimeChart } from '../artifacts/line-charts.jsx';
 import { NotebookLineChart, NotebookTimeChart,
@@ -21,6 +20,28 @@ import NotebookTableRenderer from './notebook-table-renderer.jsx';
 
 import VeloValueRenderer from '../utils/value.jsx';
 import { JSONparse } from '../utils/json_parse.jsx';
+import VeloButton from '../widgets/button.jsx';
+
+import VeloSigmaEditor from '../artifacts/sigma-editor.jsx';
+
+
+const cleanupHTML = (html) => {
+    // React expect no whitespace between table elements
+    html = html.replace(/>\s*<thead/g, "><thead");
+    html = html.replace(/>\s*<tbody/g, "><tbody");
+    html = html.replace(/>\s*<tr/g, "><tr");
+    html = html.replace(/>\s*<th/g, "><th");
+    html = html.replace(/>\s*<td/g, "><td");
+
+    html = html.replace(/>\s*<\/table/g, "></table");
+    html = html.replace(/>\s*<\/thead/g, "></thead");
+    html = html.replace(/>\s*<\/tbody/g, "></tbody");
+    html = html.replace(/>\s*<\/tr/g, "></tr");
+    html = html.replace(/>\s*<\/th/g, "></th");
+    html = html.replace(/>\s*<\/td/g, "></td");
+    return html;
+};
+
 
 
 const parse_param = domNode=>JSONparse(decodeURIComponent(
@@ -76,7 +97,6 @@ export default class NotebookReportRenderer extends React.Component {
 
         switch  (domNode.name) {
         case "velo-line-chart":
-        case "grr-line-chart":
                     return <VeloLineChart data={rows}
                                           columns={data.Columns}
                                           params={parse_param(domNode)} />;
@@ -109,39 +129,14 @@ export default class NotebookReportRenderer extends React.Component {
         }
 
         let cell_id = this.props.cell && this.props.cell.cell_id;
-        let template = parseHTML(this.props.cell.output, {
+        let template = parseHTML(cleanupHTML(this.props.cell.output), {
             replace: (domNode) => {
-                // A table which contains the data inline.
-                if (domNode.name === "inline-table-viewer") {
-                    try {
-                        let data = JSONparse(this.props.cell.data, {});
-                        let value = decodeURIComponent(domNode.attribs.value || "");
-                        let response = data[value] || {};
-                        let rows = JSONparse(response.Response, []);
-                        if(this.props.completion_reporter) {
-                            this.props.completion_reporter(response.Columns);
-                        }
-
-                        return (
-                            <VeloTable
-                              env={this.props.env}
-                              rows={rows}
-                              columns={response.Columns}
-                            />
-                        );
-                    } catch(e) {
-
-                    };
-                }
-
-                if (domNode.name === "velo-value" ||
-                    domNode.name === "grr-value") {
+                if (domNode.name === "velo-value") {
                     let value = decodeURIComponent(domNode.attribs.value || "");
                     return <VeloValueRenderer value={value}/>;
                 };
 
-                if (domNode.name === "velo-timeline" ||
-                    domNode.name === "grr-timeline") {
+                if (domNode.name === "velo-timeline") {
                     let name = decodeURIComponent(domNode.attribs.name || "");
                     return (
                         <TimelineRenderer
@@ -151,8 +146,27 @@ export default class NotebookReportRenderer extends React.Component {
                     );
                 };
 
-                if (domNode.name ===  "velo-tool-viewer"||
-                    domNode.name === "grr-tool-viewer") {
+                if (domNode.name === "velo-sigma-editor") {
+                    let params = JSONparse(decodeURIComponent(domNode.attribs.params), {});
+                    return <VeloSigmaEditor
+                             notebook_id={this.props.notebook_id}
+                             cell={this.props.cell}
+                             params={params}/>;
+                }
+
+                if (domNode.name === "velo-button") {
+                    let href = domNode.attribs.href;
+                    if(href) {
+                        return <VeloButton
+                                 href={href}
+                                 text={domNode.attribs.text}
+                                 icon={domNode.attribs.icon}
+                               />;
+                    }
+                    return domNode;
+                }
+
+                if (domNode.name ===  "velo-tool-viewer") {
                     let name = decodeURIComponent(domNode.attribs.name ||"");
                     let tool_version = decodeURIComponent(
                         domNode.attribs.version ||"");
@@ -161,8 +175,7 @@ export default class NotebookReportRenderer extends React.Component {
                 };
 
                 // A tag that loads a table from a notebook cell.
-                if (domNode.name === "velo-csv-viewer" ||
-                    domNode.name === "grr-csv-viewer") {
+                if (domNode.name === "velo-csv-viewer") {
                     try {
                         return (
                             <NotebookTableRenderer
@@ -191,7 +204,6 @@ export default class NotebookReportRenderer extends React.Component {
                 return domNode;
             }
         });
-
         result.push(<div key="3" className="report-viewer">{template}</div>);
         return result;
     }

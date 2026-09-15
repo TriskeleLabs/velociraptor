@@ -42,15 +42,13 @@ func (self *ProcessAccessor) OpenWithOSPath(
 		handle: fd,
 	}
 
-	for _, r := range ranges {
-		result.ranges = append(result.ranges, r)
-	}
+	result.ranges = append(result.ranges, ranges...)
 
 	return result, nil
 }
 
 var (
-	maps_regexp = regexp.MustCompile("(?P<Start>^[^-]+)-(?P<End>[^\\s]+)\\s+(?P<Perm>[^\\s]+)\\s+(?P<Size>[^\\s]+)\\s+[^\\s]+\\s+(?P<PermInt>[^\\s]+)\\s+(?P<Filename>.+?)(?P<Deleted> \\(deleted\\))?$")
+	maps_regexp = regexp.MustCompile(`(?P<Start>^[^-]+)-(?P<End>[^\s]+)\s+(?P<Perm>[^\s]+)\s+(?P<Size>[^\s]+)\s+[^\s]+\s+(?P<PermInt>[^\s]+)\s+(?P<Filename>.+?)(?P<Deleted> \(deleted\))?$`)
 )
 
 func GetVads(pid uint64) ([]*uploads.Range, error) {

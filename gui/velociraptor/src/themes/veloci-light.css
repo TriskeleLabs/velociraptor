@@ -83,8 +83,8 @@
   --color-resizer: var(--color-accent-50);
   --color-resizer-hover: var(--color-accent-100);
   --color-scrollbar-track: var(--color-sidebar-background);
-  --color-scrollbar-main: var(--color-accent-25);
-  --color-scrollbar-background: rgba(var(--color-accent), 0.1);
+  --color-scrollbar-thumb: var(--color-btn-default-background);
+  --color-scrollbar-thumb-hover: var(--color-accent-25);
 
   --color-btn-border: #C4C4C4;
   --color-btn-default-border: var(--color-btn-border);
@@ -108,13 +108,14 @@
 
   --color-timeline-header: #cdcdcd20;
   --color-timeline-table-shown: #5cd00a80;
-  --color-timeline-1: #dff0d820;
-  --color-timeline-2: #a9444220;
+  --color-timeline-1: #dff0d8;
+  --color-timeline-2: #a94442;
   --color-timeline-3: #2aabd2;
   --color-timeline-4: #f0c36d;
   --color-timeline-5: #bbb;
   --color-timeline-6: #008000;
   --color-timeline-7: #471ecb;
+  --color-timeline-annotation: #5cd00a;
 
   --color-page-link-active-background: var(--color-accent-50);
   --color-page-link-hover-background: var(--color-accent-25);
@@ -124,7 +125,7 @@
   --color-vfs-files-timestomped: #ed5d40;
   --color-level-error: #990000;
 
-  --hex-highlight-background: var(--accent-color);
+  --hex-highlight-background: #0dd606;
   --hex-highlight-foreground: var(--color-canvas-background);
 
   --invalid-form-control-error: #ffc3c3;
@@ -246,7 +247,6 @@ body.veloci-light {
 }
 
 /* Buttons */
-
 .veloci-light .btn,
 .veloci-light .btn-default {
   font-family: var(--font-family-sans-serif);
@@ -441,9 +441,26 @@ body.veloci-light {
   margin-top: 2em;
 }
 
-.veloci-light .tooltip.show {
+.veloci-light #client-search-bar {
+  height: 25px;
+}
+
+.veloci-light .tooltip.show,
+.veloci-light .tooltip.bs-tooltip-top {
   font-family: var(--font-family-sans-serif);
   font-size: var(--font-size-base);
+  background-color: #10181C;
+  color: var(--color-foreground);
+}
+
+.veloci-light .tooltip-inner {
+  font-family: var(--font-family-sans-serif);
+  font-size: var(--font-size-base);
+  background-color: var(--color-tooltip-background);
+}
+
+.veloci-light .bs-tooltip-top .tooltip-arrow::before {
+  border-top-color: var(--color-tooltip-background);
 }
 
 /* Form controls */
@@ -462,7 +479,7 @@ body.veloci-light {
 
 .veloci-light .form-control:focus {
   background: var(--color-canvas-background);
-  box-shadow: 0 0 0 1px var(--color-foreground);
+  box-shadow: none;
 }
 
 .veloci-light .input-group-prepend .input-group-text {
@@ -573,6 +590,10 @@ body.veloci-light {
   color: var(--color-foreground);
 }
 
+.veloci-light .table tbody tr.row-multi-selected {
+  opacity: 0.5;
+}
+
 /* Footer */
 
 .veloci-light .app-footer.fixed-bottom {
@@ -591,6 +612,16 @@ body.veloci-light {
 
 /* file tree */
 
+/* Dropdown menus */
+.veloci-light .dropdown-menu {
+  background: var(--color-btn-default-background);
+}
+
+.veloci-light .dropdown-item:hover,
+.veloci-light .dropdown-item.active:hover {
+  background: var(--color-accent-75);
+  color: var(--color-canvas-background);
+}
 
 /* Artifact viewer screen */
 
@@ -657,6 +688,20 @@ body.veloci-light {
 .veloci-light .artifact-search-table.selectable.container tr.row_selected > td {
   background: var(--color-table-row-selected);
   color: var(--color-foreground);
+}
+
+/* Offline docs search */
+
+.veloci-light .hit-body.accordion-body {
+  background: #EBEBEB;
+}
+
+.veloci-light .hit-body.accordion-body :not(pre) > code {
+  background: rgba(0,0,0,.05);
+  border-radius: 4px;
+  border: 0.5px solid rgba(0,0,0,.1);
+  padding-left: 4px;
+  padding-right: 4px;
 }
 
 /* modal dialogs */
@@ -743,13 +788,13 @@ body.veloci-light {
 .veloci-light .velo__control--is-focused,
 .veloci-light .velo__control--menu-is-open {
   background: var(--color-form-control-background);
-  box-shadow: 0 0 0 1px var(--color-foreground);
+  box-shadow: none;
   border-color: var(--color-btn-default-border);
   color: var(--color-foreground)--------
 }
 
 .veloci-light .velo__control:hover {
-  box-shadow: 0 0 0 1px var(--color-foreground);
+  box-shadow: none;
   border-color: var(--color-btn-default-border);
 }
 
@@ -775,64 +820,6 @@ body.veloci-light {
   color: var(--color-foreground-inverse);
   background-color: var(--color-accent-50);
   font-weight: 700;
-}
-
-/* Datepicker */
-
-.veloci-light .react-datetime-picker__wrapper {
-  border: 1px solid var(--color-btn-border);
-  border-radius: 0.25rem;
-  color: var(--color-foreground);
-}
-
-.veloci-light .react-datetime-picker.btn-group {
-    height: 37px;
-}
-
-.veloci-light .react-datepicker,
-.veloci-light .react-datetime-picker__calendar .react-calendar,
-.veloci-light .react-datetime-picker {
-  font-family: var(--font-family-sans-serif);
-  background: var(--color-form-control-background);
-  color: var(--color-foreground);
-}
-
-.veloci-light .react-datetime-picker__button:enabled:hover .react-datetime-picker__button__icon,
-.veloci-light .react-datetime-picker__button:enabled:focus .react-datetime-picker__button__icon,
-.veloci-light .react-datetime-picker__button:hover {
-  stroke: var(--color-accent-100) !important;
-  filter: none;
-}
-
-.veloci-light .react-calendar button:enabled:hover {
-  background-color: var(--color-accent-25);
-  border: none;
-}
-
-.veloci-light .react-calendar__navigation button:disabled,
-.veloci-light .react-calendar__navigation button:enabled:focus {
-  background-color: unset;
-}
-
-.veloci-light .react-calendar__tile:enabled:hover {
-  background-color: var(--color-accent-25);
-  border: none;
-}
-
-.veloci-light .react-calendar .react-calendar__tile--now {
-  background-color: var(--color-accent-50);
-  color: var(--color-foreground);
-}
-
-.veloci-light .react-calendar .react-calendar__tile--active,
-.veloci-light .react-calendar .react-calendar__tile--active:hover {
-  background-color: var(--color-accent-75);
-  font-weight: 700;
-  color: var(--color-foreground-inverse);
-}
-
-.veloci-light .react-calendar__month-view__days__day--neighboringMonth {
-  color: var(--color-btn-border);
 }
 
 .veloci-light .json-expand-button {
@@ -865,4 +852,16 @@ body.veloci-light {
 .veloci-light .json-boolean {
   padding-left: 5px;
   color: #7e57c2;
+}
+
+/* Calendar */
+.veloci-light .calendar-selector:hover {
+  background: var(--color-btn-default-background);
+}
+
+.veloci-light div.calendar-day:hover,
+.veloci-light div.calendar-other-day:hover,
+.veloci-light div.calendar-selected-date {
+  background: var(--color-accent-75);
+  color: var(--color-canvas-background);
 }

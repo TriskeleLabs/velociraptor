@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 func TestJsonlShortcuts(t *testing.T) {
@@ -27,4 +27,24 @@ func TestJsonFormat(t *testing.T) {
 	query := Format(`{"a": %q, "b": %q, "integer": %q, "string": %q, "subquery": %s}`,
 		obj, obj, 1, "hello", subquery)
 	goldie.Assert(t, "TestJsonFormat", []byte(query))
+}
+
+func TestAppendJsonlItem(t *testing.T) {
+	var golden []*ordereddict.Dict
+	for _, in := range []string{
+		"{\"Foo\":1}\n",
+		"{\"Foo\":1}\n{\"Bar\":2}\n{\"Baz\":2}\n",
+
+		// Invalid input
+		"{\"Foo\":1}",
+		"{\"Foo\":1}\n{\"Bar\":2}\n{\"Baz\":2}",
+
+		"",
+	} {
+		golden = append(golden, ordereddict.NewDict().
+			Set("in", in).
+			Set("out", string(AppendJsonlItem([]byte(in), "Extra", 2))))
+	}
+
+	goldie.Assert(t, "TestAppendJsonlItem", MustMarshalIndent(golden))
 }

@@ -9,6 +9,11 @@
     direction: rtl;
 }
 
+.artifact-search-table tr.row-selected td {
+    background-color: var(--color-table-row-selected);
+    color: var(--color-table-row-selected-text);
+}
+
 .artifact-search-table button {
     cursor: pointer;
     width: 100%;
@@ -101,4 +106,10 @@ span.user-edit {
 
 .built-in-icon {
     padding-right: 5px;
+}
+
+.deleting-artifacts {
+    height: 60vh;
+    overflow: auto;
+    display: block;
 }

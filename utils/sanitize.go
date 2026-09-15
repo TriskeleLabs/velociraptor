@@ -50,10 +50,16 @@ func SanitizeString(component string) string {
 		return "%2E" + SanitizeString(component[1:])
 	}
 
+	// Escape components that start with # as the data store
+	// represents those as hashes.
+	if component[0] == '#' {
+		return "%23" + SanitizeString(component[1:])
+	}
+
 	// Windows can not have a trailing "." instead swallowing it
 	// completely.
 	if component[length-1] == '.' {
-		return component[:length-1] + "%2E"
+		return SanitizeString(component[:length-1]) + "%2E"
 	}
 
 	// Prevent components from creating names for files that are
@@ -127,7 +133,7 @@ func SanitizeStringForZip(component string) string {
 		}
 
 		switch char {
-		case '?', '*', ':', '|', '<', '>', '%', '/', '\\':
+		case '?', '"', '*', ':', '|', '<', '>', '%', '/', '\\':
 			escape(char)
 
 		default:
@@ -182,7 +188,7 @@ func UnsanitizeComponent(component string) string {
 		}
 
 		if component[i] == '%' {
-			// A % escape sequece (eg %0d)
+			// A % escape sequence (e.g. %0d)
 			if i+2 < len(component) {
 				result[j] = unhex(component[i+1])<<4 | unhex(component[i+2])
 				i += 3
@@ -209,7 +215,7 @@ func UnsanitizeComponentForZip(component string) string {
 		}
 
 		if component[i] == '%' {
-			// A % escape sequece (eg %0d)
+			// A % escape sequence (e.g. %0d)
 			if i+2 < len(component) {
 				result[j] = unhex(component[i+1])<<4 | unhex(component[i+2])
 				i += 3

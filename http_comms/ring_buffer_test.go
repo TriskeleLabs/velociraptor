@@ -2,7 +2,6 @@ package http_comms
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -14,6 +13,7 @@ import (
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 )
 
 var (
@@ -21,7 +21,7 @@ var (
 )
 
 func getTempFile(t *testing.T) string {
-	fd, err := ioutil.TempFile("", "")
+	fd, err := tempfile.TempFile("")
 	assert.NoError(t, err)
 	defer os.Remove(fd.Name())
 	defer fd.Close()
@@ -42,7 +42,7 @@ func createRB(t *testing.T, filename string) (*FileBasedRingBuffer, *responder.F
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	flow_manager := responder.NewFlowManager(ctx, config_obj)
+	flow_manager := responder.NewFlowManager(ctx, config_obj, "")
 
 	local_buffer_name := getLocalBufferName(config_obj)
 	ring_buffer, err := NewFileBasedRingBuffer(ctx, config_obj,
@@ -87,7 +87,7 @@ func TestRingBuffer(t *testing.T) {
 	st, err := os.Stat(filename)
 	assert.NoError(t, err)
 
-	// Check that there is a single enqued buffer.
+	// Check that there is a single enqueued buffer.
 	assert.Equal(t,
 		FirstRecordOffset+
 			8+ // Length of item
@@ -317,7 +317,7 @@ func TestRingBufferCancellation(t *testing.T) {
 	message_list := &crypto_proto.MessageList{
 		// Add some messages. We filter out large messages for
 		// cancelled flows to preserve bandwidth to the server, but
-		// FlowStats messgaes should still be allowed.
+		// FlowStats messages should still be allowed.
 		Job: []*crypto_proto.VeloMessage{
 			{
 				SessionId: "F.1234" + filename,

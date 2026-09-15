@@ -22,6 +22,7 @@ import {CancelToken} from 'axios';
 import { requestToParameters } from "../flows/utils.jsx";
 import AvailableDownloads from "../notebooks/downloads.jsx";
 
+const POLL_TIME = 5000;
 
 export default class HuntOverview extends React.Component {
     static contextType = UserConfig;
@@ -33,11 +34,16 @@ export default class HuntOverview extends React.Component {
 
     state = {
         preparing: false,
+        full_hunt: undefined,
         lock: false,
     }
 
     componentDidMount = () => {
         this.source = CancelToken.source();
+        this.get_hunts_source = CancelToken.source();
+        this.recalc_source = CancelToken.source();
+        this.interval = setInterval(this.loadFullHunt, POLL_TIME);
+        this.loadFullHunt();
 
         // Default state of the lock is set by the user's preferences.
         let lock_password = this.context.traits &&
@@ -47,6 +53,17 @@ export default class HuntOverview extends React.Component {
 
     componentWillUnmount() {
         this.source.cancel("unmounted");
+        this.get_hunts_source.cancel();
+        this.recalc_source.cancel();
+        clearInterval(this.interval);
+    }
+
+    componentDidUpdate(prevProps, prevState, snapshot) {
+        let current_hunt_id = this.props.hunt && this.props.hunt.hunt_id;
+        let prev_hunt_id = prevProps.hunt && prevProps.hunt.hunt_id;
+        if(current_hunt_id != prev_hunt_id) {
+            this.loadFullHunt();
+        }
     }
 
     huntState = () => {
@@ -63,6 +80,49 @@ export default class HuntOverview extends React.Component {
             return "PAUSED";
         }
         return "ERROR";
+    }
+
+    recalcStats = () =>{
+        let hunt_id = this.props.hunt && this.props.hunt.hunt_id;
+        if(!hunt_id || hunt_id === "new"){
+            return;
+        };
+
+        this.setState({recalc: true});
+        api.post("v1/ModifyHunt", {
+            hunt_id: hunt_id,
+            recalculate: true,
+        }, this.recalc_source.token).then(response=>{
+            this.setState({recalc: false});
+            this.loadFullHunt();
+        }).catch(err=>{
+            this.setState({recalc: false});
+            this.loadFullHunt();
+        });
+    }
+
+
+    loadFullHunt = () => {
+        let hunt_id = this.props.hunt && this.props.hunt.hunt_id;
+        if(!hunt_id || hunt_id === "new"){
+            return;
+        };
+
+        this.get_hunts_source.cancel();
+        this.get_hunts_source = CancelToken.source();
+
+        api.get("v1/GetHunt", {
+            hunt_id: hunt_id,
+            include_truncated_request: true,
+        }, this.get_hunts_source.token).then((response) => {
+            if (response.cancel) return;
+
+            if(_.isEmpty(response.data)) {
+                this.setState({full_hunt: {}});
+            } else {
+                this.setState({full_hunt: response.data});
+            }
+        });
     }
 
     prepareDownload = (download_type) => {
@@ -108,15 +168,15 @@ export default class HuntOverview extends React.Component {
                  this.source.token).then(resp=>{
                      this.setState({preparing: false});
                      this.props.fetch_hunts();
+                     this.loadFullHunt();
         });
     }
 
     render() {
-        let hunt = this.props.hunt;
+        let hunt = this.state.full_hunt || this.props.hunt;
         if (!hunt) {
             return <div>{T("Please select a hunt to view above.")}</div>;
         };
-
         let artifacts = hunt.start_request && hunt.start_request.artifacts;
         artifacts = artifacts || [];
 
@@ -223,7 +283,16 @@ export default class HuntOverview extends React.Component {
               </Col>
               <Col sm="6">
               <Card>
-                  <Card.Header>{T("Results")}</Card.Header>
+                <Card.Header>
+                  {T("Results")}
+                  <Button
+                    className="refresh-stats-button"
+                    onClick={this.recalcStats}
+                    variant="outline-default">
+                    <FontAwesomeIcon icon="refresh"
+                                     spin={this.state.recalc}/>
+                  </Button>
+                </Card.Header>
                 <Card.Body>
                   <dl className="row">
                     <dt className="col-4">{T("Total scheduled")}</dt>
@@ -231,9 +300,20 @@ export default class HuntOverview extends React.Component {
                       {stats.total_clients_scheduled}
                     </dd>
 
-                    <dt className="col-4">{T("Finished clients")}</dt>
+                    <dt className="col-4">{T("Finished")}</dt>
+                    <dd className="col-8">{stats.total_finished_clients || 0}</dd>
+
+                    <dt className="col-4">{T("Clients With Results")}</dt>
                     <dd className="col-8">{stats.total_clients_with_results || 0}</dd>
 
+                    <dt className="col-4">{T("Collected Rows")}</dt>
+                    <dd className="col-8">{stats.total_collected_rows || 0}</dd>
+
+                    <dt className="col-4">{T("Collected Bytes")}</dt>
+                    <dd className="col-8">{stats.total_collected_bytes || 0}</dd>
+
+                    <dt className="col-4">{T("Clients With Error")}</dt>
+                    <dd className="col-8">{stats.total_clients_with_errors || 0}</dd>
 
                     <dt className="col-4">{T("Download Results")}</dt>
                     <dd className="col-8">

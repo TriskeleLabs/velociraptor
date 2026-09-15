@@ -8,13 +8,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/go-errors/errors"
-	"github.com/sebdah/goldie"
-	"github.com/stretchr/testify/assert"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/datastore"
+	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/result_sets"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
+
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/acls"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
@@ -34,6 +41,7 @@ import (
 	// Load plugins (timestamp, parse_csv)
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
+	launcher_mod "www.velocidex.com/golang/velociraptor/services/launcher"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	_ "www.velocidex.com/golang/velociraptor/vql/functions"
 	_ "www.velocidex.com/golang/velociraptor/vql/parsers/csv"
@@ -64,6 +72,13 @@ sources:
 - query:  |
     SELECT * FROM info()
 `
+
+func (self *LauncherTestSuite) SetupTest() {
+	self.ConfigObj = self.TestSuite.LoadConfig()
+	self.ConfigObj.Services.ServerArtifacts = true
+
+	self.TestSuite.SetupTest()
+}
 
 func (self *LauncherTestSuite) TestCompilingWithTools() {
 	// Our tool binary and its hash.
@@ -106,23 +121,23 @@ func (self *LauncherTestSuite) TestCompilingWithTools() {
 	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	compiled, err := launcher.CompileCollectorArgs(ctx, self.ConfigObj,
+	_, err = launcher.CompileCollectorArgs(ctx, self.ConfigObj,
 		acl_manager, repository, services.CompilerOptions{}, request)
 	assert.Error(self.T(), err)
 
 	// Now make the tool download succeed. Compiling should work
 	// and we should calculate the hash.
 	status = 200
-	compiled, err = launcher.CompileCollectorArgs(
+	_, err = launcher.CompileCollectorArgs(
 		ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.NoError(self.T(), err)
 
-	// Now that we already know the hash, we dont care about
+	// Now that we already know the hash, we don't care about
 	// downloading the file ourselves - further compiles will work
 	// automatically.
 	status = 404
-	compiled, err = launcher.CompileCollectorArgs(
+	compiled, err := launcher.CompileCollectorArgs(
 		ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.NoError(self.T(), err)
@@ -134,7 +149,7 @@ func (self *LauncherTestSuite) TestCompilingWithTools() {
 	assert.Equal(self.T(), getEnvValue(compiled[0].Env, "Tool_Tool1_FILENAME"), "mytool.exe")
 	assert.Equal(self.T(), getEnvValue(compiled[0].Env, "Tool_Tool1_URL"), tool_url)
 
-	assert.Equal(self.T(), len(compiled[0].Query), 2)
+	assert.Equal(self.T(), len(compiled[0].Query), 1)
 
 	// Now serve the tool from Velociraptor's public directory
 	// instead.
@@ -392,8 +407,8 @@ func (self *LauncherTestSuite) TestCompiling() {
 	assert.Equal(self.T(), compiled[0].Timeout, request.Timeout)
 
 	// Compile into 2 queries, the last have a valid Name field.
-	assert.Equal(self.T(), len(compiled[0].Query), 2)
-	assert.NotEqual(self.T(), compiled[0].Query[1].Name, "")
+	assert.Equal(self.T(), len(compiled[0].Query), 1)
+	assert.NotEqual(self.T(), compiled[0].Query[0].Name, "")
 }
 
 var CompilingMultipleArtifacts = []string{
@@ -410,6 +425,21 @@ sources:
     SELECT * FROM info()
 `, `
 name: Test.Artifact2
+parameters:
+ - name: Foo
+   default: Foo2
+
+sources:
+- query:  |
+    SELECT * FROM info()
+`, `
+name: Test.ArtifactResources
+resources:
+ timeout: 250
+ cpu_limit: 20
+ max_batch_rows: 256
+ max_batch_wait: 101
+
 parameters:
  - name: Foo
    default: Foo2
@@ -469,7 +499,58 @@ func (self *LauncherTestSuite) TestCompilingMultipleArtifacts() {
 	assert.Equal(self.T(), compiled[1].Env[0].Value, "Foo2")
 }
 
-// Server events need to be compiled slighly differently - each source
+func (self *LauncherTestSuite) TestCompilingMultipleLimitedArtifacts() {
+	repository := self.LoadArtifacts(CompilingMultipleArtifacts...)
+
+	// The artifact compiler converts artifacts into a VQL request
+	// to be run by the clients.
+	request := &flows_proto.ArtifactCollectorArgs{
+		Creator:   "UserX",
+		ClientId:  "C.1234",
+		Artifacts: []string{"Test.Artifact", "Test.ArtifactResources"},
+		Specs: []*flows_proto.ArtifactSpec{
+			{
+				// Here we specify limits in the artifact spec.
+				Artifact: "Test.Artifact",
+				Parameters: &flows_proto.ArtifactParameters{
+					Env: []*actions_proto.VQLEnv{
+						{Key: "Foo", Value: "Foo1"},
+					},
+				},
+				CpuLimit:           12,
+				MaxBatchRows:       200,
+				MaxBatchRowsBuffer: 300,
+				MaxBatchWait:       400,
+				Timeout:            500,
+			},
+			{
+				// This one specified limits in the artifact
+				// definition.
+				Artifact: "Test.ArtifactResources",
+				Parameters: &flows_proto.ArtifactParameters{
+					Env: []*actions_proto.VQLEnv{
+						{Key: "Foo", Value: "Foo2"},
+					},
+				},
+			},
+		},
+	}
+	ctx := context.Background()
+	acl_manager := acl_managers.NullACLManager{}
+
+	launcher, err := services.GetLauncher(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
+	compiled, err := launcher.CompileCollectorArgs(
+		ctx, self.ConfigObj, acl_manager, repository,
+		services.CompilerOptions{}, request)
+	assert.NoError(self.T(), err)
+
+	goldie.Assert(self.T(), "TestCompilingMultipleLimitedArtifacts",
+		json.MustMarshalIndent(compiled))
+}
+
+// Server events need to be compiled slightly differently - each source
 // needs to run in its own goroutine.
 func (self *LauncherTestSuite) TestCompilingServerEvents() {
 	definitions := []string{`
@@ -525,7 +606,8 @@ sources:
 
 	// The parameters (Env) and type conversion preamble should be
 	// duplicated across both VQLCollectorArgs instances.
-	goldie.Assert(self.T(), "TestCompilingServerEvents", json.MustMarshalIndent(compiled))
+	goldie.Assert(self.T(), "TestCompilingServerEvents",
+		json.MustMarshalIndent(compiled))
 }
 
 func (self *LauncherTestSuite) TestCompilingObfuscation() {
@@ -551,7 +633,8 @@ func (self *LauncherTestSuite) TestCompilingObfuscation() {
 			ObfuscateNames: false,
 		}, request)
 	assert.NoError(self.T(), err)
-	assert.Equal(self.T(), compiled[0].Query[1].Name, "Test.Artifact")
+	assert.Equal(self.T(), 1, len(compiled))
+	assert.Equal(self.T(), compiled[0].Query[0].Name, "Test.Artifact")
 }
 
 func (self *LauncherTestSuite) TestCompilingPermissions() {
@@ -588,7 +671,7 @@ sources:
 	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	compiled, err := launcher.CompileCollectorArgs(
+	_, err = launcher.CompileCollectorArgs(
 		ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.Error(self.T(), err)
@@ -601,11 +684,11 @@ sources:
 
 	// Should be fine now.
 	acl_manager = acl_managers.NewServerACLManager(self.ConfigObj, "UserX")
-	compiled, err = launcher.CompileCollectorArgs(
+	compiled, err := launcher.CompileCollectorArgs(
 		ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.NoError(self.T(), err)
-	assert.Equal(self.T(), len(compiled[0].Query), 2)
+	assert.Equal(self.T(), len(compiled[0].Query), 1)
 }
 
 func (self *LauncherTestSuite) TestBasicPermissions() {
@@ -633,7 +716,7 @@ sources:
 	launcher, err := services.GetLauncher(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	compiled, err := launcher.CompileCollectorArgs(
+	_, err = launcher.CompileCollectorArgs(
 		self.Ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.Error(self.T(), err)
@@ -646,7 +729,7 @@ sources:
 
 	// Try again - this is not enough though because the artifact is
 	// not marked as "basic"
-	compiled, err = launcher.CompileCollectorArgs(
+	_, err = launcher.CompileCollectorArgs(
 		self.Ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.Error(self.T(), err)
@@ -665,11 +748,11 @@ sources:
 
 	// Should be fine now.
 	acl_manager = acl_managers.NewServerACLManager(self.ConfigObj, "UserX")
-	compiled, err = launcher.CompileCollectorArgs(
+	compiled, err := launcher.CompileCollectorArgs(
 		self.Ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
 	assert.NoError(self.T(), err)
-	assert.Equal(self.T(), len(compiled[0].Query), 2)
+	assert.Equal(self.T(), len(compiled[0].Query), 1)
 }
 
 func (self *LauncherTestSuite) TestParameterTypes() {
@@ -900,7 +983,7 @@ func (self *LauncherTestSuite) TestParameterTypesDepsQuery() {
 	defer scope.Close()
 
 	// Passing types parameters to artifact plugin should pass
-	// them without interferance.
+	// them without interference.
 	queries := []string{
 		"SELECT BoolValue FROM Artifact.Test.Artifact.Types(BoolValue=0)",
 		"SELECT BoolValue FROM Artifact.Test.Artifact.Types(BoolValue=1)",
@@ -1204,6 +1287,8 @@ sources:
 	// Specifying timeout in the request overrides all defaults.
 	request.Timeout = 20
 	request.MaxRows = 100
+	request.ProgressTimeout = 21
+
 	compiled, err = launcher.CompileCollectorArgs(
 		ctx, self.ConfigObj, acl_manager, repository,
 		services.CompilerOptions{}, request)
@@ -1213,6 +1298,7 @@ sources:
 
 	assert.Equal(self.T(), getReqName(compiled[1]), "Test.Artifact.MaxRows")
 	assert.Equal(self.T(), compiled[1].Timeout, uint64(20))
+	assert.Equal(self.T(), compiled[1].ProgressTimeout, float32(21))
 
 	// Specifying MaxRows in the request overrides the setting.
 	assert.Equal(self.T(), request.MaxRows, uint64(100))
@@ -1315,6 +1401,172 @@ func getReqName(in *actions_proto.VQLCollectorArgs) string {
 		}
 	}
 	return ""
+}
+
+func (self *LauncherTestSuite) TestDelete() {
+	assert.Retry(self.T(), 10, time.Second, self._TestDelete)
+}
+
+func (self *LauncherTestSuite) _TestDelete(t *assert.R) {
+	launcher, err := services.GetLauncher(self.ConfigObj)
+	assert.NoError(t, err)
+
+	flow_id := "F.FlowId123"
+	user := "admin"
+
+	manager, _ := services.GetRepositoryManager(self.ConfigObj)
+	repository, _ := manager.GetGlobalRepository(self.ConfigObj)
+	acl_manager := acl_managers.NullACLManager{}
+
+	defer utils.SetFlowIdForTests(flow_id)()
+
+	res, err := launcher.GetFlows(self.Ctx, self.ConfigObj,
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+		result_sets.ResultSetOptions{},
+		services.GetFlowOptions{},
+		0, 10)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(res.Items))
+
+	// Schedule a job for the server runner.
+	flow_id, err = launcher.ScheduleArtifactCollection(
+		self.Ctx, self.ConfigObj, acl_manager,
+		repository, &flows_proto.ArtifactCollectorArgs{
+			Creator:   user,
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			Artifacts: []string{"Generic.Client.Info"},
+		}, utils.SyncCompleter)
+
+	assert.NoError(t, err)
+
+	res, err = launcher.GetFlows(self.Ctx, self.ConfigObj,
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+		result_sets.ResultSetOptions{},
+		services.GetFlowOptions{},
+		0, 10)
+	assert.NoError(t, err)
+	assert.Equal(t, len(res.Items), 1)
+	assert.Equal(t, res.Items[0].SessionId, flow_id)
+
+	// Now delete the flow asynchronously
+	_, err = launcher.Storage().DeleteFlow(
+		self.Ctx, self.ConfigObj,
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+		flow_id, constants.PinnedServerName,
+		services.DeleteFlowOptions{
+			ReallyDoIt: true,
+			Sync:       false,
+		})
+	assert.NoError(t, err)
+
+	// Index is not updated yet
+	idx := self.getIndex(constants.VELOCIRAPTOR_SERVER_CLIENT_ID)
+	assert.Equal(t, len(idx), 1)
+	idx_flow_id, _ := idx[0].GetString("FlowId")
+	assert.Equal(t, flow_id, idx_flow_id)
+
+	datastore.FlushDatastore(self.ConfigObj)
+
+	// However GetFlows omits the deleted flow immediately because it
+	// can not find it (The actual flow object is removed but the
+	// index is out of step).
+	vtesting.WaitUntil(10*time.Second, t, func() bool {
+		// Force the housekeep thread to run immediately.
+		launcher.Storage().(*launcher_mod.FlowStorageManager).
+			RemoveFlowsFromJournal(self.Ctx, self.ConfigObj)
+
+		datastore.FlushDatastore(self.ConfigObj)
+
+		res, err = launcher.GetFlows(self.Ctx, self.ConfigObj,
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			result_sets.ResultSetOptions{},
+			services.GetFlowOptions{},
+			0, 10)
+		assert.NoError(t, err)
+		time.Sleep(time.Second)
+		return len(res.Items) == 0
+	})
+	assert.Equal(t, len(res.Items), 0)
+
+	// Create the flow again
+	new_flow_id, err := launcher.ScheduleArtifactCollection(
+		self.Ctx, self.ConfigObj, acl_manager,
+		repository, &flows_proto.ArtifactCollectorArgs{
+			Creator:   user,
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			Artifacts: []string{"Generic.Client.Info"},
+		}, utils.SyncCompleter)
+	assert.NoError(t, err)
+	assert.Equal(t, new_flow_id, flow_id)
+
+	// Now delete the flow synchronously
+	_, err = launcher.Storage().DeleteFlow(
+		self.Ctx, self.ConfigObj,
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+		flow_id, constants.PinnedServerName,
+		services.DeleteFlowOptions{
+			ReallyDoIt: true,
+			Sync:       true,
+		})
+	assert.NoError(t, err)
+
+	datastore.FlushDatastore(self.ConfigObj)
+
+	// This time the index is reset immediately.
+	idx = self.getIndex(constants.VELOCIRAPTOR_SERVER_CLIENT_ID)
+	assert.Equal(t, len(idx), 0)
+}
+
+func (self *LauncherTestSuite) getIndex(client_id string) (
+	res []*ordereddict.Dict) {
+
+	client_path_manager := paths.NewClientPathManager(client_id)
+	file_store_factory := file_store.GetFileStore(self.ConfigObj)
+	rs_reader, err := result_sets.NewResultSetReader(file_store_factory,
+		client_path_manager.FlowIndex())
+	if err != nil {
+		return nil
+	}
+	defer rs_reader.Close()
+
+	for r := range rs_reader.Rows(self.Ctx) {
+		res = append(res, r)
+	}
+	return res
+}
+
+func (self *LauncherTestSuite) TestScheduleHugeArtifact() {
+	t := self.T()
+
+	flow_id := "F.FlowIdHuge"
+
+	launcher, err := services.GetLauncher(self.ConfigObj)
+	assert.NoError(t, err)
+
+	repository := self.LoadArtifacts(DependentArtifacts...)
+	acl_manager := acl_managers.NullACLManager{}
+
+	defer utils.SetFlowIdForTests(flow_id)()
+
+	_, err = launcher.ScheduleArtifactCollection(
+		self.Ctx, self.ConfigObj, acl_manager,
+		repository, &flows_proto.ArtifactCollectorArgs{
+			Creator:   "admin",
+			ClientId:  constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			Artifacts: []string{"Test.Artifact"},
+			Specs: []*flows_proto.ArtifactSpec{{
+				Artifact: "Test.Artifact",
+				Parameters: &flows_proto.ArtifactParameters{
+					Env: []*actions_proto.VQLEnv{{
+						Key:   "Foo",
+						Value: strings.Repeat("Hello", 1024*1024),
+					}},
+				},
+			}},
+		}, utils.SyncCompleter)
+
+	assert.Error(t, err)
+	assert.True(self.T(), errors.Is(err, utils.MemoryError))
 }
 
 func TestLauncher(t *testing.T) {

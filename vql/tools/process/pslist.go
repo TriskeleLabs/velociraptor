@@ -26,18 +26,14 @@ func (self _ProcessTrackerPsList) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("process_tracker_pslist", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "process_tracker_pslist", args)()
 
 		for _, proc := range GetGlobalTracker().Processes(ctx, scope) {
 			select {
 			case <-ctx.Done():
 				return
 
-			case output_chan <- proc.Data.
-				Update("Pid", proc.Id).
-				Update("Ppid", proc.ParentId).
-				Update("StartTime", proc.StartTime).
-				Update("EndTime", proc.EndTime):
+			case output_chan <- proc.Data():
 			}
 		}
 	}()

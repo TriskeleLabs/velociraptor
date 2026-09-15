@@ -3,6 +3,7 @@ import hex2a from "./utils";
 import React from 'react';
 import Alert from 'react-bootstrap/Alert';
 import humanizeDuration from "humanize-duration";
+import api from '../core/api-service.jsx';
 
 import automated from "./por.json";
 
@@ -381,10 +382,10 @@ const Portuguese = {
     em seu próprio disco e depois compara seu hash quando necessário.
     As ferramentas só serão baixadas se o hash mudar.
         </>,
-    "ServedFromURL": (base_path, url)=>
+    "ServedFromURL": (url)=>
     <>
       Os clientes obtêm a ferramenta diretamente
-      de <a href={base_path + url}>{url}</a> se
+      de <a href={api.href(url)}>{url}</a> se
       necessário. Observe que, se o hash não corresponder ao
       hash esperado, os clientes rejeitarão o arquivo.
     </>,
@@ -629,7 +630,6 @@ const Portuguese = {
     "Role_artifact_writer": "Escritor de artefato",
      "Role_api": "Cliente de API somente leitura",
 
-    "Perm_ALL_QUERY": "Todas as Consultas",
      "Perm_ANY_QUERY": "Qualquer consulta",
      "Perm_PUBISH": "Publicar",
      "Perm_READ_RESULTS": "Ler resultados",
@@ -650,9 +650,7 @@ const Portuguese = {
      "Perm_PREPARE_RESULTS": "Preparar resultados",
      "Perm_DATASTORE_ACCESS": "Acesso ao armazenamento de dados",
 
-
-     "ToolPerm_ALL_QUERY": "Emitir todas as consultas sem restrição",
-     "ToolPerm_ANY_QUERY": "Emitir qualquer consulta (AllQuery implica AnyQuery)",
+     "ToolPerm_ANY_QUERY": "Emitir qualquer consulta ",
      "ToolPerm_PUBISH": "Publicar eventos em filas do lado do servidor (normalmente não é necessário)",
      "ToolPerm_READ_RESULTS": "Ler resultados de buscas, fluxos ou notebooks já executados",
      "ToolPerm_LABEL_CLIENT": "Pode manipular rótulos e metadados do cliente",

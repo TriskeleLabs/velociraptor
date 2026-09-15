@@ -18,7 +18,7 @@ func Walk(
 	walkFn WalkFunc) error {
 	children, err := file_store.ListDirectory(root)
 	if err != nil {
-		// Walking a non existant directory just ignores it.
+		// Walking a non-existent directory just ignores it.
 		return nil
 	}
 
@@ -39,4 +39,14 @@ func Walk(
 	}
 
 	return nil
+}
+
+func RecursiveDelete(
+	file_store FileStore, root FSPathSpec) error {
+	return Walk(file_store, root,
+		func(path FSPathSpec, info os.FileInfo) error {
+			// Ignore errors so we can keep going as much as possible.
+			_ = file_store.Delete(path)
+			return nil
+		})
 }

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -24,6 +24,7 @@ package plugins
 import (
 	_ "www.velocidex.com/golang/velociraptor/vql/aggregates"
 	_ "www.velocidex.com/golang/velociraptor/vql/common"
+	_ "www.velocidex.com/golang/velociraptor/vql/debug"
 	_ "www.velocidex.com/golang/velociraptor/vql/efi"
 	_ "www.velocidex.com/golang/velociraptor/vql/filesystem"
 	_ "www.velocidex.com/golang/velociraptor/vql/functions"
@@ -43,6 +44,12 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/vql/sigma"
 	_ "www.velocidex.com/golang/velociraptor/vql/tools"
 	_ "www.velocidex.com/golang/velociraptor/vql/tools/collector"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/dns"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/index"
 	_ "www.velocidex.com/golang/velociraptor/vql/tools/logscale"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/lru"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/packaging"
 	_ "www.velocidex.com/golang/velociraptor/vql/tools/process"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/rsyslog"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/shell"
 )

@@ -15,10 +15,14 @@ import (
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
+	"www.velocidex.com/golang/velociraptor/executor/throttler"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
@@ -68,9 +72,16 @@ func NewCollectionContextManager(
 	CollectionContextManager, error) {
 
 	flow_id := collection_context.SessionId
+
+	// The cancel is actually embedded in the CollectionContextManager
+	// and will be closed when Close() is called.
+
+	//nolint:govet
 	sub_ctx, cancel := context.WithCancel(ctx)
+
 	log_writer, err := NewServerLogWriter(sub_ctx, config_obj, flow_id)
 	if err != nil {
+		//nolint:govet
 		return nil, err
 	}
 
@@ -144,7 +155,7 @@ func (self *contextManager) GetQueryContext(
 
 	// Get the base name of the artifact
 	artifact_name := artifacts.DeobfuscateString(
-		self.config_obj, actions.GetQueryName(query.Query))
+		self.config_obj, utils.GetQueryName(query.Query))
 	base, _ := paths.SplitFullSourceName(artifact_name)
 
 	// Will be done when query is closed.
@@ -202,11 +213,20 @@ func (self *contextManager) StartRefresh(wg *sync.WaitGroup) {
 		for {
 			select {
 			case <-self.sub_ctx.Done():
-				self.Save()
+				err := self.Save()
+				if err != nil {
+					logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+					logger.Error("<red>contextManager Save</> %v", err)
+				}
 				return
 
 			case <-time.After(utils.Jitter(time.Duration(10) * time.Second)):
-				self.Save()
+				err := self.Save()
+				if err != nil {
+					logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+					logger.Error("<red>contextManager Save</> %v", err)
+				}
+
 			}
 		}
 	}()
@@ -222,7 +242,8 @@ func (self *contextManager) Load() error {
 	}
 
 	details, err := launcher.GetFlowDetails(
-		self.ctx, self.config_obj, self.context.ClientId, self.context.SessionId)
+		self.ctx, self.config_obj, services.GetFlowOptions{},
+		self.context.ClientId, self.context.SessionId)
 	if err != nil {
 		return err
 	}
@@ -254,7 +275,13 @@ func (self *contextManager) Save() error {
 
 	return launcher.Storage().WriteFlow(
 		self.ctx, // Write with parent context as query may have cancelled.
-		self.config_obj, context, utils.BackgroundWriter)
+		self.config_obj, context,
+
+		services.GetFlowOptions{
+			// Request was not modified, don't touch it.
+			Request: false,
+		},
+		utils.BackgroundWriter)
 }
 
 func (self *contextManager) Cancel(ctx context.Context, principal string) {
@@ -299,21 +326,32 @@ func (self *contextManager) maybeSendCompletionMessage(ctx context.Context) {
 
 	// Write the context synchronously because listeners may be wait
 	// for the messages.
-	launcher.Storage().WriteFlow(
-		ctx, self.config_obj, flow_context, utils.SyncCompleter)
+	err = launcher.Storage().WriteFlow(
+		ctx, self.config_obj, flow_context,
+		services.GetFlowOptions{
+			// Request was not modified, don't touch it.
+			Request: false,
+		},
+		utils.SyncCompleter)
+	if err != nil {
+		logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+		logger.Error("<red>maybeSendCompletionMessage WriteFlow</> %v", err)
+	}
 
 	row := ordereddict.NewDict().
 		Set("Timestamp", utils.GetTime().Now().UTC().Unix()).
 		Set("Flow", flow_context).
 		Set("FlowId", self.session_id).
-		Set("ClientId", "server")
+		Set("ClientId", constants.VELOCIRAPTOR_SERVER_CLIENT_ID)
 
 	journal, err := services.GetJournal(self.config_obj)
 	if err != nil {
 		return
 	}
-	journal.PushRowsToArtifactAsync(ctx, self.config_obj,
-		row, "System.Flow.Completion")
+	journal.PushRowsToArtifactAsync(
+		ctx, self.config_obj, row,
+		artifact_paths.FLOW_COMPLETION.WithClientId(
+			constants.VELOCIRAPTOR_SERVER_CLIENT_ID))
 }
 
 func (self *contextManager) RunQuery(
@@ -358,7 +396,14 @@ func (self *contextManager) RunQuery(
 		return errors.New("Principal must be set")
 	}
 
-	flow_path_manager := paths.NewFlowPathManager("server", self.session_id)
+	// Allow the query to run as a different user.
+	effective_principal := arg.EffectivePrincipal
+	if effective_principal == "" {
+		effective_principal = principal
+	}
+
+	flow_path_manager := paths.NewFlowPathManager(
+		constants.VELOCIRAPTOR_SERVER_CLIENT_ID, self.session_id)
 	scope := manager.BuildScope(services.ScopeBuilder{
 		Config: self.config_obj,
 
@@ -371,12 +416,22 @@ func (self *contextManager) RunQuery(
 
 		// Run this query on behalf of the caller so they are
 		// subject to ACL checks
-		ACLManager: acl_managers.NewServerACLManager(self.config_obj, principal),
+		ACLManager: acl_managers.NewServerACLManager(self.config_obj, effective_principal),
 		Logger:     log.New(query_context.Logger(), "", 0),
 	})
 	defer scope.Close()
 
-	scope.Log("Running query on behalf of user %v", principal)
+	// Add some additional context for debugging
+	artifact_name := artifacts.DeobfuscateString(
+		self.config_obj, utils.GetQueryName(arg.Query))
+	scope.SetContext(constants.SCOPE_QUERY_NAME, artifact_name)
+
+	if effective_principal == principal {
+		scope.Log("Running query %v on behalf of user %v", artifact_name, principal)
+	} else {
+		scope.Log("Running query %v on behalf of user %v with effective permissions for %v",
+			artifact_name, principal, effective_principal)
+	}
 
 	env := ordereddict.NewDict()
 	for _, env_spec := range arg.Env {
@@ -393,14 +448,14 @@ func (self *contextManager) RunQuery(
 		}
 	}()
 
-	scope.Log("<green>Starting</> query execution.")
+	scope.Log("<green>Starting</> query %v execution.", artifact_name)
 
 	rate := arg.OpsPerSecond
 	cpu_limit := arg.CpuLimit
 	iops_limit := arg.IopsLimit
 
-	throttler := actions.NewThrottler(self.ctx, scope, float64(rate),
-		float64(cpu_limit), float64(iops_limit))
+	throttler, closer := throttler.NewThrottler(self.ctx, scope, self.config_obj,
+		float64(rate), float64(cpu_limit), float64(iops_limit))
 
 	if arg.ProgressTimeout > 0 {
 		duration := time.Duration(arg.ProgressTimeout) * time.Second
@@ -409,6 +464,11 @@ func (self *contextManager) RunQuery(
 		scope.Log("query: Installing a progress alarm for %v", duration)
 	}
 	scope.SetThrottler(throttler)
+	err = scope.AddDestructor(closer)
+	if err != nil {
+		closer()
+		return err
+	}
 
 	// All the queries will use the same scope. This allows one
 	// query to define functions for the next query in order.
@@ -429,7 +489,7 @@ func (self *contextManager) RunQuery(
 		if query.Name == "" {
 			// Drain the query but do not relay any data back. These
 			// are normally LET queries.
-			for _ = range vql.Eval(sub_ctx, scope) {
+			for range vql.Eval(sub_ctx, scope) {
 			}
 			query_log.Close()
 			continue
@@ -444,7 +504,8 @@ func (self *contextManager) RunQuery(
 		opts := vql_subsystem.EncOptsFromScope(scope)
 
 		artifact_path_manager := artifact_paths.NewArtifactPathManagerWithMode(
-			self.config_obj, "server", self.session_id, name, paths.MODE_SERVER)
+			self.config_obj, constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			self.session_id, name, artifact_modes.MODE_SERVER)
 		file_store_factory := file_store.GetFileStore(self.config_obj)
 		rs_writer, err = result_sets.NewResultSetWriter(
 			file_store_factory, artifact_path_manager.Path(), opts,

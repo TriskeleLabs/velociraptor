@@ -8,7 +8,6 @@ import (
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vql_utils "www.velocidex.com/golang/velociraptor/vql/utils"
 	"www.velocidex.com/golang/vfilter"
@@ -18,7 +17,7 @@ import (
 type AddClientMonitoringFunctionArgs struct {
 	Artifact   string           `vfilter:"required,field=artifact,doc=The name of the artifact to add"`
 	Parameters vfilter.LazyExpr `vfilter:"optional,field=parameters,doc=A dict of artifact parameters"`
-	Label      string           `vfilter:"optional,field=label,doc=Add this artifact to this label group (default all)"`
+	Label      string           `vfilter:"optional,field=label,doc=Add the artifact to this label group (default all)"`
 }
 
 type AddClientMonitoringFunction struct{}
@@ -103,17 +102,16 @@ func (self AddClientMonitoringFunction) Call(
 			return vfilter.Null{}
 		}
 
-		for _, k := range params_dict.Keys() {
-			v, _ := params_dict.Get(k)
-			v_str, ok := v.(string)
+		for _, i := range params_dict.Items() {
+			v_str, ok := i.Value.(string)
 			if !ok {
 				scope.Log(
 					"add_client_monitoring: parameter %v should has a string value",
-					k)
+					i.Key)
 				return vfilter.Null{}
 			}
 			new_specs.Parameters.Env = append(new_specs.Parameters.Env,
-				&actions_proto.VQLEnv{Key: k, Value: v_str})
+				&actions_proto.VQLEnv{Key: i.Key, Value: v_str})
 		}
 	}
 
@@ -136,7 +134,7 @@ func (self AddClientMonitoringFunction) Info(scope vfilter.Scope, type_map *vfil
 		Name:     "add_client_monitoring",
 		Doc:      "Adds a new artifact to the client monitoring table.",
 		ArgType:  type_map.AddType(scope, &AddClientMonitoringFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.COLLECT_CLIENT).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.COLLECT_CLIENT).Build(),
 	}
 }
 
@@ -267,17 +265,16 @@ func (self AddServerMonitoringFunction) Call(
 		}
 	}
 
-	for _, k := range params_dict.Keys() {
-		v, _ := params_dict.Get(k)
-		v_str, ok := v.(string)
+	for _, i := range params_dict.Items() {
+		v_str, ok := i.Value.(string)
 		if !ok {
 			scope.Log(
 				"add_server_monitoring: parameter %v should has a string value",
-				k)
+				i.Key)
 			return vfilter.Null{}
 		}
 		new_specs.Parameters.Env = append(new_specs.Parameters.Env,
-			&actions_proto.VQLEnv{Key: k, Value: v_str})
+			&actions_proto.VQLEnv{Key: i.Key, Value: v_str})
 	}
 	event_config.Specs = append(event_config.Specs, new_specs)
 
@@ -297,7 +294,7 @@ func (self AddServerMonitoringFunction) Info(scope vfilter.Scope, type_map *vfil
 		Name:     "add_server_monitoring",
 		Doc:      "Adds a new artifact to the server monitoring table.",
 		ArgType:  type_map.AddType(scope, &AddServerMonitoringFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.COLLECT_SERVER).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.COLLECT_SERVER).Build(),
 	}
 }
 

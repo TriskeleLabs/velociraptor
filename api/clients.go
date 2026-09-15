@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -27,12 +27,16 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 func (self *ApiServer) GetClientMetadata(
 	ctx context.Context,
 	in *api_proto.GetClientRequest) (*api_proto.ClientMetadata, error) {
+
+	defer Instrument("GetClientMetadata")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -42,7 +46,7 @@ func (self *ApiServer) GetClientMetadata(
 
 	user_name := user_record.Name
 	permissions := acls.READ_RESULTS
-	if in.ClientId == "server" {
+	if in.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		permissions = acls.SERVER_ADMIN
 	}
 
@@ -70,15 +74,12 @@ func (self *ApiServer) GetClientMetadata(
 		return nil, Status(self.verbose, err)
 	}
 
-	for _, k := range client_metadata.Keys() {
-		v, _ := client_metadata.GetString(k)
-		if v != "" {
-			result.Items = append(result.Items,
-				&api_proto.ClientMetadataItem{
-					Key:   k,
-					Value: v,
-				})
-		}
+	for _, i := range client_metadata.Items() {
+		result.Items = append(result.Items,
+			&api_proto.ClientMetadataItem{
+				Key:   i.Key,
+				Value: utils.ToString(i.Value),
+			})
 	}
 
 	return result, nil
@@ -87,6 +88,8 @@ func (self *ApiServer) GetClientMetadata(
 func (self *ApiServer) SetClientMetadata(
 	ctx context.Context,
 	in *api_proto.SetClientMetadataRequest) (*emptypb.Empty, error) {
+
+	defer Instrument("SetClientMetadata")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)
@@ -119,13 +122,16 @@ func (self *ApiServer) SetClientMetadata(
 		}
 	}
 
-	err = client_info_manager.SetMetadata(ctx, in.ClientId, metadata, user_name)
+	err = client_info_manager.SetMetadata(
+		ctx, in.ClientId, metadata, user_name)
 	return &emptypb.Empty{}, Status(self.verbose, err)
 }
 
 func (self *ApiServer) GetClient(
 	ctx context.Context,
 	in *api_proto.GetClientRequest) (*api_proto.ApiClient, error) {
+
+	defer Instrument("GetClient")()
 
 	users := services.GetUserManager()
 	user_record, org_config_obj, err := users.GetUserFromContext(ctx)

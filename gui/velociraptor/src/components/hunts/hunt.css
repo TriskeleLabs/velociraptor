@@ -16,3 +16,13 @@ div .hunt-status-icon {
 .org-selector {
     flex: 1 1 auto;
 }
+
+.delete-hunt-table {
+    overflow-y: auto;
+    max-height: 60vh;
+}
+
+.refresh-stats-button {
+    padding: 0;
+    margin-left: 20px;
+}

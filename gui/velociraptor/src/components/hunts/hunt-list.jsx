@@ -13,19 +13,25 @@ import ToolTip from '../widgets/tooltip.jsx';
 import Row from 'react-bootstrap/Row';
 import Col from 'react-bootstrap/Col';
 import Alert from 'react-bootstrap/Alert';
+import { EditNotebook } from '../notebooks/new-notebook.jsx';
+import Spinner from '../utils/spinner.jsx';
 
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { withRouter } from "react-router-dom";
 
+import VeloTable from '../core/table.jsx';
+
 import VeloForm from '../forms/form.jsx';
-import VeloPagedTable, { TablePaginationControl } from '../core/paged-table.jsx';
+import VeloPagedTable, {
+    TablePaginationControl,
+    TransformViewer,
+} from '../core/paged-table.jsx';
 
 import NewHuntWizard from './new-hunt.jsx';
 import DeleteNotebookDialog from '../notebooks/notebook-delete.jsx';
 import ExportNotebook from '../notebooks/export-notebook.jsx';
 import T from '../i8n/i8n.jsx';
 import UserConfig from '../core/user.jsx';
-
 import api from '../core/api-service.jsx';
 import {CancelToken} from 'axios';
 
@@ -42,6 +48,8 @@ const SLIDE_STATES = [{
 
 const POLL_TIME = 5000;
 
+
+
 class ModifyHuntDialog extends React.Component {
     static contextType = UserConfig;
 
@@ -53,15 +61,39 @@ class ModifyHuntDialog extends React.Component {
 
     state = {
         description: "",
+
+        // In RFC3339
         expires: "",
+
+        // All the tags we know about from all hunts
+        all_tags: [],
+
+        // Tags to be assigned to the hunt
         tags: [],
+
+        // Take a snapshot of the hunt. We compare the updated status
+        // to this snapshot to figure out the mutation.
+        hunt: {},
     }
 
+    // Fetch all available tags to prefill the selector box.
     getTags = ()=>{
         api.get("v1/GetHuntTags", {}, this.source.token).then(response=>{
                 if (response && response.data &&
                     response.data.tags && response.data.tags.length) {
-                    this.setState({tags: response.data.tags});
+                    this.setState({
+                        all_tags: response.data.tags,
+                    });
+
+                    // Prefill the current set of tags for this hunt.
+                    let hunt = this.props.hunt;
+                    if(hunt) {
+                        let tags = this.props.hunt.tags || [];
+                        this.setState({
+                            tags: [...tags],
+                            hunt: this.props.hunt,
+                        });
+                    }
                 };
         });
     }
@@ -69,6 +101,11 @@ class ModifyHuntDialog extends React.Component {
     componentDidMount = () => {
         this.source = CancelToken.source();
         this.getTags();
+        let tags = this.props.hunt && this.props.hunt.tags;
+        this.setState({
+            tags: tags || [],
+            hunt: this.props.hunt,
+        });
     }
 
     componentWillUnmount() {
@@ -87,13 +124,21 @@ class ModifyHuntDialog extends React.Component {
         let hunt_id = this.props.hunt &&
             this.props.hunt.hunt_id;
 
-        let description = this.state.description || this.props.hunt.hunt_description;
-        let tags = this.state.tags || this.props.hunt.tags || [];
+        let description = this.state.description ||
+            this.props.hunt.hunt_description;
 
         if (!hunt_id) { return; };
 
+        let tags = this.state.tags;
+        let old_tags = this.props.hunt.tags;
+
+        // The user wants to completely clear the tags.
+        if(tags.length == 0 && old_tags.length > 0) {
+            tags = ["-"];  // Special label means clear all.
+        }
+
         api.post("v1/ModifyHunt", {
-            hunt_description: description,
+            description: description,
             tags: tags,
             expires: this.getExpiryEpoch() * 1000000,
             hunt_id: hunt_id,
@@ -103,16 +148,20 @@ class ModifyHuntDialog extends React.Component {
     }
 
     render() {
+        if(_.isEmpty(this.state.hunt)) {
+            return <></>;
+        }
+
         let description = this.state.description || this.props.hunt.hunt_description;
         let expires = this.getExpiryEpoch();
         let now = Date.now() / 1000;
 
-        let options = _.map(this.state.tags, x=>{
-            return {value: x, label: x, isFixed: true, color: "#00B8D9"};
+        let options = _.map(this.state.all_tags, x=>{
+            return {value: x, label: x};
         });
 
-        let tag_defaults = _.map(this.props.hunt.tags,
-                             x=>{return {value: x, label: x};});
+        let tag_defaults = _.map(
+            this.state.tags, x=>{return {value: x, label: x};});
 
         return <Modal show={true}
                       size="lg"
@@ -140,7 +189,7 @@ class ModifyHuntDialog extends React.Component {
                          onChange={(e)=>{
                              this.setState({tags: _.map(e, x=>x.value)});
                          }}
-                         placeholder={T("Hunt Tags")}
+                         placeholder={T("Hunt Tags (Type to create new Tag)")}
                          spellCheck="false"
                          defaultValue={tag_defaults}
                        />
@@ -154,7 +203,7 @@ class ModifyHuntDialog extends React.Component {
                    <VeloForm
                      param={{name: T("Expiry"), type: "timestamp",
                              description: T("Time hunt will expire")}}
-                     value={expires}
+                     value={this.state.expires}
                      setValue={x=>this.setState({expires:x})}
                    />
                    { expires < now &&
@@ -175,6 +224,158 @@ class ModifyHuntDialog extends React.Component {
                    </Button>
                  </Modal.Footer>
                </Modal>;
+    }
+}
+
+
+class RunHuntDialog extends React.Component {
+    static propTypes = {
+        onClose: PropTypes.func.isRequired,
+        hunts: PropTypes.array,
+    }
+
+    componentDidMount = () => {
+        this.source = CancelToken.source();
+    }
+
+    componentWillUnmount() {
+        this.source.cancel();
+    }
+
+    startHunt = () => {
+        let hunts = {};
+        _.each(this.props.hunts, hunt=>{
+            let hunt_id = hunt.HuntId;
+
+            hunts[hunt_id] = true;
+            api.post("v1/ModifyHunt", {
+                state: "RUNNING",
+                hunt_id: hunt_id,
+            }, this.source.token).then((response) => {
+                delete hunts[hunt_id];
+
+                // Only close the dialog when all the hunts are dealt
+                // with.
+                if(_.isEmpty(hunts)) {
+                    this.props.onClose();
+                }
+            });
+        });
+    }
+
+    render() {
+        return (
+            <Modal show={true}
+                   size="lg"
+                   dialogClassName="modal-90w"
+                   onHide={this.props.onClose} >
+              <Modal.Header closeButton>
+                <Modal.Title>{T("Run this hunt?")}</Modal.Title>
+              </Modal.Header>
+
+              <Modal.Body>
+                <p>{T("Are you sure you want to run these hunts?")}</p>
+
+                <VeloTable
+                  rows={this.props.hunts}
+                  columns={["State", "Tags", "HuntId", "Description", "Created"]}
+                  column_renderers={huntRowRenderer(this)}
+                />
+
+              </Modal.Body>
+
+              <Modal.Footer>
+                <Button variant="secondary"
+                        onClick={this.props.onClose}>
+                  {T("Close")}
+                </Button>
+                <Button variant="primary"
+                        onClick={this.startHunt}>
+                  {T("Run them all!")}
+                </Button>
+              </Modal.Footer>
+            </Modal>
+        );
+    }
+}
+
+
+class DeleteHuntDialog extends React.Component {
+    static propTypes = {
+        // onClose(ok bool) -> did the user select to delete
+        onClose: PropTypes.func.isRequired,
+        hunts: PropTypes.array,
+    }
+
+    componentDidMount = () => {
+        this.source = CancelToken.source();
+    }
+
+    componentWillUnmount() {
+        this.source.cancel();
+    }
+
+    deleteHunt = () => {
+        let hunt_ids = [];
+        _.each(this.props.hunts, hunt=>{
+            let hunt_id = hunt.HuntId;
+            hunt_ids.push(hunt_id);
+        });
+
+        // Start delete collections in the background. It may take
+        // a while.
+        api.post("v1/CollectArtifact", {
+            client_id: "server",
+            artifacts: ["Server.Hunts.CancelAndDelete"],
+            specs: [{
+                artifact: "Server.Hunts.CancelAndDelete",
+                parameters: {
+                    env: [
+                        { key: "Hunts",
+                          value: JSON.stringify(hunt_ids) },
+                        { key: "DeleteAllFiles", value: "Y" },
+                    ]
+                }
+            }],
+        }, this.source.token).then((response) => {
+            this.props.onClose(true);
+        });
+    }
+
+    render() {
+        return (
+            <Modal show={true}
+                   size="lg"
+                   dialogClassName="modal-90w"
+                   onHide={this.props.onClose} >
+              <Modal.Header closeButton>
+                <Modal.Title>{T("Delete these hunts?")}</Modal.Title>
+              </Modal.Header>
+
+              <Modal.Body>
+                <p>{T("Are you sure you want to delete these hunts?")}</p>
+                <div className="delete-hunt-table">
+                  <VeloTable
+                    rows={this.props.hunts}
+                    columns={["State", "Tags", "HuntId", "Description", "Created"]}
+                    column_renderers={huntRowRenderer(this)}
+                  />
+                </div>
+
+              </Modal.Body>
+
+              <Modal.Footer>
+                <Button variant="secondary"
+                        onClick={this.props.onClose}>
+                  {T("Close")}
+                </Button>
+                <Button variant="primary"
+                        onClick={this.deleteHunt}>
+                  {T("Delete them all!")}
+                </Button>
+              </Modal.Footer>
+            </Modal>
+        );
     }
 }
 
@@ -205,20 +406,40 @@ class HuntList extends React.Component {
             let name = this.props.match && this.props.match.params &&
                 this.props.match.params.tab;
 
+            let params_json = this.props.match && this.props.match.params &&
+                this.props.match.params.params_json;
+            let flow_params = {};
+
+            if(params_json) {
+                try {
+                    flow_params = JSON.parse(
+                        decodeURIComponent(params_json));
+                } catch(e) {
+                    console.log("Error parsing params_json ", e, params_json);
+                };
+            }
+
+            let specs = flow_params.specs || {};
+            if(_.isEmpty(specs)) {
+                specs[name] = {};
+            }
+
+            let env = _.map(specs[name], (v, k)=>{
+                return {key: k, value: str(v)};
+            });
+
             this.setState({
                 showCopyWizard: true,
                 full_selected_hunt: {
                     start_request: {
                         artifacts: [name],
+                        specs: [{artifact: name, parameters: {env: env}}],
                     },
                 },
             });
             this.props.history.push("/hunts");
         }
         this.interval = setInterval(this.incrementVersion, POLL_TIME);
-
-        let slider = SLIDE_STATES[this.state.slider];
-        this.props.collapseToggle(slider.level);
     }
 
     componentWillUnmount() {
@@ -245,6 +466,7 @@ class HuntList extends React.Component {
         filter: "",
         selected_row: undefined,
         version: 1,
+        multiSelectedHunts: [],
     }
 
     // Launch the hunt.
@@ -262,47 +484,43 @@ class HuntList extends React.Component {
         });
     }
 
-    startHunt = () => {
-        let hunt_id = this.props.selected_hunt &&
-            this.props.selected_hunt.hunt_id;
-
-        if (!hunt_id) { return; };
-
-        api.post("v1/ModifyHunt", {
-            state: "RUNNING",
-            hunt_id: hunt_id,
-        }, this.source.token).then((response) => {
-            this.incrementVersion();
-            this.setState({ showRunHuntDialog: false });
-        });
-    }
-
     stopHunt = () => {
-        let hunt_id = this.props.selected_hunt &&
-            this.props.selected_hunt.hunt_id;
+        let hunts = {};
+        let hunt_ids = [];
+        _.each(this.state.multiSelectedHunts, hunt=>{
+            let hunt_id = hunt.HuntId;
 
-        if (!hunt_id) { return; };
+            hunt_ids.push(hunt_id);
+            hunts[hunt_id] = true;
+            api.post("v1/ModifyHunt", {
+                state: "PAUSED",
+                hunt_id: hunt_id,
+            }, this.source.token).then((response) => {
+                delete hunts[hunt_id];
 
-        api.post("v1/ModifyHunt", {
-            state: "PAUSED",
-            hunt_id: hunt_id,
-        }, this.source.token).then((response) => {
-            this.incrementVersion();
+                // Only close the dialog when all the hunts are dealt
+                // with.
+                if(_.isEmpty(hunts)) {
 
-            // Start Cancelling all in flight collections in the
-            // background.
-            api.post("v1/CollectArtifact", {
-                client_id: "server",
-                artifacts: ["Server.Utils.CancelHunt"],
-                specs: [{
-                    artifact: "Server.Utils.CancelHunt",
-                    parameters: {
-                        env: [
-                            { key: "HuntId", value: hunt_id },
-                        ]
-                    }
-                }],
-            }, this.source.token);
+                    this.incrementVersion();
+
+                    // Start Cancelling all in flight collections in the
+                    // background.
+                    api.post("v1/CollectArtifact", {
+                        client_id: "server",
+                        artifacts: ["Server.Utils.CancelHunt"],
+                        specs: [{
+                            artifact: "Server.Utils.CancelHunt",
+                            parameters: {
+                                env: [
+                                    { key: "Hunts",
+                                      value: JSON.stringify(hunt_ids) },
+                                ]
+                            }
+                        }],
+                    }, this.source.token);
+                }
+            });
         });
     }
 
@@ -327,42 +545,10 @@ class HuntList extends React.Component {
         if (!hunt_id) { return; };
 
         api.post("v1/ModifyHunt", {
-            hunt_description: row.hunt_description || " ",
+            description: row.hunt_description || " ",
             hunt_id: hunt_id,
         }, this.source.token).then((response) => {
             this.incrementVersion();
-        });
-    }
-
-    deleteHunt = () => {
-        let hunt_id = this.props.selected_hunt &&
-            this.props.selected_hunt.hunt_id;
-
-        if (!hunt_id) { return; };
-
-        // First stop the hunt then delete all the files.
-        api.post("v1/ModifyHunt", {
-            state: "ARCHIVED",
-            hunt_id: hunt_id,
-        }, this.source.token).then((response) => {
-            this.incrementVersion();
-            this.setState({ showDeleteHuntDialog: false });
-
-            // Start delete collections in the background. It may take
-            // a while.
-            api.post("v1/CollectArtifact", {
-                client_id: "server",
-                artifacts: ["Server.Hunts.CancelAndDelete"],
-                specs: [{
-                    artifact: "Server.Hunts.CancelAndDelete",
-                    parameters: {
-                        env: [
-                            { key: "HuntId", value: hunt_id },
-                            { key: "DeleteAllFiles", value: "Y" },
-                        ]
-                    }
-                }],
-            }, this.source.token);
         });
     }
 
@@ -386,6 +572,7 @@ class HuntList extends React.Component {
 
         api.get("v1/GetHunt", {
             hunt_id: hunt_id,
+            include_request: true,
         }, this.source.token).then((response) => {
             if (response.cancel) return;
 
@@ -407,6 +594,7 @@ class HuntList extends React.Component {
     render() {
         let selected_hunt = this.props.selected_hunt &&
             this.props.selected_hunt.hunt_id;
+
         let username = this.context &&
             this.context.traits && this.context.traits.username;
         const selectRow = {
@@ -418,17 +606,35 @@ class HuntList extends React.Component {
                 this.props.setSelectedHuntId(row["HuntId"]);
                 this.setState({selected_row: row._id});
             },
-            selected: [this.state.selected_row],
+            onMultiSelect: rows=>{
+                let hunts = [];
+                _.each(rows, x=>{
+                    if(!_.isEmpty(x.HuntId)) {
+                        hunts.push(x);
+                    }
+                });
+                this.setState({multiSelectedHunts: hunts});
+            },
+            isSelectedCB: (row, idx)=>{
+                return row.HuntId === selected_hunt;
+            },
         };
 
-        let state = this.props.selected_hunt && this.props.selected_hunt.state;
-        if (this.props.selected_hunt.stats && this.props.selected_hunt.stats.stopped) {
+        let state = this.props.selected_hunt &&
+            this.props.selected_hunt.state;
+        if (this.props.selected_hunt.stats &&
+            this.props.selected_hunt.stats.stopped) {
             state = 'STOPPED';
         }
 
-        let tab = this.props.match && this.props.match.params && this.props.match.params.tab;
+        let tab = this.props.match && this.props.match.params &&
+            this.props.match.params.tab;
+
+        let transform = this.state.transform || {};
+
         return (
             <>
+              <Spinner loading={this.state.loading } />
               {this.state.showWizard &&
                <NewHuntWizard
                  onCancel={(e) => this.setState({ showWizard: false })}
@@ -452,27 +658,22 @@ class HuntList extends React.Component {
                   hunt={this.props.selected_hunt}/>
               }
               {this.state.showRunHuntDialog &&
-               <Modal show={this.state.showRunHuntDialog}
-                      onHide={() => this.setState({ showRunHuntDialog: false })} >
-                 <Modal.Header closeButton>
-                   <Modal.Title>{T("Run this hunt?")}</Modal.Title>
-                 </Modal.Header>
-
-                 <Modal.Body>
-                   <p>{T("Are you sure you want to run this hunt?")}</p>
-                 </Modal.Body>
-
-                 <Modal.Footer>
-                   <Button variant="secondary"
-                           onClick={() => this.setState({ showRunHuntDialog: false })}>
-                     {T("Close")}
-                   </Button>
-                   <Button variant="primary"
-                           onClick={this.startHunt}>
-                     {T("Run it!")}
-                   </Button>
-                 </Modal.Footer>
-               </Modal>
+               <RunHuntDialog
+                 onClose={x=>{
+                     this.incrementVersion();
+                     this.setState({ showRunHuntDialog: false });
+                 }}
+                 hunts={this.state.multiSelectedHunts}
+               />
+              }
+              { this.state.showEditNotebookDialog &&
+                <EditNotebook
+                  notebook={this.state.notebook}
+                  updateNotebooks={()=>{
+                      this.setState({showEditNotebookDialog: false});
+                  }}
+                  closeDialog={() => this.setState({showEditNotebookDialog: false})}
+                />
               }
               {this.state.showDeleteNotebook &&
                <DeleteNotebookDialog
@@ -490,27 +691,19 @@ class HuntList extends React.Component {
               }
 
               {this.state.showDeleteHuntDialog &&
-               <Modal show={true}
-                      onHide={() => this.setState({ showDeleteHuntDialog: false })} >
-                 <Modal.Header closeButton>
-                   <Modal.Title>{T("Permanently delete this hunt?")}</Modal.Title>
-                 </Modal.Header>
-
-                 <Modal.Body>
-                   {T("DeleteHuntDialog")}
-                 </Modal.Body>
-
-                 <Modal.Footer>
-                   <Button variant="secondary"
-                           onClick={() => this.setState({ showDeleteHuntDialog: false })}>
-                     {T("Close")}
-                   </Button>
-                   <Button variant="primary"
-                           onClick={this.deleteHunt}>
-                     {T("Kill it!")}
-                   </Button>
-                 </Modal.Footer>
-               </Modal>
+               <DeleteHuntDialog
+                 onClose={ok=>{
+                     this.setState({ showDeleteHuntDialog: false });
+                     if(ok) {
+                         // Clear the hunt selection since it is about
+                         // to be removed.
+                         this.props.setSelectedHuntId(undefined);
+                         this.setState({multiSelectedHunts: []});
+                     }
+                     this.incrementVersion();
+                 }}
+                 hunts={this.state.multiSelectedHunts}
+               />
               }
 
               <Navbar className="hunt-toolbar">
@@ -532,7 +725,8 @@ class HuntList extends React.Component {
                     </Button>
                   </ToolTip>
                   <ToolTip tooltip={T("Run Hunt")}>
-                    <Button disabled={state !== 'PAUSED' && state !== 'STOPPED'}
+                    <Button disabled={this.state.multiSelectedHunts.length < 2 &&
+                                      state !== 'PAUSED' && state !== 'STOPPED' }
                             onClick={() => this.setState({ showRunHuntDialog: true })}
                             variant="default">
                       <FontAwesomeIcon icon="play" />
@@ -540,7 +734,8 @@ class HuntList extends React.Component {
                     </Button>
                   </ToolTip>
                   <ToolTip tooltip={T("Stop Hunt")}>
-                    <Button disabled={state !== 'RUNNING'}
+                    <Button disabled={this.state.multiSelectedHunts.length < 2 &&
+                                      state !== 'RUNNING'}
                             onClick={this.stopHunt}
                             variant="default">
                       <FontAwesomeIcon icon="stop" />
@@ -548,7 +743,8 @@ class HuntList extends React.Component {
                     </Button>
                   </ToolTip>
                   <ToolTip tooltip={T("Delete Hunt")}>
-                    <Button disabled={state === 'RUNNING' || !selected_hunt}
+                    <Button disabled={this.state.multiSelectedHunts.length < 2 &&
+                                      state === 'RUNNING' || !selected_hunt}
                             onClick={() => this.setState({ showDeleteHuntDialog: true })}
                             variant="default">
                       <FontAwesomeIcon icon="trash-alt" />
@@ -571,13 +767,15 @@ class HuntList extends React.Component {
                     </Button>
                   </ToolTip>
 
-                  { !this.state.filter ?
+                  { transform.filter_column !== "Creator" ?
                     <ToolTip tooltip={T("Show only my hunts")}>
                       <Button onClick={()=>{
-                                  this.setState({transform: {editing: "", filter_column: "Creator", filter_regex: username},
-                                                 filter: username});
-                                  this.incrementVersion();
-                              }}
+                          this.setState({transform: {
+                              filter_column: "Creator",
+                              filter_regex: username,
+                          }});
+                          this.incrementVersion();
+                      }}
                               variant="default">
                         <FontAwesomeIcon icon="user" />
                         <span className="sr-only">{T("Show only my hunts")}</span>
@@ -586,7 +784,7 @@ class HuntList extends React.Component {
                     :
                     <ToolTip tooltip={T("Show all hunts")}>
                       <Button onClick={()=>{
-                                  this.setState({transform: {}, filter: ""});
+                                  this.setState({transform: {}});
                                   this.incrementVersion();
                               }}
                               variant="default">
@@ -597,8 +795,8 @@ class HuntList extends React.Component {
                   }
                 </ButtonGroup>
 
-                { this.state.page_state &&
-                  <ButtonGroup>
+                <ButtonGroup>
+                { this.state.page_state ?
                     <TablePaginationControl
                       total_size={this.state.page_state.total_size}
                       start_row={this.state.page_state.start_row}
@@ -607,8 +805,12 @@ class HuntList extends React.Component {
                                     this.state.page_state.page_size}
                       onRowChange={this.state.page_state.onRowChange}
                       onPageSizeChange={this.state.page_state.onPageSizeChange}
-                    />
-                  </ButtonGroup> }
+                    /> :  <TablePaginationControl total_size={0}/> }
+                  <TransformViewer
+                    transform={this.state.transform}
+                    setTransform={t=>this.setState({transform: t})}
+                  />
+                </ButtonGroup>
 
                 {tab === "notebook" &&
                  <ButtonGroup className="float-right">
@@ -619,6 +821,30 @@ class HuntList extends React.Component {
                        <span className="sr-only">{T("Notebooks")}</span>
                      </Button>
                    </ToolTip>
+                   <ToolTip tooltip={T("Edit Notebook")}>
+                     <Button onClick={()=>{
+                         this.setState({loading: true});
+                         api.get("v1/GetNotebooks", {
+                             include_uploads: true,
+                             notebook_id: "N." + selected_hunt,
+
+                         }, this.source.token).then(resp=>{
+                             let items = resp.data.items;
+                             if (_.isEmpty(items)) {
+                                 return;
+                             }
+
+                             this.setState({notebook: items[0],
+                                            loading: false,
+                                            showEditNotebookDialog: true});
+                         });
+                     }}
+                             variant="default">
+                       <FontAwesomeIcon icon="wrench"/>
+                       <span className="sr-only">{T("Edit Notebook")}</span>
+                     </Button>
+                   </ToolTip>
+
                    <ToolTip tooltip={T("Full Screen")}>
                      <Button onClick={this.setFullScreen}
                              variant="default">
@@ -724,4 +950,21 @@ const huntRowRenderer = self=>{
             });
         },
     };
+};
+
+
+const str = x=>{
+    if(_.isNumber(x)) {
+        return x.toString();
+    }
+
+    if(_.isString(x)) {
+        return x;
+    };
+
+    if(_.isUndefined(x)) {
+        return x;
+    }
+
+    return JSON.stringify(x);
 };

@@ -2,6 +2,7 @@ import React from 'react';
 import PropTypes from 'prop-types';
 
 import NotebookCellRenderer from './notebook-cell-renderer.jsx';
+import NotebookNavigator from './notebook-navigator.jsx';
 import Spinner from '../utils/spinner.jsx';
 import _ from 'lodash';
 import T from '../i8n/i8n.jsx';
@@ -13,7 +14,7 @@ export default class NotebookRenderer extends React.Component {
     static propTypes = {
         env: PropTypes.object,
         notebook: PropTypes.object,
-        fetchNotebooks: PropTypes.func,
+        updateVersion: PropTypes.func.isRequired,
     };
 
     state = {
@@ -23,9 +24,10 @@ export default class NotebookRenderer extends React.Component {
         // A locked notebook can not be edited. Each time a cell is in
         // flight, we increment the lock count until the notebook is in
         // a valid state, then the lock is decremented. This ensures
-        // notebooks can only be edited is places where the server
+        // notebooks can only be edited in places where the server
         // acknowledges the current state.
         locked: 0,
+        refs: {},
     }
 
     setSelectedCellId = (cell_id) => {
@@ -35,10 +37,27 @@ export default class NotebookRenderer extends React.Component {
 
     componentDidMount = () => {
         this.source = CancelToken.source();
+        this.makeCellRefs();
     }
 
     componentWillUnmount() {
         this.source.cancel();
+        this.unmounted = true;
+    }
+
+    componentDidUpdate(prevProps, prevState, snapshot) {
+        this.makeCellRefs();
+    }
+
+    // Ensure that each cell has a ref we can use for scrolling.
+    makeCellRefs = ()=>{
+        _.each(this.props.notebook.cell_metadata, x=>{
+            let refs = this.state.refs;
+            let existing = refs[x.cell_id];
+            if(!existing) {
+                refs[x.cell_id] = React.createRef();
+            }
+        });
     }
 
     upCell = (cell_id) => {
@@ -64,11 +83,12 @@ export default class NotebookRenderer extends React.Component {
             api.post('v1/UpdateNotebook', notebook,
                      this.source.token).then(response=>{
                          if (response.cancel) return;
-                         this.props.fetchNotebooks();
-                         this.setState({loading: false});
+
+                         this.props.updateVersion();
+                         this.setState({loading: false, locked: 0});
                      }).catch(e=> {
-                         this.setState({loading: false});
-                         this.props.fetchNotebooks();
+                         this.setState({loading: false, locked: 0});
+                         this.props.updateVersion();
                      });
         }
     };
@@ -78,7 +98,7 @@ export default class NotebookRenderer extends React.Component {
         let notebook = Object.assign({}, this.props.notebook);
         let cell_metadata = [...notebook.cell_metadata];
 
-        // Dont allow us to remove all cells.
+        // Don't allow us to remove all cells.
         if (cell_metadata.length <= 1) {
             return;
         }
@@ -99,11 +119,11 @@ export default class NotebookRenderer extends React.Component {
                      this.source.token).then(response=>{
                          if (response.cancel) return;
 
-                         this.props.fetchNotebooks();
-                         this.setState({loading: false});
+                         this.props.updateVersion();
+                         this.setState({loading: false, locked: 0});
                      }).catch(e=>{
-                         this.setState({loading: false});
-                         this.props.fetchNotebooks();
+                         this.setState({loading: false, locked: 0});
+                         this.props.updateVersion();
                      });
         }
     };
@@ -134,11 +154,11 @@ export default class NotebookRenderer extends React.Component {
             api.post('v1/UpdateNotebook', notebook,
                      this.source.token).then(response=>{
                          if (response.cancel) return;
-                         this.props.fetchNotebooks();
-                         this.setState({loading: false});
+                         this.props.updateVersion();
+                         this.setState({loading: false, locked: 0});
                      }).catch(e=>{
-                         this.setState({loading: false});
-                         this.props.fetchNotebooks();
+                         this.setState({loading: false, locked: 0});
+                         this.props.updateVersion();
                      });
         }
     };
@@ -165,14 +185,34 @@ export default class NotebookRenderer extends React.Component {
                  request,
                  this.source.token).then((response) => {
                      if (response.cancel) return;
-                     this.props.fetchNotebooks();
+                     this.props.updateVersion();
                      this.setState({selected_cell_id: response.data.latest_cell_id,
                                     loading: false});
                  });
     }
 
+    scrollToCell = cell_id=>{
+        let ref = this.getRef(cell_id);
+        if(ref && ref.current && ref.current.scrollRef) {
+            ref.current.scrollRef.current.scrollIntoView({
+                behavior: "smooth",
+            });
+        }
+    }
+
+    getRef = cell_id=>{
+        let refs = this.state.refs;
+        let res = refs[cell_id];
+        if(!res) {
+            res = React.createRef();
+            refs[cell_id] = res;
+        }
+        return res;
+    }
+
     render() {
-        if (!this.props.notebook || _.isEmpty(this.props.notebook.cell_metadata)) {
+        if (!this.props.notebook ||
+            _.isEmpty(this.props.notebook.cell_metadata)) {
             return <h5 className="no-content">
                      {T("Select a notebook from the list above.")}
                    </h5>;
@@ -180,29 +220,45 @@ export default class NotebookRenderer extends React.Component {
 
         return (
             <>
-              <Spinner loading={this.state.loading || this.props.notebook.loading} />
+              <NotebookNavigator
+                scrollToCell={this.scrollToCell}
+                notebook={this.props.notebook}
+              />
+              <Spinner loading={this.state.loading ||
+                                this.props.notebook.loading} />
+              <div className="notebook-contents">
               { _.map(this.props.notebook.cell_metadata, (cell_md, idx) => {
                   return <NotebookCellRenderer
                            env={this.props.env}
+                           ref={this.getRef(cell_md.cell_id)}
                            selected_cell_id={this.state.selected_cell_id}
                            setSelectedCellId={this.setSelectedCellId}
                            notebook_id={this.props.notebook.notebook_id}
                            notebook_metadata={this.props.notebook}
                            cell_metadata={cell_md} key={idx}
-                           fetchNotebooks={this.props.fetchNotebooks}
+                           updateVersion={this.props.updateVersion}
                            upCell={this.upCell}
                            downCell={this.downCell}
                            deleteCell={this.deleteCell}
                            addCell={this.addCell}
                            notebookLocked={this.state.locked}
-                           incNotebookLocked={x=>this.setState(
-                               prevState=>{
-                                   // Atomic version of setState
-                                   // https://www.digitalocean.com/community/tutorials/react-getting-atomic-updates-with-setstate
-                                   return {locked: x+prevState.locked};
-                               })}
+                           incNotebookLocked={x=>{
+                               if(this.unmounted) {
+                                   return;
+                               }
+
+                               this.setState(
+                                   prevState=>{
+                                       // Atomic version of setState
+                                       // https://www.digitalocean.com/community/tutorials/react-getting-atomic-updates-with-setstate
+                                       return {
+                                           locked: x+prevState.locked,
+                                       };
+                                   });
+                               }}
                       />;
               })}
+              </div>
             </>
         );
     }

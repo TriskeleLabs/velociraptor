@@ -5,9 +5,10 @@ import (
 	"runtime"
 
 	"github.com/Velocidex/ordereddict"
-	"gopkg.in/yaml.v2"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/artifacts/assets"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/yaml"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/types"
 )
@@ -43,7 +44,39 @@ func (self *UnimplementedFunction) Info(scope vfilter.Scope, type_map *vfilter.T
 	return &vfilter.FunctionInfo{
 		Name: self.Name,
 		Doc:  "Unimplemented Function",
+
+		// Negative version means this plugin really does not exist.
+		Version: -1,
 	}
+}
+
+type RejectedFunction struct {
+	UnimplementedFunction
+}
+
+func (self *RejectedFunction) Copy() types.FunctionInterface {
+	return &RejectedFunction{
+		UnimplementedFunction{
+			Name:      self.Name,
+			Platforms: self.Platforms,
+		}}
+}
+
+func (self *RejectedFunction) Call(ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+
+	DeduplicatedLog(scope, self.Name,
+		"ERROR:VQL Function %v() has been blocked in the configuration. Please update the configuration file to allow it.",
+		self.Name)
+
+	return vfilter.Null{}
+}
+
+func NewRejectedFunction(name string) *RejectedFunction {
+	return &RejectedFunction{UnimplementedFunction{
+		Name: name,
+	}}
 }
 
 type UnimplementedPlugin struct {
@@ -70,7 +103,36 @@ func (self *UnimplementedPlugin) Info(scope vfilter.Scope, type_map *vfilter.Typ
 	return &vfilter.PluginInfo{
 		Name: self.Name,
 		Doc:  "Unimplemented Plugin",
+
+		// Negative version means this plugin really does not
+		// exist. Version 0 is the default version for new plugins.
+		Version: -1,
 	}
+}
+
+type RejectedPlugin struct {
+	UnimplementedPlugin
+}
+
+func (self *RejectedPlugin) Call(ctx context.Context,
+	scope vfilter.Scope,
+	args *ordereddict.Dict) <-chan vfilter.Row {
+
+	output_chan := make(chan vfilter.Row)
+
+	DeduplicatedLog(scope, self.Name,
+		"ERROR:VQL Plugin %v() has been blocked in the configuration. Please update the configuration file to allow it.",
+		self.Name)
+
+	close(output_chan)
+
+	return output_chan
+}
+
+func NewRejectedPlugin(name string) *RejectedPlugin {
+	return &RejectedPlugin{UnimplementedPlugin{
+		Name: name,
+	}}
 }
 
 func _GetMyPlatform() string {
@@ -103,38 +165,46 @@ func InstallUnimplemented(scope vfilter.Scope) {
 	// We only add metadata for some platforms so we can only really
 	// apply this sometimes.
 	case "linux_amd64_cgo",
-		"windows_386_cgo", "windows_amd64_cgo",
+		"linux_amd64_nocgo",
+		"windows_386_cgo",
+		"windows_386_nocgo",
+		"windows_amd64_cgo",
+		"windows_amd64_nocgo",
+		"darwin_amd64_nocgo",
 		"darwin_amd64_cgo":
 
-		assets.InitOnce()
-		data, err := assets.ReadFile("docs/references/vql.yaml")
+		data, err := utils.GzipUncompress(assets.FileDocsReferencesVqlYaml)
 		if err != nil {
+			scope.Log("InstallUnimplemented: %v", err)
 			return
 		}
 
 		result := []*api_proto.Completion{}
 		err = yaml.Unmarshal(data, &result)
-		if err == nil {
-			for _, item := range result {
-				// Add a placeholder
-				if item.Type == "Plugin" {
-					// Skip plugins that are already supported.
-					_, ok := scope.GetPlugin(item.Name)
-					if !ok {
-						RegisterPlugin(&UnimplementedPlugin{
-							Name:      item.Name,
-							Platforms: item.Platforms,
-						})
-					}
+		if err != nil {
+			scope.Log("InstallUnimplemented: %v", err)
+			return
+		}
 
-				} else if item.Type == "Function" {
-					_, ok := scope.GetFunction(item.Name)
-					if !ok {
-						RegisterFunction(&UnimplementedFunction{
-							Name:      item.Name,
-							Platforms: item.Platforms,
-						})
-					}
+		for _, item := range result {
+			// Add a placeholder
+			if item.Type == "Plugin" {
+				// Skip plugins that are already supported.
+				_, ok := scope.GetPlugin(item.Name)
+				if !ok {
+					RegisterPlugin(&UnimplementedPlugin{
+						Name:      item.Name,
+						Platforms: item.Platforms,
+					})
+				}
+
+			} else if item.Type == "Function" {
+				_, ok := scope.GetFunction(item.Name)
+				if !ok {
+					RegisterFunction(&UnimplementedFunction{
+						Name:      item.Name,
+						Platforms: item.Platforms,
+					})
 				}
 			}
 		}

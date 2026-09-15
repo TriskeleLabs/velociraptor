@@ -3,7 +3,7 @@ name: Windows.EventLogs.Evtx
 description: |
   Parses and returns events from Windows evtx logs.
 
-  Each event is returned in full, but results can be narrowed using a glob
+  Each event is returned in full, but results can be narrowed by using a glob
   pattern for evtx files, a timespan, and regexes to match the evtx path, event
   channel, and/or event ID:
 
@@ -65,6 +65,15 @@ parameters:
     default: "."
     type: regex
 
+export: |
+  LET Levels <= dict(
+    `0`='Always',
+    `1`='Critical',
+    `2`='Error',
+    `3`='Warning',
+    `4`='Info',
+    `5`='Verbose')
+
 sources:
   - query: |
       LET VSS_MAX_AGE_DAYS <= VSSAnalysisAge
@@ -99,3 +108,64 @@ sources:
           )
 
       SELECT * FROM evtxsearch(pathList=fspaths)
+
+    notebook:
+       - name: Simplified view
+         type: vql_suggestion
+         template: |
+            /*
+            # Simplified log view
+            */
+            LET S = scope()
+
+            SELECT TimeCreated,
+                   System AS _System,
+                   EventID,
+                   get(item=Levels, field=str(str=System.Level)) AS Level,
+                   S.System.Execution.ProcessID AS PID,
+                   Message,
+                   S.EventData AS Data
+            FROM source()
+            ORDER BY TimeCreated
+
+       - name: Event count as plot
+         type: vql_suggestion
+         template: |
+            /*
+            # Event count
+
+            {{ define "Events" }}
+            SELECT int(int=TimeCreated.Unix / 60) * 60 AS MinBin,
+                                    count() AS Count
+              FROM source()
+              GROUP BY MinBin
+              ORDER BY MinBin
+            {{ end }}
+            {{ Query "Events" | TimeChart }}
+            */
+
+            LET Dummy <= 42
+
+       - type: vql_suggestion
+         name: Timeline
+         template: |
+          /*
+          # EVTX timeline
+          {{ Timeline "EVTX" }}
+          */
+          LET S = scope()
+
+          LET _ <= timeline_add(key='TimeCreated',
+                          name='evtx',
+                          timeline='EVTX',
+                          query={
+              SELECT TimeCreated,
+                    System AS _System,
+                    EventID,
+                    get(item=Levels, field=str(str=System.Level)) AS Level,
+                    S.System.Execution.ProcessID AS PID,
+                    Message,
+                    S.EventData AS Data
+              FROM source()
+              ORDER BY TimeCreated
+            })

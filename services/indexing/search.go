@@ -20,7 +20,8 @@ import (
 )
 
 var (
-	verbs = []string{
+	// List of built in verbs.
+	buiilt_in_verbs = []string{
 		"label:",
 		"host:",
 		"mac:",
@@ -30,7 +31,25 @@ var (
 	}
 )
 
+func (self *Indexer) getVerbs() (res []string) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	if len(self._verbs) == 0 {
+		self._verbs = append(self._verbs, buiilt_in_verbs...)
+		if self.config_obj.Defaults != nil {
+			for _, operator := range self.config_obj.Defaults.IndexedClientMetadata {
+				self._verbs = append(self._verbs, operator+":")
+			}
+		}
+	}
+
+	return self._verbs
+}
+
 func splitIntoOperatorAndTerms(term string) (string, string) {
+	term = strings.TrimSpace(term)
+
 	if term == "all" {
 		return "all", ""
 	}
@@ -56,7 +75,7 @@ func (self *Indexer) searchRecents(
 	in *api_proto.SearchClientsRequest,
 	principal string, term string, limit uint64) (
 	*api_proto.SearchClientsResponse, error) {
-	path_manager := &paths.UserPathManager{principal}
+	path_manager := &paths.UserPathManager{Name: principal}
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {
 		return nil, err
@@ -147,12 +166,20 @@ func (self *Indexer) SearchClients(
 		limit = in.Limit
 	}
 
+	var custom_verbs []string
+	if config_obj.Defaults != nil {
+		custom_verbs = config_obj.Defaults.IndexedClientMetadata
+	}
+
 	operator, term := splitIntoOperatorAndTerms(in.Query)
 	switch operator {
-	case "label", "host", "all", "mac":
+	case "label":
 		if term == "none" {
 			return self.searchUnlabeledClients(ctx, config_obj, in, limit)
 		}
+		return self.searchClientIndex(ctx, config_obj, in, limit)
+
+	case "host", "all", "mac":
 		return self.searchClientIndex(ctx, config_obj, in, limit)
 
 	case "client":
@@ -166,6 +193,10 @@ func (self *Indexer) SearchClients(
 		return self.searchLastIP(ctx, config_obj, in, term, limit)
 
 	default:
+		if utils.InString(custom_verbs, operator) {
+			return self.searchClientIndex(ctx, config_obj, in, limit)
+		}
+
 		return self.searchVerbs(ctx, config_obj, in, limit)
 	}
 }
@@ -458,7 +489,7 @@ func (self *Indexer) searchVerbs(ctx context.Context,
 	items := ordereddict.NewDict()
 
 	term := strings.ToLower(in.Query)
-	for _, verb := range verbs {
+	for _, verb := range self.getVerbs() {
 		if strings.HasPrefix(verb, term) {
 			terms = append(terms, verb)
 		}
@@ -507,8 +538,7 @@ func (self *Indexer) searchVerbs(ctx context.Context,
 		SearchTerm: in,
 	}
 
-	for _, k := range items.Keys() {
-		v, _ := items.Get(k)
+	for _, v := range items.Values() {
 		res.Items = append(res.Items, v.(*api_proto.ApiClient))
 	}
 

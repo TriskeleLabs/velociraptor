@@ -29,19 +29,24 @@ type ResultSetOptions struct {
 
 type TimedFactory interface {
 	NewTimedResultSetWriter(
-		file_store_factory api.FileStore,
+		config_obj *config_proto.Config,
 		path_manager api.PathManager,
 		opts *json.EncOpts,
 		completion func()) (TimedResultSetWriter, error)
 
 	NewTimedResultSetReader(
 		ctx context.Context,
-		file_store api.FileStore,
+		config_obj *config_proto.Config,
 		path_manager api.PathManager) (TimedResultSetReader, error)
+
+	DeleteTimedResultSet(
+		ctx context.Context,
+		config_obj *config_proto.Config,
+		path_manager api.PathManager) error
 }
 
 func NewTimedResultSetWriter(
-	file_store_factory api.FileStore,
+	config_obj *config_proto.Config,
 	path_manager api.PathManager,
 	opts *json.EncOpts,
 	completion func()) (TimedResultSetWriter, error) {
@@ -51,22 +56,22 @@ func NewTimedResultSetWriter(
 	if timed_rs_factory == nil {
 		panic(errors.New("TimedFactory not initialized"))
 	}
-	return timed_rs_factory.NewTimedResultSetWriter(file_store_factory,
+	return timed_rs_factory.NewTimedResultSetWriter(config_obj,
 		path_manager, opts, completion)
 }
 
 func NewTimedResultSetReader(
 	ctx context.Context,
-	file_store_factory api.FileStore,
+	config_obj *config_proto.Config,
 	path_manager api.PathManager) (TimedResultSetReader, error) {
+
 	l_mu.Lock()
 	defer l_mu.Unlock()
-
 	if timed_rs_factory == nil {
 		panic(errors.New("TimedFactory not initialized"))
 	}
 	return timed_rs_factory.NewTimedResultSetReader(ctx,
-		file_store_factory, path_manager)
+		config_obj, path_manager)
 }
 
 type Factory interface {
@@ -89,6 +94,10 @@ type Factory interface {
 		log_path api.FSPathSpec,
 		options ResultSetOptions,
 	) (ResultSetReader, error)
+
+	DeleteResultSet(
+		file_store_factory api.FileStore,
+		path api.FSPathSpec) error
 }
 
 func NewResultSetWriter(
@@ -107,6 +116,21 @@ func NewResultSetWriter(
 
 	return factory.NewResultSetWriter(file_store_factory,
 		log_path, opts, completion, truncate)
+
+}
+
+func DeleteResultSet(
+	file_store_factory api.FileStore,
+	path api.FSPathSpec) error {
+	l_mu.Lock()
+	factory := rs_factory
+	l_mu.Unlock()
+
+	if factory == nil {
+		panic(errors.New("ResultSetFactory not initialized"))
+	}
+
+	return factory.DeleteResultSet(file_store_factory, path)
 
 }
 

@@ -111,6 +111,13 @@ type FATFileSystemAccessor struct {
 	root *accessors.OSPath
 }
 
+func (self FATFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name:        "fat",
+		Description: `Access the FAT filesystem inside an image by parsing FAT.`,
+	}
+}
+
 func (self FATFileSystemAccessor) New(scope vfilter.Scope) (
 	accessors.FileSystemAccessor, error) {
 	// Create a new cache in the scope.
@@ -329,27 +336,7 @@ func (self *FATFileSystemAccessor) LstatWithOSPath(
 }
 
 func init() {
-	accessors.Register("fat", &FATFileSystemAccessor{},
-		`Access the FAT filesystem inside an image by parsing FAT.
-
-This accessor is designed to operate on images directly. It requires a
-delegate accessor to get the raw image and will open files using the
-FAT full path rooted at the top of the filesystem.
-
-## Example
-
-The following query will glob all the files under the directory 'a'
-inside a FAT image file
-
-SELECT *
-FROM glob(globs='/**',
-  accessor="fat",
-  root=pathspec(
-    Path="a",
-    DelegateAccessor="file",
-    DelegatePath='fat.dd'))
-
-`)
+	accessors.Register(&FATFileSystemAccessor{})
 
 	json.RegisterCustomEncoder(&FATFileInfo{}, accessors.MarshalGlobFileInfo)
 }

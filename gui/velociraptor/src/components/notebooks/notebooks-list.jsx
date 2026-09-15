@@ -3,13 +3,14 @@ import "./notebooks-list.css";
 import React from 'react';
 import PropTypes from 'prop-types';
 import _ from 'lodash';
-import VeloTimestamp from "../utils/time.jsx";
-import filterFactory from 'react-bootstrap-table2-filter';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import BootstrapTable from 'react-bootstrap-table-next';
 import ExportNotebook from './export-notebook.jsx';
 import NotebookUploads from './notebook-uploads.jsx';
 import ToolTip from '../widgets/tooltip.jsx';
+import VeloPagedTable, {
+    TablePaginationControl,
+    TransformViewer,
+} from '../core/paged-table.jsx';
 
 import ButtonGroup from 'react-bootstrap/ButtonGroup';
 import Button from 'react-bootstrap/Button';
@@ -18,13 +19,13 @@ import Modal from 'react-bootstrap/Modal';
 import Alert from 'react-bootstrap/Alert';
 import api from '../core/api-service.jsx';
 import {CancelToken} from 'axios';
-
-import { formatColumns } from "../core/table.jsx";
 import { withRouter }  from "react-router-dom";
 
 import T from '../i8n/i8n.jsx';
 
 import { NewNotebook, EditNotebook } from './new-notebook.jsx';
+import { getFormatter } from "../core/table.jsx";
+
 
 class DeleteNotebook extends React.Component {
     static propTypes = {
@@ -44,7 +45,7 @@ class DeleteNotebook extends React.Component {
     deleteNotebook = () => {
         let notebook = Object.assign({}, this.props.notebook);
         notebook.hidden = true;
-        api.post("v1/UpdateNotebook", notebook, this.source.token).then(
+        api.post("v1/DeleteNotebook", notebook, this.source.token).then(
             this.props.updateNotebooks);
     }
 
@@ -55,24 +56,23 @@ class DeleteNotebook extends React.Component {
                    onHide={this.props.closeDialog} >
               <Modal.Header closeButton>
                 <Modal.Title>
-                  Archive notebook {this.props.notebook.notebook_id}
+                  {T("Delete notebook")} {this.props.notebook.notebook_id}
                 </Modal.Title>
               </Modal.Header>
 
               <Modal.Body>
                 <Alert variant="danger" className="text-center">
-                  You are about to archive notebook {this.props.notebook.notebook_id}!
-                  You can always recover this notebook from the filestore later.
+                  {T("You are about to delete this notebook permanently!")}
                 </Alert>
               </Modal.Body>
               <Modal.Footer>
                 <Button variant="secondary"
                         onClick={this.props.closeDialog}>
-                  Cancel
+                  {T("Cancel")}
                 </Button>
                 <Button variant="primary"
                         onClick={this.deleteNotebook}>
-                  Do It!!!
+                  {T("Do It!!!")}
                 </Button>
               </Modal.Footer>
             </Modal>
@@ -82,22 +82,28 @@ class DeleteNotebook extends React.Component {
 
 class NotebooksList extends React.Component {
     static propTypes = {
-        notebooks: PropTypes.array,
+        updateVersion: PropTypes.func.isRequired,
+        version: PropTypes.number,
         selected_notebook: PropTypes.object,
         setSelectedNotebook: PropTypes.func.isRequired,
-        fetchNotebooks: PropTypes.func.isRequired,
         hideToolbar: PropTypes.bool,
 
         // React router props.
+        match: PropTypes.object,
         history: PropTypes.object,
     };
 
     state = {
         showNewNotebookDialog: false,
+        showNotebookUploadsDialog: false,
         showDeleteNotebookDialog: false,
         showEditNotebookDialog: false,
         showExportNotebookDialog: false,
-        showNotebookUploadsDialog: false,
+        showNewFromRouterWizard: false,
+
+        transform: {},
+        filter: "",
+        page_state: {},
     }
 
     setFullScreen = () => {
@@ -109,42 +115,109 @@ class NotebooksList extends React.Component {
         }
     }
 
+    componentDidMount = () => {
+        this.source = CancelToken.source();
+        this.setStateFromRouter();
+    }
+
+    // Set the table in focus when the component mounts for the first time.
+    componentDidUpdate = (prevProps, prevState, rootNode) => {
+        let selected_notebook = this.props.selected_notebook &&
+            this.props.selected_notebook.notebook_id;
+        let prev_selection = prevProps.selected_notebook &&
+            prevProps.selected_notebook.notebook_id;
+        let router_notebook = this.props.match && this.props.match.params &&
+            this.props.match.params.notebook_id;
+
+        if(selected_notebook != prev_selection || router_notebook == "new") {
+            this.setStateFromRouter();
+        }
+        return false;
+    }
+
+    componentWillUnmount() {
+        this.source.cancel();
+    }
+
+    setStateFromRouter = ()=>{
+        let action = this.props.match && this.props.match.params &&
+            this.props.match.params.notebook_id;
+
+        let artifact_name = this.props.match && this.props.match.params &&
+            this.props.match.params.artifact;
+
+        if (action === "new") {
+            let params_json = this.props.match && this.props.match.params &&
+                this.props.match.params.params_json;
+            let flow_params = {};
+
+            if(params_json) {
+                try {
+                    flow_params = JSON.parse(
+                        decodeURIComponent(params_json));
+                } catch(e) {
+                    console.log("Error parsing params_json ", e, params_json);
+                };
+            }
+
+            let notebook_name = flow_params.name || "New Notebook";
+            let description = flow_params.description || "";
+            let specs = flow_params.specs || {};
+            if(_.isEmpty(specs)) {
+                specs[artifact_name] = {};
+            }
+
+            let env = _.map(specs[artifact_name], (v, k)=>{
+                return {key: k, value: str(v)};
+            });
+
+            // Create a fake flow so we can pretend to copy it.
+            let initial_request = {
+                name: notebook_name,
+                description: description,
+                artifacts: [artifact_name],
+                specs: [{artifact: artifact_name, parameters: {env: env}}],
+            };
+
+            this.setState({
+                showNewFromRouterWizard: true,
+                initial_request: initial_request,
+            });
+            this.props.history.push("/notebooks/");
+        }
+    }
+
     render() {
-        let columns = formatColumns([
-            {dataField: "notebook_id", text: T("NotebookId")},
-            {dataField: "name", text: T("Name"),
-             sort: true, filtered: true },
-            {dataField: "description", text: T("Description"),
-             sort: true, filtered: true },
-            {dataField: "created_time", text: T("Creation Time"),
-             sort: true, formatter: (cell, row) => {
-                return <VeloTimestamp usec={cell * 1000}/>;
-            }},
-            {dataField: "modified_time", text: T("Modified Time"),
-             sort: true, formatter: (cell, row) => {
-                 return <VeloTimestamp usec={cell * 1000}/>;
-             }},
-            {dataField: "creator", text: T("Creator")},
-            {dataField: "collaborators", text: T("Collaborators"),
-             sort: true, formatter: (cell, row) => {
+        let column_renderers = {
+            "Creation Time": getFormatter("timestamp"),
+            "Modified Time": getFormatter("timestamp"),
+            "Collaborators": (cell, row) => {
                  return _.map(cell, function(item, idx) {
                      return <div key={idx}>{item}</div>;
                  });
-             }},
-        ]);
+            },
+        };
 
         let selected_notebook = this.props.selected_notebook &&
             this.props.selected_notebook.notebook_id;
-        const selectRow = {
-            mode: "radio",
-            clickToSelect: true,
-            hideSelectColumn: true,
-            classes: "row-selected",
-            onSelect: function(row) {
-                this.props.setSelectedNotebook(row);
-            }.bind(this),
-            selected: [selected_notebook],
-        };
+
+        let specs = {};
+        let base_notebook = this.props.selected_notebook || {};
+        if(this.state.showNewFromRouterWizard) {
+            base_notebook = this.state.initial_request;
+        }
+
+        _.each(base_notebook.specs, spec=>{
+            let name = spec.artifact;
+            if(name) {
+                let new_spec = {};
+                let env = spec.parameters && spec.parameters.env;
+                _.each(env, item=>{
+                    new_spec[item.key] = item.value;
+                });
+                specs[name] = new_spec;
+            }
+        });
 
         return (
             <>
@@ -152,7 +225,7 @@ class NotebooksList extends React.Component {
                 <DeleteNotebook
                   notebook={this.props.selected_notebook}
                   updateNotebooks={()=>{
-                      this.props.fetchNotebooks();
+                      this.props.updateVersion();
                       this.setState({showDeleteNotebookDialog: false});
                   }}
                   closeDialog={() => this.setState({showDeleteNotebookDialog: false})}
@@ -161,17 +234,39 @@ class NotebooksList extends React.Component {
               { this.state.showNewNotebookDialog &&
                 <NewNotebook
                   updateNotebooks={()=>{
-                      this.props.fetchNotebooks();
+                      this.props.updateVersion();
                       this.setState({showNewNotebookDialog: false});
                   }}
                   closeDialog={() => this.setState({showNewNotebookDialog: false})}
+                />
+              }
+              { this.state.showNotebookCopyDialog &&
+                <NewNotebook
+                  notebook_parameters={this.props.selected_notebook}
+                  parameters={specs}
+                  updateNotebooks={()=>{
+                      this.props.updateVersion();
+                      this.setState({showNotebookCopyDialog: false});
+                  }}
+                  closeDialog={() => this.setState({showNotebookCopyDialog: false})}
+                />
+              }
+              { this.state.showNewFromRouterWizard &&
+                <NewNotebook
+                  notebook_parameters={this.state.initial_request}
+                  parameters={specs}
+                  updateNotebooks={()=>{
+                      this.props.updateVersion();
+                      this.setState({showNewFromRouterWizard: false});
+                  }}
+                  closeDialog={() => this.setState({showNewFromRouterWizard: false})}
                 />
               }
               { this.state.showEditNotebookDialog &&
                 <EditNotebook
                   notebook={this.props.selected_notebook}
                   updateNotebooks={()=>{
-                      this.props.fetchNotebooks();
+                      this.props.updateVersion();
                       this.setState({showEditNotebookDialog: false});
                   }}
                   closeDialog={() => this.setState({showEditNotebookDialog: false})}
@@ -210,6 +305,13 @@ class NotebooksList extends React.Component {
                         <span className="sr-only">{T("New Notebook")}</span>
                       </Button>
                     </ToolTip>
+                    <ToolTip tooltip={T("Copy Notebook")}>
+                      <Button onClick={()=>this.setState({showNotebookCopyDialog: true})}
+                              variant="default">
+                        <FontAwesomeIcon icon="copy"/>
+                        <span className="sr-only">{T("Copy Notebook")}</span>
+                      </Button>
+                    </ToolTip>
                     <ToolTip tooltip={T("Delete Notebook")}>
                       <Button disabled={_.isEmpty(this.props.selected_notebook)}
                               onClick={()=>this.setState({showDeleteNotebookDialog: true})}
@@ -243,25 +345,53 @@ class NotebooksList extends React.Component {
                       </Button>
                     </ToolTip>
                   </ButtonGroup>
+
+                  <ButtonGroup>
+                    { this.state.page_state ?
+                      <TablePaginationControl
+                        total_size={this.state.page_state.total_size}
+                        start_row={this.state.page_state.start_row}
+                        page_size={this.state.page_state.page_size}
+                        current_page={this.state.page_state.start_row /
+                                      this.state.page_state.page_size}
+                        onRowChange={this.state.page_state.onRowChange}
+                        onPageSizeChange={this.state.page_state.onPageSizeChange}
+                      /> :  <TablePaginationControl total_size={0}/> }
+                  </ButtonGroup>
+
+                  <ButtonGroup>
+                    <TransformViewer
+                      transform={this.state.transform}
+                      setTransform={t=>this.setState({transform: t})}
+                    />
+                  </ButtonGroup>
                 </Navbar>
               }
               <div className="fill-parent no-margins toolbar-margin selectable">
-                {_.isEmpty(this.props.notebooks) ?
-                 <div className="no-content">
-                   {T("No notebooks available - create one first")}
-                 </div> :
-                 <BootstrapTable
-                   hover
-                   condensed
-                   keyField="notebook_id"
-                   bootstrap4
-                   headerClasses="alert alert-secondary"
-                   bodyClasses="fixed-table-body"
-                   data={this.props.notebooks}
-                   columns={columns}
-                   selectRow={ selectRow }
-                   filter={ filterFactory() }
-                 />}
+                <VeloPagedTable
+                  params={{type: "NOTEBOOKS"}}
+                  name="Notebooks"
+                  showStackDialog={false}
+                  version={{version: this.props.version}}
+                  renderers={column_renderers}
+                  no_spinner={true}
+                  selectRow={{
+                      onSelect: (row, idx)=>{
+                          this.props.setSelectedNotebook(row.NotebookId);
+                      }}}
+                  row_classes={row=>{
+                      if(row.NotebookId === selected_notebook) {
+                          return "row-selected";
+                      };
+                      return "";
+                  }}
+                  no_toolbar={true}
+                  setPageState={x=>this.setState({page_state: x})}
+                  transform={this.state.transform}
+                  setTransform={x=>{
+                      this.setState({transform: x, filter: ""});
+                  }}
+                />
               </div>
             </>
         );
@@ -269,3 +399,20 @@ class NotebooksList extends React.Component {
 };
 
 export default withRouter(NotebooksList);
+
+
+const str = x=>{
+    if(_.isNumber(x)) {
+        return x.toString();
+    }
+
+    if(_.isString(x)) {
+        return x;
+    };
+
+    if(_.isUndefined(x)) {
+        return x;
+    }
+
+    return JSON.stringify(x);
+};

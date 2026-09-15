@@ -5,10 +5,10 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -17,6 +17,7 @@ import (
 type FlowsPluginArgs struct {
 	ClientId string `vfilter:"required,field=client_id"`
 	FlowId   string `vfilter:"optional,field=flow_id"`
+	Summary  bool   `vfilter:"optional,field=summary,doc=If specified we fetch just the basic summary of the flow. This is a bit faster."`
 }
 
 type FlowsPlugin struct{}
@@ -29,6 +30,7 @@ func (self FlowsPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "flows", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -55,6 +57,20 @@ func (self FlowsPlugin) Call(
 			return
 		}
 
+		client_info_manager, err := services.GetClientInfoManager(config_obj)
+		if err != nil {
+			scope.Log("flows: %v", err)
+			return
+		}
+
+		// Check the client exists at all.
+		_, err = client_info_manager.Get(ctx, arg.ClientId)
+		if err != nil {
+			scope.Log("flows: unable to get client %v: %v",
+				arg.ClientId, err)
+			return
+		}
+
 		launcher, err := services.GetLauncher(config_obj)
 		if err != nil {
 			scope.Log("flows: %v", err)
@@ -64,7 +80,11 @@ func (self FlowsPlugin) Call(
 		// The user only cares about one flow
 		if arg.FlowId != "" {
 			flow_details, err := launcher.GetFlowDetails(
-				ctx, config_obj, arg.ClientId, arg.FlowId)
+				ctx, config_obj, services.GetFlowOptions{
+					Downloads: !arg.Summary,
+					Request:   !arg.Summary,
+				},
+				arg.ClientId, arg.FlowId)
 			if err == nil {
 				item := json.ConvertProtoToOrderedDict(
 					flow_details.Context)
@@ -85,7 +105,12 @@ func (self FlowsPlugin) Call(
 		for {
 			options := result_sets.ResultSetOptions{}
 			result, err := launcher.GetFlows(ctx, config_obj,
-				arg.ClientId, options, offset, length)
+				arg.ClientId, options,
+				services.GetFlowOptions{
+					Downloads: !arg.Summary,
+					Request:   !arg.Summary,
+				},
+				offset, length)
 			if err != nil {
 				scope.Log("flows: %v", err)
 				return
@@ -115,8 +140,14 @@ func (self FlowsPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:     "flows",
 		Doc:      "Retrieve the flows launched on each client.",
 		ArgType:  type_map.AddType(scope, &FlowsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  3,
 	}
+}
+
+type CancelFlowFunctionArgs struct {
+	ClientId string `vfilter:"required,field=client_id"`
+	FlowId   string `vfilter:"optional,field=flow_id"`
 }
 
 type CancelFlowFunction struct{}
@@ -125,7 +156,7 @@ func (self *CancelFlowFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	arg := &FlowsPluginArgs{}
+	arg := &CancelFlowFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 	if err != nil {
 		scope.Log("cancel_flow: %s", err.Error())
@@ -133,7 +164,7 @@ func (self *CancelFlowFunction) Call(ctx context.Context,
 	}
 
 	permissions := acls.COLLECT_CLIENT
-	if arg.ClientId == "server" {
+	if arg.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		permissions = acls.COLLECT_SERVER
 	}
 
@@ -170,12 +201,15 @@ func (self *CancelFlowFunction) Call(ctx context.Context,
 	return json.ConvertProtoToOrderedDict(res)
 }
 
-func (self CancelFlowFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self CancelFlowFunction) Info(
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:     "cancel_flow",
-		Doc:      "Cancels the flow.",
-		ArgType:  type_map.AddType(scope, &FlowsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.COLLECT_SERVER, acls.COLLECT_CLIENT).Build(),
+		Name:    "cancel_flow",
+		Doc:     "Cancels the flow.",
+		ArgType: type_map.AddType(scope, &CancelFlowFunctionArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.COLLECT_SERVER, acls.COLLECT_CLIENT).Build(),
+		Version: 3,
 	}
 }
 
@@ -189,6 +223,7 @@ func (self EnumerateFlowPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "enumerate_flow", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -241,12 +276,15 @@ func (self EnumerateFlowPlugin) Call(
 	return output_chan
 }
 
-func (self EnumerateFlowPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+func (self EnumerateFlowPlugin) Info(
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
 	return &vfilter.PluginInfo{
-		Name:     "enumerate_flow",
-		Doc:      "Enumerate all the files that make up a flow.",
-		ArgType:  type_map.AddType(scope, &FlowsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Name:    "enumerate_flow",
+		Doc:     "Enumerate all the files that make up a flow.",
+		ArgType: type_map.AddType(scope, &CancelFlowFunctionArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.READ_RESULTS).Build(),
+		Version: 3,
 	}
 }
 
@@ -264,7 +302,7 @@ func (self *GetFlowFunction) Call(ctx context.Context,
 	}
 
 	permissions := acls.COLLECT_CLIENT
-	if arg.ClientId == "server" {
+	if arg.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
 		permissions = acls.COLLECT_SERVER
 	}
 
@@ -292,7 +330,11 @@ func (self *GetFlowFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 	res, err := launcher.GetFlowDetails(
-		ctx, config_obj, arg.ClientId, arg.FlowId)
+		ctx, config_obj, services.GetFlowOptions{
+			Downloads: !arg.Summary,
+			Request:   !arg.Summary,
+		},
+		arg.ClientId, arg.FlowId)
 	if err != nil {
 		scope.Log("get_flow: %v", err)
 		return vfilter.Null{}
@@ -302,12 +344,15 @@ func (self *GetFlowFunction) Call(ctx context.Context,
 		Set("AvailableDownloads", res.AvailableDownloads)
 }
 
-func (self GetFlowFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+func (self GetFlowFunction) Info(
+	scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
-		Name:     "get_flow",
-		Doc:      "Gets flow details.",
-		ArgType:  type_map.AddType(scope, &FlowsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.COLLECT_CLIENT, acls.COLLECT_SERVER).Build(),
+		Name:    "get_flow",
+		Doc:     "Gets flow details.",
+		ArgType: type_map.AddType(scope, &FlowsPluginArgs{}),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
+			acls.COLLECT_CLIENT, acls.COLLECT_SERVER).Build(),
+		Version: 3,
 	}
 }
 

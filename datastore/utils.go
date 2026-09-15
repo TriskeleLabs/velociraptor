@@ -7,6 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 const (
@@ -44,7 +45,7 @@ func NewMultiGetSubjectRequest(message proto.Message, path api.DSPathSpec, data 
 	}
 }
 
-// A helper function to read multipe subjects at the same time.
+// A helper function to read multiple subjects at the same time.
 func MultiGetSubject(
 	config_obj *config_proto.Config,
 	requests []*MultiGetSubjectRequest) error {
@@ -76,7 +77,7 @@ func Walk(config_obj *config_proto.Config,
 	with_directories bool,
 	walkFn WalkFunc) error {
 
-	TraceDirectory(config_obj, "Walk", root)
+	TraceDirectory(datastore, config_obj, "Walk", root)
 	all_children, err := datastore.ListChildren(config_obj, root)
 	if err != nil {
 		return err
@@ -100,6 +101,7 @@ func Walk(config_obj *config_proto.Config,
 		err := Walk(config_obj, datastore, d, with_directories, walkFn)
 		if err != nil {
 			// Do not quit the walk early.
+			_ = err
 		}
 	}
 
@@ -120,6 +122,18 @@ func Walk(config_obj *config_proto.Config,
 	}
 
 	return nil
+}
+
+func RecursiveDelete(
+	config_obj *config_proto.Config,
+	datastore DataStore, root api.DSPathSpec) error {
+	return Walk(config_obj, datastore, root, false,
+		func(urn api.DSPathSpec) error {
+			// Ignore errors so we can keep going as much as possible.
+			_ = datastore.DeleteSubjectWithCompletion(
+				config_obj, urn, utils.BackgroundWriter)
+			return nil
+		})
 }
 
 func GetImplementationName(

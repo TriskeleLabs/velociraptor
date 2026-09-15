@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"www.velocidex.com/golang/velociraptor/config"
+	"www.velocidex.com/golang/velociraptor/constants"
 	logging "www.velocidex.com/golang/velociraptor/logging"
 )
 
@@ -29,7 +30,7 @@ func doBanner() {
 	}
 	for _, line := range strings.Split(banner, "\n") {
 		if len(line) > 0 {
-			logging.Prelog(line)
+			logging.Prelog("%s", line)
 		}
 	}
 
@@ -46,9 +47,11 @@ func doBanner() {
 		}
 
 		switch pair[0] {
-		case // Ignore this one as it is the actual configuration "VELOCIRAPTOR_CONFIG",
-			"VELOCIRAPTOR_SLOW_FILESYSTEM",
-			"VELOCIRAPTOR_DISABLE_CSRF", "VELOCIRAPTOR_INJECT_API_SLEEP",
+		case // Ignore this one as it is the actual configuration
+			constants.VELOCIRAPTOR_LITERAL_CONFIG,
+			constants.VELOCIRAPTOR_SLOW_FILESYSTEM,
+			constants.VELOCIRAPTOR_DISABLE_CSRF,
+			constants.VELOCIRAPTOR_INJECT_API_SLEEP,
 			"GOGC", "GOTRACEBACK", "GOMAXPROCS", "GODEBUG", "GOMEMLIMIT",
 			"GORACE":
 			logging.Prelog("<yellow>Environment Variable %v:</> %v",

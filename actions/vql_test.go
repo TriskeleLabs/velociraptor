@@ -5,19 +5,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/actions"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+
+	// For execve and query
+	_ "www.velocidex.com/golang/velociraptor/vql/protocols"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools"
+	_ "www.velocidex.com/golang/velociraptor/vql/tools/shell"
 )
 
 type ClientVQLTestSuite struct {
 	test_utils.TestSuite
+}
+
+func (self *ClientVQLTestSuite) SetupTest() {
+	self.ConfigObj = self.LoadConfig()
+	self.ConfigObj.Client.PreventExecve = true
+	self.TestSuite.SetupTest()
 }
 
 func (self *ClientVQLTestSuite) TestCPUThrottler() {
@@ -102,8 +114,8 @@ func (self *ClientVQLTestSuite) TestDependentArtifacts() {
 	var responses []*crypto_proto.VeloMessage
 	vtesting.WaitUntil(5*time.Second, self.T(), func() bool {
 		responses = resp.Drain.Messages()
-		return "{\"X\":1,\"_Source\":\"Custom.Foo.Bar.Baz.A\"}\n" ==
-			getVQLResponse(responses)
+		return getVQLResponse(responses) ==
+			"Target: Query, JSONL: {\"X\":1,\"_Source\":\"Custom.Foo.Bar.Baz.A\"}\n\n"
 	})
 }
 
@@ -127,6 +139,49 @@ func (self *ClientVQLTestSuite) TestMaxRows() {
 		payloads := getResponsePacketCounts(responses)
 		return len(payloads) == 2 && payloads[0] == 10 && payloads[1] == 10
 	})
+}
+
+func (self *ClientVQLTestSuite) TestExecve() {
+	resp := responder.TestResponderWithFlowId(self.ConfigObj, "TestMaxRows")
+
+	logging.ClearMemoryLogs()
+
+	actions.VQLClientAction{}.StartQuery(self.ConfigObj, self.Sm.Ctx, resp,
+		&actions_proto.VQLCollectorArgs{
+			MaxRow: 10,
+			Query: []*actions_proto.VQLRequest{
+				{
+					Name: "Query",
+					VQL:  "SELECT * FROM execve(argv='ls')",
+					//					VQL:  "SELECT * FROM query(query={ SELECT * FROM execve(argv='ls') })",
+				},
+			},
+		})
+
+	vtesting.WaitUntil(time.Second, self.T(), func() bool {
+		return vtesting.MemoryLogsContainRegex(
+			"execve: Not allowed to execve by configuration.")
+	})
+
+	logging.ClearMemoryLogs()
+
+	// Make sure the query() plugin propagates the execve flag
+	actions.VQLClientAction{}.StartQuery(self.ConfigObj, self.Sm.Ctx, resp,
+		&actions_proto.VQLCollectorArgs{
+			MaxRow: 10,
+			Query: []*actions_proto.VQLRequest{
+				{
+					Name: "Query",
+					VQL:  "SELECT * FROM query(query={ SELECT * FROM execve(argv='ls') })",
+				},
+			},
+		})
+
+	vtesting.WaitUntil(time.Second, self.T(), func() bool {
+		return vtesting.MemoryLogsContainRegex(
+			"execve: Not allowed to execve by configuration.")
+	})
+
 }
 
 func (self *ClientVQLTestSuite) TestMaxWait() {
@@ -155,27 +210,6 @@ func (self *ClientVQLTestSuite) TestMaxWait() {
 				return len(payloads) == 2 && payloads[0] == 2 && payloads[1] == 2
 			})
 		}))
-}
-
-func getLogs(responses []*crypto_proto.VeloMessage) string {
-	result := ""
-	for _, item := range responses {
-		if item.LogMessage != nil {
-			result += item.LogMessage.Jsonl + "\n"
-		}
-	}
-
-	return result
-}
-
-func getVQLResponse(responses []*crypto_proto.VeloMessage) string {
-	for _, item := range responses {
-		if item.VQLResponse != nil {
-			return item.VQLResponse.JSONLResponse
-		}
-	}
-
-	return ""
 }
 
 func TestClientVQL(t *testing.T) {

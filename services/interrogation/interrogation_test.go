@@ -15,6 +15,7 @@ import (
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/interrogation"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -49,7 +50,7 @@ type: INTERNAL
 	assert.NoError(self.T(), err)
 
 	client_info_manager.Set(self.Ctx, &services.ClientInfo{
-		actions_proto.ClientInfo{
+		ClientInfo: &actions_proto.ClientInfo{
 			ClientId: self.client_id,
 		},
 	})
@@ -66,11 +67,15 @@ func (self *ServicesTestSuite) EmulateCollection(
 	journal, err := services.GetJournal(self.ConfigObj)
 	assert.NoError(self.T(), err)
 
-	journal.PushRowsToArtifact(self.Ctx, self.ConfigObj,
-		rows, artifact, self.client_id, self.flow_id)
+	err = journal.PushRowsToArtifact(self.Ctx, self.ConfigObj, rows,
+		services.JournalOptions{
+			ArtifactName: artifact,
+			ClientId:     self.client_id,
+			FlowId:       self.flow_id})
+	assert.NoError(self.T(), err)
 
 	// Emulate a flow completion message coming from the flow processor.
-	journal.PushRowsToArtifact(self.Ctx, self.ConfigObj,
+	err = journal.PushRowsToArtifact(self.Ctx, self.ConfigObj,
 		[]*ordereddict.Dict{ordereddict.NewDict().
 			Set("ClientId", self.client_id).
 			Set("FlowId", self.flow_id).
@@ -78,8 +83,10 @@ func (self *ServicesTestSuite) EmulateCollection(
 				ClientId:             self.client_id,
 				SessionId:            self.flow_id,
 				ArtifactsWithResults: []string{artifact}})},
-		"System.Flow.Completion", "server", "",
+		artifacts.FLOW_COMPLETION,
 	)
+	assert.NoError(self.T(), err)
+
 	return self.flow_id
 }
 
@@ -130,7 +137,7 @@ func (self *ServicesTestSuite) TestEnrollService() {
 
 	// Check the client does not exist in the datastore yet
 	client_path_manager := paths.NewClientPathManager(self.client_id)
-	client_info := &services.ClientInfo{}
+	client_info := &services.ClientInfo{ClientInfo: &actions_proto.ClientInfo{}}
 	err = db.GetSubject(self.ConfigObj, client_path_manager.Path(), client_info)
 	assert.Error(self.T(), err)
 	assert.Equal(self.T(), client_info.ClientId, "")
@@ -150,8 +157,7 @@ func (self *ServicesTestSuite) TestEnrollService() {
 		[]*ordereddict.Dict{
 			enroll_message, enroll_message, enroll_message, enroll_message,
 		},
-		"Server.Internal.Enrollment",
-		"server", "")
+		artifacts.ENROLLMENT_QUEUE)
 	assert.NoError(self.T(), err)
 
 	// Wait here until the client is enrolled

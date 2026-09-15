@@ -2,19 +2,14 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"io"
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/acls"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	"www.velocidex.com/golang/velociraptor/json"
-	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -66,49 +61,11 @@ func (self *InventoryAddFunction) Call(ctx context.Context,
 		Version:      arg.Version,
 	}
 
-	if arg.File != nil {
-		accessor, err := accessors.GetAccessor(arg.Accessor, scope)
-		if err != nil {
-			scope.Log("inventory_add: %s", err)
-			return vfilter.Null{}
-		}
-
-		reader, err := accessor.OpenWithOSPath(arg.File)
-		if err != nil {
-			scope.Log("inventory_add: %s", err)
-			return vfilter.Null{}
-		}
-
-		path_manager := paths.NewInventoryPathManager(config_obj, tool)
-		pathspec, file_store_factory, err := path_manager.Path()
-		if err != nil {
-			scope.Log("inventory_add: %s", err)
-			return vfilter.Null{}
-		}
-
-		writer, err := file_store_factory.WriteFile(pathspec)
-		if err != nil {
-			scope.Log("inventory_add: %s", err)
-			return vfilter.Null{}
-		}
-		defer writer.Close()
-
-		_ = writer.Truncate()
-
-		sha_sum := sha256.New()
-
-		_, err = utils.Copy(ctx, writer, io.TeeReader(reader, sha_sum))
-		if err != nil {
-			scope.Log("inventory_add: %s", err)
-			return vfilter.Null{}
-		}
-
-		tool.Hash = hex.EncodeToString(sha_sum.Sum(nil))
+	if tool.Filename == "" && arg.File != nil {
+		// If the file is uploaded from the local filesystem we must
+		// serve it because it is not public.
 		tool.ServeLocally = true
-
-		if tool.Filename == "" {
-			tool.Filename = arg.File.Basename()
-		}
+		tool.Filename = arg.File.Basename()
 	}
 
 	inventory, err := services.GetInventory(config_obj)
@@ -126,6 +83,46 @@ func (self *InventoryAddFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
+	if arg.File != nil {
+		accessor, err := accessors.GetAccessor(arg.Accessor, scope)
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+
+		reader, err := accessor.OpenWithOSPath(arg.File)
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+
+		writer, err := inventory.WriteTool(ctx, config_obj,
+			tool.Name, tool.Version)
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+
+		_, err = utils.Copy(ctx, writer, reader)
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+		err = writer.Close()
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+
+		// Get the latest tool info including the hash.
+		tool, err = inventory.ProbeToolInfo(ctx, config_obj,
+			tool.Name, tool.Version)
+		if err != nil {
+			scope.Log("inventory_add: %s", err)
+			return vfilter.Null{}
+		}
+	}
+
 	// Do not read the tool back - reading the tool back will
 	// force it to be materialized (downloaded). It should be
 	// possible to add tools without having this immediately
@@ -139,7 +136,8 @@ func (self *InventoryAddFunction) Info(
 		Name:     "inventory_add",
 		Doc:      "Add tool to ThirdParty inventory.",
 		ArgType:  type_map.AddType(scope, &InventoryAddFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Version:  2,
 	}
 }
 
@@ -196,10 +194,13 @@ func (self *InventoryGetFunction) Call(ctx context.Context,
 		url = tool.Url
 	}
 
+	serialized_urls := json.MustMarshalString(tool.ServeUrls)
+
 	result := ordereddict.NewDict().
 		Set("Tool_"+arg.Tool+"_HASH", tool.Hash).
 		Set("Tool_"+arg.Tool+"_FILENAME", tool.Filename).
 		Set("Tool_"+arg.Tool+"_URL", url).
+		Set("Tool_"+arg.Tool+"_URLs", serialized_urls).
 		Set("Definition", tool)
 	return result
 }
@@ -210,7 +211,8 @@ func (self *InventoryGetFunction) Info(
 		Name:     "inventory_get",
 		Doc:      "Get tool info from inventory service.",
 		ArgType:  type_map.AddType(scope, &InventoryGetFunctionArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Version:  2,
 	}
 }
 
@@ -226,6 +228,7 @@ func (self InventoryPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "inventory", args)()
 
 		config_obj, ok := vql_subsystem.GetServerConfig(scope)
 		if !ok {

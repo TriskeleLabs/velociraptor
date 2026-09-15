@@ -14,7 +14,6 @@ import (
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -133,7 +132,7 @@ func (self USNPlugin) Call(
 	go func() {
 		defer close(output_chan)
 		defer utils.RecoverVQL(scope)
-		defer vql_subsystem.RegisterMonitor("parse_usn", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_usn", args)()
 
 		arg := &USNPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -212,7 +211,7 @@ func (self USNPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfil
 		Doc:      "Parse the USN journal from a device.",
 		ArgType:  type_map.AddType(scope, &USNPluginArgs{}),
 		Version:  2,
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -231,7 +230,7 @@ func (self WatchUSNPlugin) Call(
 	go func() {
 		defer close(output_chan)
 		defer utils.RecoverVQL(scope)
-		defer vql_subsystem.RegisterMonitor("watch_yaml", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_usn", args)()
 
 		arg := &WatchUSNPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)

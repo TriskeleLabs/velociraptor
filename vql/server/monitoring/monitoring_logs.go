@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -25,12 +25,11 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/file_store"
-	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	artifact_paths "www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -97,6 +96,7 @@ func (self MonitoringLogsPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "monitoring_logs", args)()
 
 		// Depending on the parameters, we need to read from
 		// different places.
@@ -142,7 +142,7 @@ func (self MonitoringLogsPlugin) Info(
 		Name:     "monitoring_logs",
 		Doc:      "Retrieve log messages from client event monitoring for the specified client id and artifact",
 		ArgType:  type_map.AddType(scope, &MonitoringLogsPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 
@@ -151,23 +151,21 @@ func getResultSetReader(
 	config_obj *config_proto.Config,
 	arg *MonitoringLogsPluginArgs) (result_sets.TimedResultSetReader, error) {
 
-	file_store_factory := file_store.GetFileStore(config_obj)
-
 	if arg.Artifact != "" {
 		if arg.Source != "" {
 			arg.Artifact = arg.Artifact + "/" + arg.Source
 			arg.Source = ""
 		}
 
-		mode := paths.MODE_CLIENT_EVENT
-		if arg.ClientId == "server" {
-			mode = paths.MODE_SERVER_EVENT
+		mode := artifact_modes.MODE_CLIENT_EVENT
+		if arg.ClientId == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
+			mode = artifact_modes.MODE_SERVER_EVENT
 		}
 
 		path_manager := artifact_paths.NewArtifactLogPathManagerWithMode(
 			config_obj, arg.ClientId, "", arg.Artifact, mode)
 		return result_sets.NewTimedResultSetReader(
-			ctx, file_store_factory, path_manager)
+			ctx, config_obj, path_manager)
 	}
 
 	return nil, errors.New(

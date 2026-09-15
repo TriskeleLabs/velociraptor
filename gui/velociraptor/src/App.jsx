@@ -1,11 +1,14 @@
 import React, { Component } from 'react';
 import './css/App.css';
 import qs from "qs";
+import _ from 'lodash';
 
 import PropTypes from 'prop-types';
 import VeloNavigator from './components/sidebar/navigator.jsx';
+import GlobalMessages from './components/users/global-messages.jsx';
 import VeloClientSearch from './components/clients/search.jsx';
 import VeloClientList from './components/clients/clients-list.jsx';
+import DocButton from './components/docs/doc-button.jsx';
 import VeloHostInfo from './components/clients/host-info.jsx';
 import ServerInfo from './components/server/server-info.jsx';
 import ClientSetterFromRoute from './components/clients/client_info.jsx';
@@ -15,34 +18,37 @@ import VeloLiveClock from './components/utils/clock.jsx';
 import ClientFlowsView from './components/flows/client-flows-view.jsx';
 import ServerFlowsView from './components/flows/server-flows-view.jsx';
 import Notebook from './components/notebooks/notebook.jsx';
+import FullScreenTable from './components/notebooks/table_view.jsx';
 import FullScreenNotebook from './components/notebooks/full_notebook.jsx';
 import FullScreenHuntNotebook from './components/hunts/hunt-full-notebook.jsx';
 import FullScreenFlowNotebook from './components/flows/flow-full-notebook.jsx';
+import { ShellViewerFullScreen } from "./components/clients/shell-viewer.jsx";
 import ArtifactInspector from './components/artifacts/artifacts.jsx';
 import UserInspector from './components/users/user-inspector.jsx';
 import VeloHunts from './components/hunts/hunts.jsx';
 import UserDashboard from './components/sidebar/user-dashboard.jsx';
 import UserLabel from './components/users/user-label.jsx';
 import EventMonitoring from './components/events/events.jsx';
-import SnackbarProvider from 'react-simple-snackbar';
 import Snackbar from './components/core/snackbar.jsx';
 import Welcome from './components/welcome/welcome.jsx';
 import LoginPage from './components/welcome/login.jsx';
 import LogoffPage from './components/welcome/logoff.jsx';
 import KeyboardHelp from './components/core/keyboard-help.jsx';
 import { UserSettings } from './components/core/user.jsx';
-import { ContextMenuPopup } from './components/utils/context.jsx';
 import { Switch, Route, withRouter } from "react-router-dom";
 import { Join } from './components/utils/paths.jsx';
 import SecretManager from './components/secrets/secrets.jsx';
+import ButtonGroup from 'react-bootstrap/ButtonGroup';
 
 import Navbar from 'react-bootstrap/Navbar';
 import Nav from 'react-bootstrap/Nav';
 
 import SidebarKeyNavigator from './components/sidebar/hotkeys.jsx';
+import {setItem, schema} from './components/core/storage.jsx';
 
 import './themes/no-theme.css';
 import './themes/veloci-light.css';
+import './themes/veloci-docs.css';
 import './themes/veloci-dark.css';
 import './themes/pink-light.css';
 import './themes/github-dimmed-dark.css';
@@ -50,6 +56,7 @@ import './themes/ncurses-light.css';
 import './themes/ncurses-dark.css';
 import './themes/coolgray-dark.css';
 import './themes/midnight.css';
+import './themes/vscode-dark.css';
 
 /* This is the main App page.
 
@@ -89,10 +96,17 @@ class App extends Component {
 
     // Called to update the current client.
     setClient = (client) => {
+        let client_id = client && client.client_id;
+        if(client_id) {
+            setItem(schema.CurrentSelectedClientKey, client_id);
+        }
         this.setState({client: client});
     };
 
     setClientSearch = (query) => {
+        if (!_.isString(query)) {
+            return;
+        }
         let now = new Date();
         this.setState({query: query, query_version: now.getTime()});
         this.props.history.push('/search/' + (query || "all"));
@@ -136,15 +150,15 @@ class App extends Component {
                      <VeloNavigator
                        vfs_path={vfs_path}
                        client={this.state.client} />
-
                      <VeloClientSearch
-                       setSearch={this.setClientSearch}
-                     />
+                       setSearch={this.setClientSearch} />
                    </div>
                    <VeloClientSummary
                      setClient={this.setClient}
                      client={this.state.client}/>
-                   <UserLabel className="navbar-text"/>
+                   <UserLabel
+                     setClient={this.setClient}
+                     className="navbar-text"/>
                  </Navbar>
                  <div id="content">
                    <Switch>
@@ -164,11 +178,11 @@ class App extends Component {
                      <Route path="/secrets/">
                        <SecretManager/>
                      </Route>
-                     <Route path="/artifacts/:artifact?">
+                     <Route path="/artifacts/:artifact?/:action?">
                        <ArtifactInspector client={this.state.client}/>
                      </Route>
                      <Route path="/users/:user?" component={UserInspector}/>
-                     <Route path="/hunts/:hunt_id?/:tab?">
+                     <Route path="/hunts/:hunt_id?/:tab?/:params_json?">
                        <VeloHunts/>
                      </Route>
                      <Route path="/host/:client_id([^/]{7,})/:action?">
@@ -184,7 +198,8 @@ class App extends Component {
                        <ServerInfo  />
                      </Route>
                      <Route path="/vfs/:client_id/:vfs_path(.*)">
-                       <ClientSetterFromRoute client={this.state.client} setClient={this.setClient} />
+                       <ClientSetterFromRoute client={this.state.client}
+                                              setClient={this.setClient} />
                        <VFSViewer client={this.state.client}
                                   selectedRow={this.state.selected_row}
                                   updateCurrentNode={this.updateCurrentNode}
@@ -197,14 +212,14 @@ class App extends Component {
                        * "server". For now we assume the client_id is
                        * longer than 7 chars
                        */}
-                     <Route path="/collected/:client_id([^/]{7,})/:flow_id?/:tab?">
+                     <Route path="/collected/:client_id([^/]{7,})/:flow_id?/:tab?/:params_json?">
                        <ClientSetterFromRoute client={this.state.client} setClient={this.setClient} />
                        <ClientFlowsView client={this.state.client} />
                      </Route>
                      <Route path="/collected/server/:flow_id?/:tab?">
                        <ServerFlowsView />
                      </Route>
-                     <Route path="/notebooks/:notebook_id?">
+                     <Route path="/notebooks/:notebook_id?/:artifact?/:params_json?">
                        <Notebook />
                      </Route>
                      <Route path="/events/:client_id([^/]{7,})/:artifact?/:time?">
@@ -217,10 +232,14 @@ class App extends Component {
                    </Switch>
                  </div>
                  <Navbar fixed="bottom" className="app-footer justify-content-between ">
-                   <Nav></Nav>
+                   <Nav>
+                     <ButtonGroup>
+                       <GlobalMessages/>
+                       <DocButton />
+                     </ButtonGroup>
+                   </Nav>
                    <Nav>
                      <VeloLiveClock className="float-right" />
-                     <Snackbar />
                    </Nav>
                  </Navbar>
                </div>;
@@ -230,25 +249,30 @@ class App extends Component {
         return (
             <div>
               <UserSettings>
-                <SnackbarProvider>
-                  <SidebarKeyNavigator client={this.state.client}/>
-                  <Switch>
-                    <Route path="/fullscreen/notebooks/:notebook_id">
-                      <FullScreenNotebook />
-                    </Route>
-                    <Route path="/fullscreen/hunts/:hunt_id/notebook">
-                      <FullScreenHuntNotebook />
-                    </Route>
-                    <Route path="/fullscreen/collected/:client_id/:flow_id/notebook">
-                      <FullScreenFlowNotebook />
-                    </Route>
-                    <Route>
-                      { this.renderApp() }
-                    </Route>
-                  </Switch>
-                  <KeyboardHelp />
-                </SnackbarProvider>
-                <ContextMenuPopup/>
+                <SidebarKeyNavigator client={this.state.client}/>
+                <Switch>
+                  <Route path="/fullscreen/shell/:artifact/:client_id/:flow_id">
+                    <ShellViewerFullScreen />
+                  </Route>
+
+                  <Route path="/fullscreen/notebooks/:notebook_id">
+                    <FullScreenNotebook />
+                  </Route>
+                  <Route path="/fullscreen/hunts/:hunt_id/notebook">
+                    <FullScreenHuntNotebook />
+                  </Route>
+                  <Route path="/fullscreen/collected/:client_id/:flow_id/notebook">
+                    <FullScreenFlowNotebook />
+                  </Route>
+                  <Route path="/fullscreen/table/:state">
+                    <FullScreenTable />
+                  </Route>
+                  <Route>
+                    { this.renderApp() }
+                  </Route>
+                </Switch>
+                <KeyboardHelp />
+                <Snackbar />
               </UserSettings>
             </div>
         );
@@ -260,10 +284,16 @@ class App extends Component {
         // rendering the main page with this special login page.
         if (window.ErrorState) {
             if (window.ErrorState.Type === "Login") {
-                return <LoginPage/>;
+                return <>
+                         <LoginPage/>
+                         <Snackbar />
+                       </>;
             }
             if (window.ErrorState.Type === "Logoff") {
-                return <LogoffPage/>;
+                return <>
+                         <LogoffPage/>
+                         <Snackbar />
+                       </>;
             }
         }
 

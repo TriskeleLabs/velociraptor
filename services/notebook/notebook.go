@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/timelines"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -25,6 +26,14 @@ var (
 type NotebookManager struct {
 	config_obj *config_proto.Config
 	Store      NotebookStore
+
+	SuperTimelineStorer        timelines.ISuperTimelineStorer
+	SuperTimelineReaderFactory timelines.ISuperTimelineReader
+	SuperTimelineWriterFactory timelines.ISuperTimelineWriter
+	SuperTimelineAnnotator     timelines.ISuperTimelineAnnotator
+	AttachmentManager          AttachmentManager
+
+	BackupProvider NotebookBackupProvider
 }
 
 func (self *NotebookManager) GetNotebook(
@@ -41,13 +50,15 @@ func (self *NotebookManager) GetNotebook(
 		return nil, err
 	}
 
+	// Global notebooks keep these internally.
 	if include_uploads {
 		// An error here just means there are no AvailableDownloads.
-		notebook.AvailableDownloads, _ = self.Store.GetAvailableDownloadFiles(
+		notebook.AvailableDownloads, _ = self.AttachmentManager.GetAvailableDownloadFiles(
+			ctx, notebook_id)
+		notebook.AvailableUploads, _ = self.AttachmentManager.GetAvailableUploadFiles(
 			notebook_id)
-		notebook.AvailableUploads, _ = self.Store.GetAvailableUploadFiles(
-			notebook_id)
-		notebook.Timelines = self.Store.GetAvailableTimelines(notebook_id)
+		notebook.Timelines = self.SuperTimelineStorer.GetAvailableTimelines(
+			ctx, notebook_id)
 	} else {
 		notebook.AvailableUploads = nil
 		notebook.AvailableDownloads = nil
@@ -65,11 +76,16 @@ func (self *NotebookManager) NewNotebook(
 	in.Creator = username
 	in.CreatedTime = utils.GetTime().Now().Unix()
 	in.ModifiedTime = in.CreatedTime
+	in.Version = self.Store.GetNextVersion()
 
 	// Allow hunt notebooks to be created with a specified hunt ID.
 	if !strings.HasPrefix(in.NotebookId, "N.H.") &&
 		!strings.HasPrefix(in.NotebookId, "N.F.") &&
 		!strings.HasPrefix(in.NotebookId, "N.E.") {
+		in.NotebookId = NewNotebookId()
+	}
+
+	if in.NotebookId == "" {
 		in.NotebookId = NewNotebookId()
 	}
 
@@ -96,7 +112,27 @@ func (self *NotebookManager) UpdateNotebook(
 	}
 
 	in.ModifiedTime = utils.GetTime().Now().Unix()
-	return self.Store.SetNotebook(in)
+	in.Version = self.Store.GetNextVersion()
+
+	psuedo_artifact, out, err := CalculateNotebookArtifact(
+		ctx, self.config_obj, in)
+	if err != nil {
+		return err
+	}
+
+	spec, err := CalculateSpecs(ctx, self.config_obj, psuedo_artifact, out)
+	if err != nil {
+		return err
+	}
+
+	// Update the requests based on the artifact specs.
+	err = updateNotebookRequests(
+		ctx, self.config_obj, psuedo_artifact, spec, out)
+	if err != nil {
+		return err
+	}
+
+	return self.Store.SetNotebook(out)
 }
 
 func (self *NotebookManager) GetNotebookCell(ctx context.Context,
@@ -177,29 +213,60 @@ func (self *NotebookManager) UploadNotebookAttachment(
 		return nil, err
 	}
 
-	filename := NewNotebookAttachmentId() + "-" + in.Filename
+	filename := in.Filename
+	if !in.DisableAttachmentId {
+		filename = NewNotebookAttachmentId() + "-" + in.Filename
+	}
 
-	full_path, err := self.Store.StoreAttachment(
+	full_path, err := self.AttachmentManager.StoreAttachment(
 		in.NotebookId, filename, decoded)
 	if err != nil {
 		return nil, err
 	}
 
+	frontend_service, err := services.GetFrontendManager(self.config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	public_url, err := frontend_service.GetBaseURL(self.config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate the URL to the resource
+	public_url.Path = path.Join(public_url.Path, full_path.AsClientPath())
+	values := public_url.Query()
+	values.Set("org_id", utils.NormalizedOrgId(self.config_obj.OrgId))
+	public_url.RawQuery = values.Encode()
+
 	result := &api_proto.NotebookFileUploadResponse{
-		Url: full_path.AsClientPath() + "?org_id=" +
-			url.QueryEscape(utils.NormalizedOrgId(self.config_obj.OrgId)),
+		Url:      public_url.String(),
 		Filename: filename,
 	}
+
+	result.MimeType = utils.GetMimeString(decoded, utils.AutoDetectMime(true))
 
 	return result, nil
 }
 
 func NewNotebookManager(
 	config_obj *config_proto.Config,
-	storage NotebookStore) *NotebookManager {
+	Store NotebookStore,
+	SuperTimelineStorer timelines.ISuperTimelineStorer,
+	SuperTimelineReaderFactory timelines.ISuperTimelineReader,
+	SuperTimelineWriterFactory timelines.ISuperTimelineWriter,
+	SuperTimelineAnnotator timelines.ISuperTimelineAnnotator,
+	AttachmentManager AttachmentManager,
+) *NotebookManager {
 	result := &NotebookManager{
-		config_obj: config_obj,
-		Store:      storage,
+		config_obj:                 config_obj,
+		Store:                      Store,
+		SuperTimelineStorer:        SuperTimelineStorer,
+		SuperTimelineReaderFactory: SuperTimelineReaderFactory,
+		SuperTimelineWriterFactory: SuperTimelineWriterFactory,
+		SuperTimelineAnnotator:     SuperTimelineAnnotator,
+		AttachmentManager:          AttachmentManager,
 	}
 	return result
 }
@@ -209,11 +276,34 @@ func NewNotebookManagerService(
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config) (services.NotebookManager, error) {
 
-	store, err := NewNotebookStore(ctx, wg, config_obj)
+	timeline_storer := NewTimelineStorer(config_obj)
+	store, err := NewNotebookStore(ctx, wg, config_obj, timeline_storer)
 	if err != nil {
 		return nil, err
 	}
-	notebook_service := NewNotebookManager(config_obj, store)
+
+	annotator := NewSuperTimelineAnnotatorImpl(config_obj, timeline_storer,
+		&timelines.SuperTimelineReader{},
+		&timelines.SuperTimelineWriter{})
+
+	notebook_service := NewNotebookManager(config_obj, store,
+		timeline_storer,
+		&timelines.SuperTimelineReader{},
+		&timelines.SuperTimelineWriter{},
+		annotator,
+		NewAttachmentManager(config_obj, store),
+	)
+
+	notebook_service.BackupProvider = NotebookBackupProvider{
+		notebook_manager: notebook_service,
+		config_obj:       config_obj,
+	}
+
+	// Global Notebooks can be backed up.
+	backup_service, err := services.GetBackupService(config_obj)
+	if err == nil {
+		backup_service.Register(&notebook_service.BackupProvider)
+	}
 
 	return notebook_service, notebook_service.Start(ctx, config_obj, wg)
 }
@@ -226,18 +316,8 @@ func (self *NotebookManager) ReformatVQL(
 	if err != nil {
 		return "", err
 	}
-	result := strings.Split(reformatted, "\n")
 
-	// Remove lines that consist of only spaces
-	trimmed := make([]string, 0, len(result))
-	for _, i := range result {
-		if len(i) > 0 && len(strings.TrimSpace(i)) == 0 {
-			continue
-		}
-		trimmed = append(trimmed, i)
-	}
-
-	return strings.Join(trimmed, "\n"), nil
+	return reformatted, nil
 }
 
 func verifyNotebookId(notebook_id string) error {

@@ -11,6 +11,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 )
 
 // Process a "mount" type remapping directive.
@@ -124,8 +125,11 @@ func InstallMountPoints(
 	}
 
 	// Register the new accessor.
-	manager.Register(on_accessor, mount_fs,
-		fmt.Sprintf("Remapping %v", remappings))
+	manager.Register(accessors.DescribeAccessor(
+		mount_fs, accessors.AccessorDescriptor{
+			Name:        on_accessor,
+			Description: fmt.Sprintf("Remapping %v", remappings),
+		}))
 
 	return nil
 }
@@ -146,6 +150,9 @@ func getTypedOSPath(path_type string, path string) (*accessors.OSPath, error) {
 
 	case "ntfs":
 		return accessors.NewWindowsNTFSPath(path)
+
+	case "zip":
+		return accessors.NewZipFilePath(path)
 
 	default:
 		return accessors.NewGenericOSPath(path)
@@ -187,7 +194,11 @@ func ApplyRemappingOnScope(
 			}
 
 			// Install on top of the manager
-			manager.Register(remapping.On.Accessor, to_fs, "Shadowed")
+			manager.Register(accessors.DescribeAccessor(
+				to_fs, accessors.AccessorDescriptor{
+					Name:        remapping.On.Accessor,
+					Description: "Shadowed",
+				}))
 
 		case "mount":
 			if remapping.From == nil || remapping.On == nil {
@@ -204,7 +215,7 @@ func ApplyRemappingOnScope(
 
 		case "impersonation":
 			remapped_scope.AppendPlugins(NewMockerPlugin(
-				"info", []*ordereddict.Dict{
+				"info", []types.Any{
 					ordereddict.NewDict().
 						Set("Hostname", remapping.Hostname).
 						Set("Fqdn", remapping.Hostname).
@@ -262,7 +273,8 @@ func evaluateScopeQuery(
 			return nil, fmt.Errorf(
 				"While evaluating remapping scope: Only LET statements allowed in this context")
 		}
-		for _ = range vql.Eval(ctx, sub_scope) {
+
+		for range vql.Eval(ctx, sub_scope) {
 		}
 	}
 

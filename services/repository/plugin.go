@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -15,10 +16,11 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/arg_parser"
 	"www.velocidex.com/golang/vfilter/types"
 )
 
@@ -31,12 +33,14 @@ type ArtifactRepositoryPlugin struct {
 	repository services.Repository
 	config_obj *config_proto.Config
 
-	mocks map[string][]vfilter.Row
+	mock_call_count map[string]int
+	mocks           map[string][]vfilter.Row
 }
 
 func (self *ArtifactRepositoryPlugin) SetMock(
 	artifact string, mock []vfilter.Row) {
 	self.mocks[artifact] = mock
+	self.mock_call_count[artifact] = 0
 }
 
 func (self *ArtifactRepositoryPlugin) Name() string {
@@ -60,22 +64,46 @@ func (self *ArtifactRepositoryPlugin) Call(
 	go func() {
 		defer close(output_chan)
 
-		var artifact *artifacts_proto.Artifact = nil
+		var artifact *artifacts_proto.Artifact
 
 		artifact_name := strings.Join(self.prefix, ".")
 
+		mock_call_count := self.mock_call_count[artifact_name]
+
 		// Support mocking the artifacts
 		mocks, pres := self.mocks[artifact_name]
-		if pres {
-			for _, row := range mocks {
+		if pres && len(mocks) > 0 {
+			result := mocks[mock_call_count%len(mocks)]
+			self.mock_call_count[artifact_name] = mock_call_count + 1
+
+			a_value := reflect.Indirect(reflect.ValueOf(result))
+
+			// It is a multi-call mock. The array represents an entire
+			// call.
+			if a_value.Type().Kind() == reflect.Slice {
+				for i := 0; i < a_value.Len(); i++ {
+					element := a_value.Index(i).Interface()
+					select {
+					case <-ctx.Done():
+						return
+					case output_chan <- element:
+					}
+				}
+
+				// It is a multi-row mock of a single call - dump all
+				// items into rows.
+			} else {
 				select {
 				case <-ctx.Done():
 					return
-				case output_chan <- row:
+				case output_chan <- result:
 				}
 			}
+
 			return
 		}
+
+		args = arg_parser.NormalizeArgs(args)
 
 		v, pres := args.Get("source")
 		if pres {
@@ -119,9 +147,19 @@ func (self *ArtifactRepositoryPlugin) Call(
 			precondition = scope.Bool(precondition_any)
 		}
 
-		acl_manager, ok := artifacts.GetACLManager(scope)
-		if !ok {
-			acl_manager = acl_managers.NullACLManager{}
+		// Allow the args to specify a ** kw style args.
+		kwargs_any, pres := args.Get("**")
+		if pres {
+			kwargs, ok := kwargs_any.(*ordereddict.Dict)
+			if ok {
+				args = kwargs
+			}
+		}
+
+		acl_manager, err := artifacts.GetACLManager(scope)
+		if err != nil {
+			scope.Log("GetACLManager: %v", err)
+			return
 		}
 
 		launcher, err := services.GetLauncher(self.config_obj)
@@ -144,7 +182,7 @@ func (self *ArtifactRepositoryPlugin) Call(
 			return
 		}
 
-		// Wait here untill all the sources are done.
+		// Wait here until all the sources are done.
 		wg := &sync.WaitGroup{}
 		defer wg.Wait()
 
@@ -168,26 +206,24 @@ func (self *ArtifactRepositoryPlugin) Call(
 				}
 
 				// Allow the args to override the artifact defaults.
-				for _, k := range args.Keys() {
-					if k == "source" || k == "preconditions" {
+				for _, i := range args.Items() {
+					if i.Key == "source" || i.Key == "preconditions" {
 						continue
 					}
 
-					_, pres := env.Get(k)
+					_, pres := env.Get(i.Key)
 					if !pres {
 						child_scope.Log(fmt.Sprintf(
 							"Unknown parameter %s provided to artifact %v",
-							k, strings.Join(self.prefix, ".")))
+							i.Key, strings.Join(self.prefix, ".")))
 						return
 					}
 
-					v, _ := args.Get(k)
-
-					lazy_v, ok := v.(types.LazyExpr)
+					lazy_v, ok := i.Value.(types.LazyExpr)
 					if ok {
-						v = lazy_v.Reduce(ctx)
+						i.Value = lazy_v.Reduce(ctx)
 					}
-					env.Set(k, v)
+					env.Set(i.Key, i.Value)
 				}
 
 				// Add the scope args
@@ -250,8 +286,10 @@ func (self *ArtifactRepositoryPlugin) Call(
 }
 
 func isEventArtifact(artifact *artifacts_proto.Artifact) bool {
-	switch artifact.Type {
-	case "client_event", "server_event":
+	artifact_mode := artifact_modes.ModeNameToMode(artifact.Type)
+	switch artifact_mode {
+	case artifact_modes.MODE_CLIENT_EVENT,
+		artifact_modes.MODE_SERVER_EVENT:
 		return true
 	}
 	return false
@@ -264,7 +302,7 @@ func (self *ArtifactRepositoryPlugin) copyScope(
 	vfilter.Scope, error) {
 	env := ordereddict.NewDict()
 
-	// TODO: Move most of these to the scope context as they dont
+	// TODO: Move most of these to the scope context as they don't
 	// change with subscopes so it should be faster to get them from
 	// the context.
 	for _, field := range []string{
@@ -368,15 +406,14 @@ func (self _ArtifactRepositoryPluginAssociativeProtocol) Associative(
 	}
 
 	prefix := make([]string, 0, len(value.prefix)+1)
-	for _, i := range value.prefix {
-		prefix = append(prefix, i)
-	}
+	prefix = append(prefix, value.prefix...)
 
 	return &ArtifactRepositoryPlugin{
-		prefix:     append(prefix, key),
-		repository: value.repository,
-		config_obj: value.config_obj,
-		mocks:      value.mocks,
+		prefix:          append(prefix, key),
+		repository:      value.repository,
+		config_obj:      value.config_obj,
+		mocks:           value.mocks,
+		mock_call_count: value.mock_call_count,
 	}, true
 }
 

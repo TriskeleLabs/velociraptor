@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"strings"
@@ -16,11 +15,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/faults"
 )
 
 const (
@@ -108,14 +109,14 @@ func (self *HTTPClientWithWebSocketTransport) roundTripWS(
 
 	conn, err := self.getConnection(req)
 	if err != nil {
-		utils.DlvBreak()
 		return nil, err
 	}
 
 	// Write the request on the channel
 	var data []byte
 	if req.Body != nil {
-		data, _ = ioutil.ReadAll(req.Body)
+		data, _ = utils.ReadAllWithLimit(req.Body, constants.MAX_MEMORY)
+		faults.FaultInjector.BlockHTTPDo(req.Context())
 	}
 
 	select {
@@ -224,8 +225,7 @@ func ReadMessageWithCtx(
 	buffer := &bytes.Buffer{}
 
 	deadline := utils.Now().Add(PongPeriod(config_obj))
-	ws.SetReadDeadline(deadline)
-	messageType, r, err := ws.NextReader()
+	messageType, r, err := ws.NextReaderWithDeadline(deadline)
 	if err != nil {
 		return messageType, nil, err
 	}

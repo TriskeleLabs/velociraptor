@@ -1,13 +1,13 @@
 package sanity_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/alecthomas/assert"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
+	"google.golang.org/protobuf/proto"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
@@ -20,14 +20,14 @@ import (
 	"www.velocidex.com/golang/velociraptor/services/orgs"
 	"www.velocidex.com/golang/velociraptor/services/sanity"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
 )
 
 type ServicesTestSuite struct {
 	test_utils.TestSuite
-	client_id string
-	flow_id   string
 }
 
 func (self *ServicesTestSuite) SetupTest() {
@@ -51,6 +51,35 @@ type: INTERNAL
 	self.TestSuite.SetupTest()
 }
 
+func (self *ServicesTestSuite) TestBasePath() {
+	test_cases := []struct {
+		sample string
+		ok     bool
+	}{{"/velociraptor", true},
+		{"/velociraptor/", false},
+		{"/a", true},
+		{"/ui", true},
+		{"/foo/bar", true},
+		{"/foo/bar/", false}}
+
+	sanity_checker := &sanity.SanityChecks{}
+
+	for _, tc := range test_cases {
+		config_obj := proto.Clone(self.ConfigObj).(*config_proto.Config)
+		config_obj.GUI.BasePath = tc.sample
+		config_obj.GUI.PublicUrl = fmt.Sprintf(
+			"https://www.example.com/%s/app/index.html", tc.sample)
+
+		ok := true
+		err := sanity_checker.CheckFrontendSettings(config_obj)
+		if err != nil {
+			ok = false
+		}
+
+		assert.Equal(self.T(), ok, tc.ok, "Failed %v", tc.sample)
+	}
+}
+
 // Check tool upgrade.
 func (self *ServicesTestSuite) TestUpgradeTools() {
 	closer := utils.MockTime(utils.NewMockClock(time.Unix(100, 0)))
@@ -58,6 +87,8 @@ func (self *ServicesTestSuite) TestUpgradeTools() {
 
 	// Admin forces Tool1 to non-default
 	inventory_service, err := services.GetInventory(self.ConfigObj)
+	assert.NoError(self.T(), err)
+
 	inventory_service.(*inventory.InventoryService).ClearForTests()
 
 	tool_definition := &artifacts_proto.Tool{

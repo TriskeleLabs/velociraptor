@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alecthomas/assert"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -15,6 +14,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/file_store/memory"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 )
 
 type PathManagerTestSuite struct {
@@ -59,7 +59,7 @@ func (self *PathManagerTestSuite) getDatastorePath(path_spec api.DSPathSpec) str
 			continue
 		}
 		results = append(results, normalize_path(
-			k.AsDatastoreFilename(self.config_obj)))
+			datastore.AsDatastoreFilename(ds, self.config_obj, k)))
 	}
 	assert.Equal(self.T(), 1, len(results))
 
@@ -92,9 +92,7 @@ func (self *PathManagerTestSuite) getFilestorePath(path_spec api.FSPathSpec) str
 	fd.Close()
 
 	results := []string{}
-	for _, k := range fs.Data.Keys() {
-		results = append(results, k)
-	}
+	results = append(results, fs.Data.Keys()...)
 	assert.Equal(self.T(), 1, len(results))
 
 	return results[0]

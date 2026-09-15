@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -33,7 +33,6 @@ import (
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/protobuf/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/crypto/client"
 	crypto_client "www.velocidex.com/golang/velociraptor/crypto/client"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	crypto_server "www.velocidex.com/golang/velociraptor/crypto/server"
@@ -128,7 +127,7 @@ func (self *TestSuite) TestEncDecServerToClient() {
 
 	// Decrypt the same message 100 times.
 	for i := 0; i < 100; i++ {
-		message_info, err := self.client_manager.Decrypt(cipher_text)
+		message_info, err := self.client_manager.Decrypt(self.Ctx, cipher_text)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,7 +164,7 @@ func (self *TestSuite) TestEncDecClientToServerWithSpoof() {
 		message_list, utils.GetSuperuserName(self.ConfigObj))
 	assert.NoError(t, err)
 
-	message_info, err := self.server_manager.Decrypt(cipher_text)
+	message_info, err := self.server_manager.Decrypt(self.Ctx, cipher_text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +193,7 @@ func (self *TestSuite) _EncryptMessageListWithSpoofedPackedMessage(
 	}
 
 	compressed_message_lists := [][]byte{plain_text}
-	output_cipher, err := client.NewCipher(self.client_id,
+	output_cipher, err := crypto_client.NewCipher(self.client_id,
 		self.client_private_key, &self.server_private_key.PublicKey)
 	if err != nil {
 		return nil, err
@@ -220,7 +219,7 @@ func (self *TestSuite) _EncryptMessageListWithSpoofedPackedMessage(
 		return nil, errors.Wrap(err, 0)
 	}
 
-	encrypted_serialized_packed_message_list, err := client.EncryptSymmetric(
+	encrypted_serialized_packed_message_list, err := crypto_client.EncryptSymmetric(
 		output_cipher.CipherProperties(),
 		serialized_packed_message_list,
 		comms.PacketIv)
@@ -230,7 +229,7 @@ func (self *TestSuite) _EncryptMessageListWithSpoofedPackedMessage(
 	}
 
 	comms.Encrypted = encrypted_serialized_packed_message_list
-	comms.FullHmac = client.CalcHMAC(comms, output_cipher.CipherProperties())
+	comms.FullHmac = crypto_client.CalcHMAC(comms, output_cipher.CipherProperties())
 
 	result, err := proto.Marshal(comms)
 	if err != nil {
@@ -261,7 +260,7 @@ func (self *TestSuite) TestEncDecClientToServer() {
 
 	// Decrypt the same message 100 times.
 	for i := 0; i < 100; i++ {
-		message_info, err := self.server_manager.Decrypt(cipher_text)
+		message_info, err := self.server_manager.Decrypt(self.Ctx, cipher_text)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +296,7 @@ func (self *TestSuite) TestEncryption() {
 			utils.GetSuperuserName(self.ConfigObj))
 		assert.NoError(t, err)
 
-		result, err := self.server_manager.Decrypt(cipher_text)
+		result, err := self.server_manager.Decrypt(self.Ctx, cipher_text)
 		assert.NoError(t, err)
 
 		assert.Equal(t, self.client_id, result.Source)

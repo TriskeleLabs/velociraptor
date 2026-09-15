@@ -23,25 +23,12 @@ var (
 	includedFunctions = map[string][]string{
 		"pe": []string{
 			"calculate_checksum",
+			"imphash",
 			"section_index",
-			"section_index",
-			"exports",
-			"exports",
 			"exports",
 			"exports_index",
-			"exports_index",
-			"exports_index",
-			"imports",
-			"imports",
-			"imports",
-			"imports",
-			"imports",
-			"imports",
-			"imports",
 			"imports",
 			"import_rva",
-			"import_rva",
-			"delayed_import_rva",
 			"delayed_import_rva",
 			"locale",
 			"language",
@@ -52,26 +39,17 @@ var (
 		"math": {
 			"in_range",
 			"deviation",
-			"deviation",
-			"mean",
 			"mean",
 			"serial_correlation",
-			"serial_correlation",
 			"monte_carlo_pi",
-			"monte_carlo_pi",
-			"entropy",
 			"entropy",
 			"min",
 			"max",
 			"to_number",
 			"abs",
 			"count",
-			"count",
-			"percentage",
 			"percentage",
 			"mode",
-			"mode",
-			"to_string",
 			"to_string",
 		},
 		"elf": {
@@ -476,6 +454,10 @@ var (
 	moduleLookup = make(map[string]bool)
 )
 
+type ExpressionState struct {
+	Vars []string
+}
+
 type RuleLinter struct {
 	ruleset *ast.RuleSet
 
@@ -509,8 +491,10 @@ func (self *RuleLinter) Lint() (*RuleLinter, []error) {
 	var errors []error
 
 	for _, r := range self.ruleset.Rules {
+		state := &ExpressionState{}
+
 		// First validate the condition
-		err := self.walkExpression(r.Condition, r)
+		err := self.walkExpression(r.Condition, r, state)
 		if err != nil {
 			errors = append(errors, err)
 			continue
@@ -528,23 +512,35 @@ func (self *RuleLinter) Lint() (*RuleLinter, []error) {
 		}
 	}
 
-	result.ruleset.Imports = self.ruleset.Imports
+	result.ruleset.Imports = nil
+
+	// Only include valid imports
+	for _, imp := range self.ruleset.Imports {
+		_, pres := includedFunctions[imp]
+		if pres {
+			result.ruleset.Imports = append(result.ruleset.Imports, imp)
+		}
+	}
 	return result, errors
 }
 
 func (self *RuleLinter) walkExpression(
-	node ast.Node, rule *ast.Rule) error {
-	m, ok := node.(*ast.MemberAccess)
-	if ok {
-		err := self.checkModuleAccess(m, rule)
+	node ast.Node, rule *ast.Rule, state *ExpressionState) error {
+
+	switch t := node.(type) {
+	case *ast.MemberAccess:
+		err := self.checkModuleAccess(t, rule, state)
 		if err != nil {
 			return err
 		}
+
+	case *ast.ForIn:
+		state.Vars = append(state.Vars, t.Variables...)
 	}
 
 	// fmt.Printf("Node %T: %s\n", node, node)
 	for _, c := range node.Children() {
-		err := self.walkExpression(c, rule)
+		err := self.walkExpression(c, rule, state)
 		if err != nil {
 			return err
 		}
@@ -554,11 +550,16 @@ func (self *RuleLinter) walkExpression(
 }
 
 func (self *RuleLinter) checkModuleAccess(
-	m *ast.MemberAccess, rule *ast.Rule) error {
+	m *ast.MemberAccess, rule *ast.Rule, state *ExpressionState) error {
 	id, ok := m.Container.(*ast.Identifier)
 	if ok {
 		module := id.Identifier
 		field := m.Member
+
+		// If this is a local variable it is ok
+		if utils.InString(state.Vars, module) {
+			return nil
+		}
 
 		// First check that the module is imported, if not just add
 		// the import because why not?
@@ -618,7 +619,7 @@ func (self *YaraLintFunction) Call(ctx context.Context,
 func (self *YaraLintFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
 	return &vfilter.FunctionInfo{
 		Name:     "yara_lint",
-		Doc:      "Clean a set of yara rules. This removed invalid or unsupported rules.",
+		Doc:      "Clean a set of yara rules. This removes invalid or unsupported rules.",
 		ArgType:  type_map.AddType(scope, &YaraLintFunctionArgs{}),
 		Metadata: vql.VQLMetadata().Build(),
 	}

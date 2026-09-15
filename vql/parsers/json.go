@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -26,16 +26,18 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"www.velocidex.com/golang/velociraptor/accessors"
+	"www.velocidex.com/golang/velociraptor/accessors/file"
 	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/json"
+	json_tools "www.velocidex.com/golang/velociraptor/tools/json"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/velociraptor/vql/parsers/syslog"
@@ -48,7 +50,8 @@ const (
 )
 
 type ParseJsonFunctionArg struct {
-	Data string `vfilter:"required,field=data,doc=Json encoded string."`
+	Data   string   `vfilter:"required,field=data,doc=Json encoded string."`
+	Schema []string `vfilter:"optional,field=schema,doc=Json schema to use for validation."`
 }
 type ParseJsonFunction struct{}
 
@@ -57,6 +60,7 @@ func (self ParseJsonFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMa
 		Name:    "parse_json",
 		Doc:     "Parse a JSON string into an object.",
 		ArgType: type_map.AddType(scope, &ParseJsonFunctionArg{}),
+		Version: 2,
 	}
 }
 
@@ -64,7 +68,7 @@ func (self ParseJsonFunction) Call(
 	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("parse_json", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_json", args)()
 
 	arg := &ParseJsonFunctionArg{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -73,9 +77,22 @@ func (self ParseJsonFunction) Call(
 		return &vfilter.Null{}
 	}
 
+	if len(arg.Schema) > 0 {
+		var options json_tools.ValidationOptions
+		result, errs := json_tools.ParseJsonToObjectWithSchema(
+			arg.Data, arg.Schema, options)
+		if len(errs) > 0 {
+			for _, err := range errs {
+				scope.Log("ERROR:parse_json: %v", err)
+			}
+			return &vfilter.Null{}
+		}
+		return result
+	}
+
 	result, err := utils.ParseJsonToObject([]byte(arg.Data))
 	if err != nil {
-		scope.Log("parse_json: %v", err)
+		scope.Log("parse_json: %v: %v", err, utils.Elide(arg.Data, 100))
 		return &vfilter.Null{}
 	}
 	return result
@@ -88,6 +105,7 @@ func (self ParseJsonArray) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Name:    "parse_json_array",
 		Doc:     "Parse a JSON string into an array.",
 		ArgType: type_map.AddType(scope, &ParseJsonFunctionArg{}),
+		Version: 2,
 	}
 }
 
@@ -95,7 +113,7 @@ func (self ParseJsonArray) Call(
 	ctx context.Context, scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("parse_json_array", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "parse_json_array", args)()
 
 	arg := &ParseJsonFunctionArg{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -104,7 +122,13 @@ func (self ParseJsonArray) Call(
 		return &vfilter.Null{}
 	}
 
+	arg.Data = strings.TrimSpace(arg.Data)
+
 	result_array := []json.RawMessage{}
+	if arg.Data == "" {
+		return result_array
+	}
+
 	err = json.Unmarshal([]byte(arg.Data), &result_array)
 	if err != nil {
 		scope.Log("parse_json_array: %v", err)
@@ -148,18 +172,12 @@ func (self ParseJsonlPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("parse_jsonl", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_jsonl", args)()
 
 		arg := &ParseJsonlPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
 		if err != nil {
 			scope.Log("parse_jsonl: %s", err.Error())
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
-		if err != nil {
-			scope.Log("parse_jsonl: %s", err)
 			return
 		}
 
@@ -249,7 +267,8 @@ func (self ParseJsonlPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "parse_jsonl",
 		Doc:      "Parses a line oriented json file.",
 		ArgType:  type_map.AddType(scope, &ParseJsonlPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Version:  2,
 	}
 }
 
@@ -263,7 +282,7 @@ func (self ParseJsonArrayPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("parse_json_array", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "parse_json_array", args)()
 
 		result := ParseJsonArray{}.Call(ctx, scope, args)
 		result_value := reflect.Indirect(reflect.ValueOf(result))
@@ -289,6 +308,7 @@ func (self ParseJsonArrayPlugin) Info(scope vfilter.Scope, type_map *vfilter.Typ
 		Name:    "parse_json_array",
 		Doc:     "Parses events from a line oriented json file.",
 		ArgType: type_map.AddType(scope, &ParseJsonFunctionArg{}),
+		Version: 2,
 	}
 }
 
@@ -534,10 +554,12 @@ func (self _IndexAssociativeProtocol) GetMembers(
 }
 
 type WriteJSONPluginArgs struct {
-	Filename   *accessors.OSPath   `vfilter:"required,field=filename,doc=CSV files to open"`
+	Filename   *accessors.OSPath   `vfilter:"required,field=filename,doc=JSONL files to open"`
 	Accessor   string              `vfilter:"optional,field=accessor,doc=The accessor to use"`
 	Query      vfilter.StoredQuery `vfilter:"required,field=query,doc=query to write into the file."`
 	BufferSize int                 `vfilter:"optional,field=buffer_size,doc=Maximum size of buffer before flushing to file."`
+	MaxTime    int                 `vfilter:"optional,field=max_time,doc=Maximum time before flushing the buffer (10 sec)."`
+	Append     bool                `vfilter:"optional,field=append,doc=Append JSONL records to existing file."`
 }
 
 type WriteJSONPlugin struct{}
@@ -550,7 +572,7 @@ func (self WriteJSONPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("write_jsonl", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "write_jsonl", args)()
 
 		arg := &WriteJSONPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -563,6 +585,16 @@ func (self WriteJSONPlugin) Call(
 			arg.BufferSize = BUFF_SIZE
 		}
 
+		max_time := 10 * time.Second
+		if arg.MaxTime > 0 {
+			max_time = time.Duration(arg.MaxTime) * time.Second
+		}
+
+		open_options := os.O_RDWR | os.O_CREATE | os.O_TRUNC
+		if arg.Append {
+			open_options = os.O_RDWR | os.O_CREATE | os.O_APPEND
+		}
+
 		var writer *bufio.Writer
 
 		switch arg.Accessor {
@@ -573,6 +605,13 @@ func (self WriteJSONPlugin) Call(
 				return
 			}
 
+			// Make sure we are allowed to write there.
+			err = file.CheckPrefix(arg.Filename)
+			if err != nil {
+				scope.Log("write_jsonl: %v", err)
+				return
+			}
+
 			underlying_file, err := accessors.GetUnderlyingAPIFilename(
 				arg.Accessor, scope, arg.Filename)
 			if err != nil {
@@ -580,8 +619,7 @@ func (self WriteJSONPlugin) Call(
 				return
 			}
 
-			file, err := os.OpenFile(underlying_file,
-				os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0700)
+			file, err := os.OpenFile(underlying_file, open_options, 0700)
 			if err != nil {
 				scope.Log("write_jsonl: Unable to open file %s: %s",
 					arg.Filename, err.Error())
@@ -593,24 +631,39 @@ func (self WriteJSONPlugin) Call(
 			defer writer.Flush()
 
 		default:
-			scope.Log("write_csv: Unsupported accessor for writing %v", arg.Accessor)
+			scope.Log("write_jsonl: Unsupported accessor for writing %v", arg.Accessor)
 			return
 		}
 
 		lf := []byte("\n")
 
-		for row := range arg.Query.Eval(ctx, scope) {
-			serialized, err := json.Marshal(row)
-			if err == nil {
-				writer.Write(serialized)
-				writer.Write(lf)
-			}
+		events_chan := arg.Query.Eval(ctx, scope)
 
+		for {
 			select {
 			case <-ctx.Done():
 				return
 
-			case output_chan <- row:
+			case <-utils.GetTime().After(max_time):
+				writer.Flush()
+
+			case row, ok := <-events_chan:
+				if !ok {
+					return
+				}
+
+				serialized, err := json.Marshal(row)
+				if err == nil {
+					_, _ = writer.Write(serialized)
+					_, _ = writer.Write(lf)
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- row:
+				}
 			}
 		}
 	}()
@@ -623,7 +676,8 @@ func (self WriteJSONPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap)
 		Name:     "write_jsonl",
 		Doc:      "Write a query into a JSONL file.",
 		ArgType:  type_map.AddType(scope, &WriteJSONPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_WRITE).Build(),
+		Version:  2,
 	}
 }
 
@@ -634,7 +688,7 @@ func (self WatchJsonlPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap
 		Name:     "watch_jsonl",
 		Doc:      "Watch a jsonl file and stream events from it.",
 		ArgType:  type_map.AddType(scope, &syslog.ScannerPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.FILESYSTEM_READ).Build(),
 	}
 }
 
@@ -645,16 +699,10 @@ func (self WatchJsonlPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
-		defer vql_subsystem.RegisterMonitor("watch_jsonl", args)()
+		defer vql_subsystem.RegisterMonitor(ctx, "watch_jsonl", args)()
 
 		arg := &syslog.ScannerPluginArgs{}
 		err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
-		if err != nil {
-			scope.Log("watch_jsonl: %v", err)
-			return
-		}
-
-		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 		if err != nil {
 			scope.Log("watch_jsonl: %v", err)
 			return

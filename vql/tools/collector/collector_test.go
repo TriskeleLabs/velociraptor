@@ -12,13 +12,11 @@ import (
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
-	"www.velocidex.com/golang/velociraptor/flows/proto"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
@@ -27,9 +25,13 @@ import (
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/third_party/zip"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/filesystem"
+	"www.velocidex.com/golang/velociraptor/vql/remapping"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
+	"www.velocidex.com/golang/vfilter/types"
 
 	// Load all needed plugins
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
@@ -206,15 +208,21 @@ func (self *TestSuite) SetupTest() {
 
 	collector.Clock = utils.NewMockClock(time.Unix(1602103388, 0))
 	reporting.Clock = collector.Clock
-	launcher, err := services.GetLauncher(self.ConfigObj)
-	assert.NoError(self.T(), err)
-	launcher.SetFlowIdForTests("F.1234")
+}
 
+func (self *TestSuite) mockInfo(scope vfilter.Scope) vfilter.Scope {
+	// Mock the info plugin for stable host.json
+	mock_info := remapping.NewMockerPlugin("info", []types.Any{
+		ordereddict.NewDict().
+			Set("Hostname", "TestHost").
+			Set("HostID", "1234-56")})
+
+	return remapping.NewMockScope(scope, []*remapping.MockerPlugin{mock_info})
 }
 
 func (self *TestSuite) TestCollectionWithDirectories() {
 	// Create a directory structure with files and directories.
-	dir, err := ioutil.TempDir("", "zip")
+	dir, err := tempfile.TempDir("zip")
 	assert.NoError(self.T(), err)
 
 	defer os.RemoveAll(dir)
@@ -246,7 +254,9 @@ func (self *TestSuite) TestCollectionWithDirectories() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	for _ = range (collector.CollectPlugin{}).Call(self.Ctx,
+	scope = self.mockInfo(scope)
+
+	for range (collector.CollectPlugin{}).Call(self.Ctx,
 		scope, ordereddict.NewDict().
 			Set("artifacts", []string{"Custom.Uploader"}).
 			Set("args", ordereddict.NewDict().
@@ -287,7 +297,7 @@ func (self *TestSuite) TestCollectionWithDirectories() {
 			Set("accessor", "collector").
 			Set("root", root_path_spec)) {
 		line := json.MustMarshalString(row)
-		if strings.Contains(line, "/Subdir/data/hello.txt\"") {
+		if strings.Contains(line, `/Subdir/data/hello.txt\"`) {
 			found = true
 		}
 	}
@@ -310,7 +320,7 @@ func (self *TestSuite) TestCollectionWithDirectories() {
 			Set("accessor", "collector").
 			Set("root", root_path_spec)) {
 		line := json.MustMarshalString(row)
-		if strings.Contains(line, "/Subdir/data/hello.txt\"") {
+		if strings.Contains(line, `/Subdir/data/hello.txt\"`) {
 			found = true
 		}
 	}
@@ -318,13 +328,15 @@ func (self *TestSuite) TestCollectionWithDirectories() {
 }
 
 func (self *TestSuite) TestCollectionWithArtifacts() {
-	output_file, err := ioutil.TempFile(os.TempDir(), "zip")
+	defer utils.SetFlowIdForTests("F.1234")()
+
+	output_file, err := tempfile.TempFile("zip")
 	assert.NoError(self.T(), err)
 	output_file.Close()
 
 	defer os.Remove(output_file.Name())
 
-	report_file, err := ioutil.TempFile(os.TempDir(), "html")
+	report_file, err := tempfile.TempFile("html")
 	assert.NoError(self.T(), err)
 	report_file.Close()
 	defer os.Remove(report_file.Name())
@@ -343,6 +355,8 @@ func (self *TestSuite) TestCollectionWithArtifacts() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
+	scope = self.mockInfo(scope)
+
 	additionalArtifactCollectorArgs.Set("output", output_file.Name())
 	additionalArtifactCollectorArgs.Set("report", report_file.Name())
 
@@ -352,6 +366,8 @@ func (self *TestSuite) TestCollectionWithArtifacts() {
 		results = append(results, row)
 	}
 
+	_ = results
+
 	zip_contents, err := openZipFile(output_file.Name())
 	assert.NoError(self.T(), err)
 
@@ -360,7 +376,9 @@ func (self *TestSuite) TestCollectionWithArtifacts() {
 }
 
 func (self *TestSuite) TestCollectionWithTypes() {
-	output_file, err := ioutil.TempFile(os.TempDir(), "zip")
+	defer utils.SetFlowIdForTests("F.1234")()
+
+	output_file, err := tempfile.TempFile("zip")
 	assert.NoError(self.T(), err)
 	output_file.Close()
 	defer os.Remove(output_file.Name())
@@ -377,6 +395,8 @@ func (self *TestSuite) TestCollectionWithTypes() {
 
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
+
+	scope = self.mockInfo(scope)
 
 	results := []vfilter.Row{}
 	args := ordereddict.NewDict().
@@ -389,6 +409,8 @@ func (self *TestSuite) TestCollectionWithTypes() {
 		results = append(results, row)
 	}
 
+	_ = results
+
 	zip_contents, err := openZipFile(output_file.Name())
 	assert.NoError(self.T(), err)
 
@@ -397,7 +419,9 @@ func (self *TestSuite) TestCollectionWithTypes() {
 }
 
 func (self *TestSuite) TestCollectionWithUpload() {
-	output_file, err := ioutil.TempFile(os.TempDir(), "zip")
+	defer utils.SetFlowIdForTests("F.1234")()
+
+	output_file, err := tempfile.TempFile("zip")
 	assert.NoError(self.T(), err)
 	output_file.Close()
 	defer os.Remove(output_file.Name())
@@ -415,6 +439,8 @@ func (self *TestSuite) TestCollectionWithUpload() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
+	scope = self.mockInfo(scope)
+
 	results := []vfilter.Row{}
 
 	// Set the output file.
@@ -425,11 +451,15 @@ func (self *TestSuite) TestCollectionWithUpload() {
 		results = append(results, row)
 	}
 
+	_ = results
+
 	zip_contents, err := openZipFile(output_file.Name())
 	assert.NoError(self.T(), err)
 
 	golden := ordereddict.NewDict().
 		Set("zip_contents", zip_contents)
+
+	self.CreateClient("C.30b949dd33e1330a")
 
 	import_func := collector.ImportCollectionFunction{}
 	result := import_func.Call(self.Ctx, scope,
@@ -437,7 +467,7 @@ func (self *TestSuite) TestCollectionWithUpload() {
 			Set("client_id", "C.30b949dd33e1330a").
 			Set("hostname", "MyNewHost").
 			Set("filename", output_file.Name()))
-	context, ok := result.(*proto.ArtifactCollectorContext)
+	context, ok := result.(*flows_proto.ArtifactCollectorContext)
 	assert.True(self.T(), ok)
 
 	golden.Set("artifacts_with_results", context.ArtifactsWithResults)
@@ -446,7 +476,7 @@ func (self *TestSuite) TestCollectionWithUpload() {
 	flow_path_manager := paths.NewFlowPathManager(
 		"C.30b949dd33e1330a", "F.1234")
 
-	data, err := readImportedFile(self.Ctx, scope, self.ConfigObj,
+	data, err := readImportedFile(scope, self.ConfigObj,
 		flow_path_manager.UploadMetadata())
 	assert.NoError(self.T(), err)
 
@@ -459,7 +489,7 @@ func (self *TestSuite) TestCollectionWithUpload() {
 		json.MustMarshalIndent(golden))
 }
 
-func readImportedFile(ctx context.Context,
+func readImportedFile(
 	scope vfilter.Scope,
 	config_obj *config_proto.Config,
 	src api.FSPathSpec) (string, error) {
@@ -470,7 +500,7 @@ func readImportedFile(ctx context.Context,
 		return "", err
 	}
 
-	data, err := ioutil.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	if err != nil && err != io.EOF {
 		return "", err
 	}

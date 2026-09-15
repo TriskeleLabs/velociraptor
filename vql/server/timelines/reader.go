@@ -6,9 +6,9 @@ import (
 
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/velociraptor/vql/functions"
 	"www.velocidex.com/golang/vfilter"
@@ -33,6 +33,7 @@ func (self TimelinePlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "timeline", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -84,27 +85,18 @@ func (self TimelinePlugin) Call(
 			}
 		}
 
-		events, err := notebook_manager.ReadTimeline(ctx, notebook_id, arg.Timeline,
-			start, arg.IncludeComponents, arg.SkipComponents)
+		events, err := notebook_manager.ReadTimeline(
+			ctx, notebook_id, arg.Timeline,
+			services.TimelineOptions{
+				StartTime:         start,
+				IncludeComponents: arg.IncludeComponents,
+				ExcludeComponents: arg.SkipComponents})
 		if err != nil {
 			scope.Log("timeline: %v", err)
 			return
 		}
 
-		for event := range events {
-			ts, pres := event.Get("_ts")
-			if !pres {
-				continue
-			}
-
-			row := ordereddict.NewDict().Set("Timestamp", ts)
-			for _, k := range event.Keys() {
-				if k != "_ts" {
-					v, _ := event.Get(k)
-					row.Set(k, v)
-				}
-			}
-
+		for row := range events.Read(ctx) {
 			select {
 			case <-ctx.Done():
 				return
@@ -121,7 +113,8 @@ func (self TimelinePlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) 
 		Name:     "timeline",
 		Doc:      "Read a timeline. You can create a timeline with the timeline_add() function",
 		ArgType:  type_map.AddType(scope, &TimelinePluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Version:  2,
 	}
 }
 
@@ -139,6 +132,7 @@ func (self TimelineListPlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+		defer vql_subsystem.RegisterMonitor(ctx, "timelines", args)()
 
 		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
 		if err != nil {
@@ -188,16 +182,10 @@ func (self TimelineListPlugin) Call(
 		}
 
 		for _, item := range timelines {
-			timelines := []string{}
-			for _, t := range item.Timelines {
-				timelines = append(timelines, t.Id)
-			}
 			select {
 			case <-ctx.Done():
 				return
-			case output_chan <- ordereddict.NewDict().
-				Set("Name", item.Name).
-				Set("Timelines", timelines):
+			case output_chan <- json.ConvertProtoToOrderedDict(item):
 			}
 		}
 	}()
@@ -210,7 +198,7 @@ func (self TimelineListPlugin) Info(scope vfilter.Scope, type_map *vfilter.TypeM
 		Name:     "timelines",
 		Doc:      "List all timelines in a notebook",
 		ArgType:  type_map.AddType(scope, &TimelineListPluginArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.READ_RESULTS).Build(),
 	}
 }
 

@@ -2,13 +2,13 @@ package accessors
 
 import (
 	"errors"
-	"io/ioutil"
+	"io"
 	"os"
 	"testing"
 
-	"github.com/sebdah/goldie"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 func TestVirtualFilesystemAccessor(t *testing.T) {
@@ -46,7 +46,7 @@ func TestVirtualFilesystemAccessor(t *testing.T) {
 		fd, err := fs_accessor.Open(path)
 		assert.NoError(t, err)
 
-		data, err := ioutil.ReadAll(fd)
+		data, err := io.ReadAll(fd)
 		assert.NoError(t, err)
 
 		return string(data)

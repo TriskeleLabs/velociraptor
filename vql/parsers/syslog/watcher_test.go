@@ -2,14 +2,12 @@ package syslog
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/suite"
 	"www.velocidex.com/golang/velociraptor/accessors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -17,9 +15,11 @@ import (
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vql/acl_managers"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 	"www.velocidex.com/golang/vfilter"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/file"
@@ -69,8 +69,10 @@ func (self *SyslogWatcherTestSuite) SetupTest() {
 				if !ok {
 					return
 				}
+				line, _ := self.scope.Associative(item, "Line")
 				self.mu.Lock()
-				self.result = append(self.result, item)
+				self.result = append(self.result, ordereddict.NewDict().
+					Set("Line", line))
 				self.mu.Unlock()
 			}
 		}
@@ -89,7 +91,7 @@ func (self *SyslogWatcherTestSuite) SetupTest() {
 
 	self.scope = manager.BuildScope(builder)
 
-	fd, err := ioutil.TempFile("", "tmp")
+	fd, err := tempfile.TempFile("tmp")
 	assert.NoError(self.T(), err)
 	fd.Close()
 
@@ -134,11 +136,8 @@ func (self *SyslogWatcherTestSuite) clearLines() {
 func (self *SyslogWatcherTestSuite) getLines() []vfilter.Row {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	result := []vfilter.Row{}
-	for _, i := range self.result {
-		result = append(result, i)
-	}
-	return result
+
+	return append([]vfilter.Row{}, self.result...)
 }
 
 func (self *SyslogWatcherTestSuite) TestSyslogReader() {
@@ -265,7 +264,7 @@ func (self *SyslogWatcherTestSuite) TestSyslogReader() {
 	// should fit in a single buffer read (50 bytes)
 	self.appendData("0123456701\n0123456702\n0123456703\n")
 
-	// The new curser is rewinded to the start of the file.
+	// The new curser is rewound to the start of the file.
 	old_curser := *cursor
 	new_cursor := service.monitorOnce(self.filename, "file", accessor, cursor)
 

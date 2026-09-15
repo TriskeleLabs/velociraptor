@@ -29,6 +29,7 @@
     "Upload": {
      "Path": "data",
      "Size": 11,
+     "UploadId": 0,
      "StoredSize": 11,
      "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
      "md5": "5eb63bbbe01eeed093cb22bb8f5acdc3",
@@ -42,6 +43,7 @@
     "SparseUpload": {
      "Path": "{\"DelegateAccessor\":\"data\",\"DelegatePath\":\"This is...",
      "Size": 13,
+     "UploadId": 0,
      "StoredSize": 8,
      "sha256": "d2bc3dd9279837fd268d82ea397b6980dee5ae462464493c80f495786b4025c2",
      "md5": "f55a5cc260e3fc562d841a2f6d2b7d22",
@@ -85,11 +87,11 @@
     "_ts": 1602103388,
     "client_time": 1602103388,
     "level": "DEBUG",
-    "message": "Query Stats: {\"RowsScanned\":2,\"PluginsCalled\":1,\"FunctionsCalled\":4,\"ProtocolSearch\":0,\"ScopeCopy\":6}\n"
+    "message": "Query Stats: {\"RowsScanned\":1,\"PluginsCalled\":1,\"FunctionsCalled\":4,\"ProtocolSearch\":0,\"ScopeCopy\":3}\n"
    }
   ],
-  "collection_context.json": "{\n \"session_id\": \"F.1234\",\n \"request\": {\n  \"artifacts\": [\n   \"Custom.TestArtifactUpload\"\n  ]\n },\n \"create_time\": 1602103388000000000,\n \"total_uploaded_files\": 3,\n \"total_expected_uploaded_bytes\": 11,\n \"total_uploaded_bytes\": 11,\n \"total_collected_rows\": 1,\n \"total_logs\": 3,\n \"total_requests\": 1,\n \"state\": 2,\n \"artifacts_with_results\": [\n  \"Custom.TestArtifactUpload\"\n ],\n \"query_stats\": [\n  {\n   \"names_with_response\": [\n    \"Custom.TestArtifactUpload\"\n   ],\n   \"log_rows\": 3,\n   \"result_rows\": 1\n  }\n ]\n}",
-  "requests.json": "{\n \"items\": [\n  {\n   \"session_id\": \"F.1234\",\n   \"request_id\": 1,\n   \"VQLClientAction\": {\n    \"query_id\": 1,\n    \"total_queries\": 1,\n    \"Query\": [\n     {\n      \"VQL\": \"LET Custom_TestArtifactUpload_0_0 = SELECT upload(file=\\\"hello world\\\", accessor=\\\"data\\\", name=\\\"file.db\\\") AS Upload, upload(file=pathspec(Path='[{\\\"length\\\":5,\\\"offset\\\":0},{\\\"length\\\":3,\\\"offset\\\":10}]', DelegateAccessor=\\\"data\\\", DelegatePath=\\\"This is a bit of text\\\"), accessor=\\\"sparse\\\", name=pathspec(Path=\\\"C:/file.sparse.txt\\\", path_type=\\\"windows\\\")) AS SparseUpload FROM scope()\"\n     },\n     {\n      \"Name\": \"Custom.TestArtifactUpload\",\n      \"VQL\": \"SELECT * FROM Custom_TestArtifactUpload_0_0\"\n     }\n    ],\n    \"max_row\": 1000\n   }\n  }\n ]\n}",
+  "collection_context.json": "{\n \"session_id\": \"F.1234\",\n \"request\": {\n  \"artifacts\": [\n   \"Custom.TestArtifactUpload\"\n  ],\n  \"max_upload_bytes\": 1073741824\n },\n \"create_time\": 1602103388000000000,\n \"total_uploaded_files\": 3,\n \"total_expected_uploaded_bytes\": 11,\n \"total_uploaded_bytes\": 11,\n \"total_collected_rows\": 1,\n \"total_logs\": 3,\n \"total_requests\": 1,\n \"state\": 2,\n \"artifacts_with_results\": [\n  \"Custom.TestArtifactUpload\"\n ],\n \"query_stats\": [\n  {\n   \"names_with_response\": [\n    \"Custom.TestArtifactUpload\"\n   ],\n   \"log_rows\": 3,\n   \"result_rows\": 1\n  }\n ]\n}",
+  "requests.json": "{\n \"items\": [\n  {\n   \"session_id\": \"F.1234\",\n   \"request_id\": 1,\n   \"VQLClientAction\": {\n    \"query_id\": 1,\n    \"total_queries\": 1,\n    \"Query\": [\n     {\n      \"Name\": \"Custom.TestArtifactUpload\",\n      \"VQL\": \"SELECT upload(file=\\\"hello world\\\", accessor=\\\"data\\\", name=\\\"file.db\\\") AS Upload, upload(file=pathspec(Path='[{\\\"length\\\":5,\\\"offset\\\":0},{\\\"length\\\":3,\\\"offset\\\":10}]', DelegateAccessor=\\\"data\\\", DelegatePath=\\\"This is a bit of text\\\"), accessor=\\\"sparse\\\", name=pathspec(Path=\\\"C:/file.sparse.txt\\\", path_type=\\\"windows\\\")) AS SparseUpload FROM scope()\"\n     }\n    ],\n    \"max_row\": 1000\n   }\n  }\n ]\n}",
   "custom_artifacts.json": [
    {
     "name": "Custom.TestArtifactUpload",
@@ -101,6 +103,7 @@
     ]
    }
   ],
+  "client_info.json": "{\n \"Hostname\": \"TestHost\",\n \"HostID\": \"1234-56\",\n \"Name\": \"velociraptor\",\n \"BuildTime\": \"\",\n \"build_url\": \"\"\n}",
   "uploads.json.index": "\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\ufffd\u0000\u0000\u0000\u0000\u0001\u0000\u0000\ufffd\u0001\u0000\u0000\u0000\u0001\u0000\u0000",
   "uploads.json": [
    {

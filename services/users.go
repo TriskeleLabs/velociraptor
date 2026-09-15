@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -20,6 +20,7 @@ package services
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -46,9 +47,10 @@ The user manager is global to all orgs and therefore it is
 initialized once for the root org.
 
 This is the one stop shop for managing everything about users except
-ACLs (which are managed within in org seperately)
+ACLs (which are managed within in org separately)
 */
 type UserManager interface {
+	// TODO: Implement atomic modification to avoid get/set pattern.
 	SetUser(ctx context.Context,
 		user_record *api_proto.VelociraptorUser) error
 
@@ -73,7 +75,7 @@ type UserManager interface {
 
 	// Used to get the user's record including password hashes. This
 	// only makes sense when using the `Basic` authenticator because
-	// otherwise we dont maintain passwords.
+	// otherwise we don't maintain passwords.
 	GetUserWithHashes(ctx context.Context, principal, username string) (
 		*api_proto.VelociraptorUser, error)
 
@@ -117,6 +119,12 @@ type UserManager interface {
 		principal, username string,
 		password, current_org string) error
 
+	SetUserStats(
+		ctx context.Context,
+		org_config_obj *config_proto.Config,
+		username string,
+		stats *api_proto.UserStats) error
+
 	// Removes the user record.
 	// principal - is the user who is requesting this account removal.
 	// username - the user to remove.
@@ -125,6 +133,13 @@ type UserManager interface {
 		ctx context.Context,
 		principal, username string,
 		orgs []string) error
+
+	// Send the user a message which will appear in their notification
+	// view.
+	MessageUser(
+		ctx context.Context,
+		username, sender string,
+		message *ordereddict.Dict) error
 }
 
 // A helper
@@ -150,4 +165,26 @@ func GetUserManager() UserManager {
 	defer mu.Unlock()
 
 	return global_user_manager
+}
+
+// Message all users in this org
+func MessageAllUsers(
+	ctx context.Context,
+	principal string, orgs []string,
+	message *ordereddict.Dict) error {
+
+	user_manager := GetUserManager()
+	users, err := user_manager.ListUsers(ctx, principal, orgs)
+	if err != nil {
+		return err
+	}
+
+	for _, u := range users {
+		err = user_manager.MessageUser(ctx, u.Name, principal, message)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

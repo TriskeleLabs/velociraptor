@@ -4,9 +4,11 @@
  "request": {
   "creator": "admin",
   "client_id": "server",
+  "flow_id": "F.1234",
   "artifacts": [
    "TestMultiSource"
-  ]
+  ],
+  "max_upload_bytes": 1073741824
  },
  "create_time": 10000000,
  "start_time": 10000000,

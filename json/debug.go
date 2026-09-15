@@ -7,11 +7,11 @@ import (
 )
 
 func Debug(v interface{}) {
-	fmt.Println(StringIndent(v))
+	fmt.Println(MustStringIndent(v))
 }
 
 func Dump(v interface{}) {
-	fmt.Println(StringIndent(v))
+	fmt.Println(MustStringIndent(v))
 }
 
 var g_idx uint64
@@ -24,6 +24,6 @@ func TraceMessage(filename string, message interface{}) {
 	if err != nil {
 		panic(err)
 	}
-	file.Write(MustMarshalIndent(message))
+	_, _ = file.Write(MustMarshalIndent(message))
 	file.Close()
 }

@@ -22,6 +22,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/vtesting/assert"
 
 	_ "www.velocidex.com/golang/velociraptor/accessors/data"
+	_ "www.velocidex.com/golang/velociraptor/vql/parsers"
 )
 
 var testArtifacts = []string{`
@@ -36,6 +37,7 @@ sources:
     template: "This is a suggestion"
 `, `
 name: Server.Audit.Logs
+type: SERVER_EVENT
 `, `
 name: Server.Internal.ArtifactDescription
 `}
@@ -43,6 +45,8 @@ name: Server.Internal.ArtifactDescription
 type NotebookTestSuite struct {
 	test_utils.TestSuite
 	acl_manager vql_subsystem.ACLManager
+
+	closer func()
 }
 
 func (self *NotebookTestSuite) SetupTest() {
@@ -61,10 +65,18 @@ func (self *NotebookTestSuite) SetupTest() {
 		self.ConfigObj, "admin")
 
 	gen := utils.IncrementalIdGenerator(0)
-	utils.SetIdGenerator(&gen)
+	self.closer = utils.SetIdGenerator(&gen)
+}
+
+func (self *NotebookTestSuite) TearDownTest() {
+	self.closer()
+	self.TestSuite.TearDownTest()
 }
 
 func (self *NotebookTestSuite) TestCreateNotebook() {
+	closer := utils.MockTime(utils.NewMockClock(time.Unix(1602103388, 0)))
+	defer closer()
+
 	repository := self.LoadArtifacts(testArtifacts...)
 	builder := services.ScopeBuilder{
 		Config:     self.ConfigObj,
@@ -80,15 +92,22 @@ func (self *NotebookTestSuite) TestCreateNotebook() {
 	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	plugin := &CreateNotebookFunction{}
-	res_any := plugin.Call(self.Ctx, scope,
-		ordereddict.NewDict().
-			Set("name", "TestNotebook").
-			Set("description", "A test notebook").
-			Set("collaborators", []string{"mic", "fred"}).
-			Set("artifacts", "Test.Artifact"))
+	var notebook *api_proto.NotebookMetadata
 
-	notebook := res_any.(*api_proto.NotebookMetadata)
+	vtesting.WaitUntil(2*time.Second, self.T(), func() bool {
+		var ok bool
+
+		plugin := &CreateNotebookFunction{}
+		res_any := plugin.Call(self.Ctx, scope,
+			ordereddict.NewDict().
+				Set("name", "TestNotebook").
+				Set("description", "A test notebook").
+				Set("collaborators", []string{"mic", "fred"}).
+				Set("artifacts", "Test.Artifact"))
+
+		notebook, ok = res_any.(*api_proto.NotebookMetadata)
+		return ok
+	})
 
 	// One cell created which contains Hello world.
 	assert.Equal(self.T(), len(notebook.CellMetadata), 1)
@@ -109,7 +128,7 @@ func (self *NotebookTestSuite) TestCreateNotebook() {
 			Set("attachment_filename", "attachment.txt"))
 
 	// Now update the cell with new content.
-	res_any = UpdateNotebookCellFunction{}.Call(self.Ctx, scope,
+	res_any := UpdateNotebookCellFunction{}.Call(self.Ctx, scope,
 		ordereddict.NewDict().
 			Set("notebook_id", notebook.NotebookId).
 			Set("cell_id", notebook.CellMetadata[0].CellId).
@@ -155,7 +174,7 @@ func (self *NotebookTestSuite) TestCreateNotebook() {
 
 	// Wait for the audit messages to be written
 	vtesting.WaitUntil(2*time.Second, self.T(), func() bool {
-		audit, _ := mem_file_store.Get("/clients/server/artifacts/Server.Audit.Logs.json")
+		audit, _ := mem_file_store.Get("/server_artifacts/Server.Audit.Logs/2020-10-07.json")
 		return strings.Contains(string(audit), `"Input":"# Input field"`) &&
 			strings.Contains(string(audit),
 				`"operation":"CreateNotebook","principal":"admin"`) &&
@@ -164,11 +183,17 @@ func (self *NotebookTestSuite) TestCreateNotebook() {
 	})
 
 	// Check uploads - uploads are stored in each cell so they can be versioned
-	mem_file_store.Debug()
+	// mem_file_store.Debug()
 
-	upload, _ := mem_file_store.Get(
-		"/notebooks/N.01/NC.02-05/uploads/data/file.txt")
-	assert.Contains(self.T(), string(upload), `hello`)
+	vtesting.WaitUntil(2*time.Second, self.T(), func() bool {
+		upload, pres := mem_file_store.Get(
+			"/notebooks/N.01/NC.02-05/uploads/data/file.txt")
+		if !pres {
+			return false
+		}
+		assert.Contains(self.T(), string(upload), `hello`)
+		return len(upload) > 0
+	})
 
 	// Attachments are global to the whole notebook and are not
 	// versioned.
@@ -229,7 +254,7 @@ func (self *NotebookTestSuite) TestCreateNotebook() {
 
 	// Now export the notebook to html
 	// Export the notebook to html.
-	res_any = ExportNotebookFunction{}.Call(self.Ctx, scope,
+	_ = ExportNotebookFunction{}.Call(self.Ctx, scope,
 		ordereddict.NewDict().
 			Set("notebook_id", notebook.NotebookId).
 			Set("type", "html").

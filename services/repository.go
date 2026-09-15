@@ -47,6 +47,11 @@ type ArtifactOptions struct {
 
 	// Validate the artifact compiles
 	ValidateArtifact bool
+
+	AllowOverridingAlias bool
+
+	// Attach these tags to the artifact in the repository.
+	Tags []string
 }
 
 func GetRepositoryManager(config_obj *config_proto.Config) (RepositoryManager, error) {
@@ -58,7 +63,7 @@ func GetRepositoryManager(config_obj *config_proto.Config) (RepositoryManager, e
 	return org_manager.Services(config_obj.OrgId).RepositoryManager()
 }
 
-// Make it easier to build a query scope using the aritfact
+// Make it easier to build a query scope using the artifact
 // repository.
 type ScopeBuilder struct {
 	// In server context this contains the full server config required
@@ -106,6 +111,12 @@ type Repository interface {
 
 	// List
 	List(ctx context.Context, config_obj *config_proto.Config) ([]string, error)
+
+	// List all unique tags
+	Tags(ctx context.Context, config_obj *config_proto.Config) ([]string, error)
+
+	SetParent(parent Repository,
+		parent_config_obj *config_proto.Config)
 }
 
 // Manages the global artifact repository
@@ -154,6 +165,8 @@ type RepositoryManager interface {
 		config_obj *config_proto.Config, principal, name string) error
 
 	ReformatVQL(ctx context.Context, artifact_yaml string) (string, error)
+
+	Flush(ctx context.Context, config_obj *config_proto.Config) error
 }
 
 type MockablePlugin interface {
@@ -178,8 +191,8 @@ func ScopeBuilderFromScope(scope vfilter.Scope) ScopeBuilder {
 		result.Uploader = uploader
 	}
 
-	acl_manger, ok := artifacts.GetACLManager(scope)
-	if ok {
+	acl_manger, err := artifacts.GetACLManager(scope)
+	if err == nil {
 		result.ACLManager = acl_manger
 	}
 

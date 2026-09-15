@@ -1,16 +1,18 @@
 name: Generic.Client.Info
 description: |
-  Collect basic information about the client.
+  Collects basic system details including hostname, OS version,
+  interfaces, and platform info
 
   This artifact is collected when any new client is enrolled into the
-  system. Velociraptor will watch for this artifact and populate its
-  internal indexes from this artifact as well.
+  system. The Velociraptor server watches for completions of this
+  artifact and populates its internal client info index from this
+  artifact.
 
   You can edit this artifact to enhance the client's interrogation
   information as required, by adding new sources.
 
-  NOTE: Do not modify the BasicInformation source since it is used to
-  interrogate the clients.
+  NOTE: Do not modify the BasicInformation source since its results
+  are required by the server in that exact format.
 
 sources:
   - name: BasicInformation
@@ -32,6 +34,11 @@ sources:
                Platform, PlatformVersion, KernelVersion, Fqdn,
                Interfaces.MAC AS MACAddresses
         FROM info()
+
+  - name: DetailedInfo
+    query: |
+      LET Info = SELECT * FROM info()
+      SELECT _key AS Param, _value AS Value FROM items(item=Info[0])
 
   - name: LinuxInfo
     description: Linux specific information about the host
@@ -98,7 +105,7 @@ sources:
                 `Computer Info`.DomainRole AS DomainRole
               FROM source(client_id=client_id,
                   flow_id=last_interrogate_flow_id,
-                  artifact="Generic.Client.Info/WindowsInfo")
+                  source="WindowsInfo")
           })
           -- WHERE DomainRole =~ "Controller"
 
@@ -111,11 +118,66 @@ sources:
 reports:
   - type: CLIENT
     template: |
-      {{ $client_info := Query "SELECT * FROM clients(client_id=ClientId) LIMIT 1" | Expand }}
+      {{ define "pre" }}
+      LET Cap(X) = upcase(string=X[0:1]) + X[1:]
 
-      {{ $flow_id := Query "SELECT timestamp(epoch=active_time / 1000000) AS Timestamp FROM flows(client_id=ClientId, flow_id=FlowId)" | Expand }}
+      LET ClientInfo <= SELECT *, Cap(X=os_info.system) AS OS
+        FROM clients(client_id=ClientId)
+        LIMIT 1
 
-      # {{ Get $client_info "0.os_info.fqdn" }} ( {{ Get $client_info "0.client_id" }} ) @ {{ Get $flow_id "0.Timestamp" }}
+      LET Hostname <= ClientInfo[0].os_info.hostname
+      LET OS <= Cap(X=ClientInfo[0].os_info.system)
+
+      LET _Timestamp <= SELECT timestamp(epoch=active_time) AS Timestamp
+         FROM flows(client_id=ClientId, flow_id=FlowId)
+      LET Timestamp <= _Timestamp[0].Timestamp
+
+      // Parse the env part from the notebook definitions.
+      LET GetEnv(X) = to_dict(item={
+          SELECT key AS _key,
+                 value AS _value
+          FROM foreach(row=X)
+        })
+
+      // Look for a special notebook of name "quick_link" - we will
+      // render it here.
+      LET GetSources(X) = SELECT GetEnv(X=env) AS Env
+      FROM foreach(row=X,
+      query={
+        SELECT * FROM foreach(row=notebook)
+        WHERE notebook.name =~ "quick_link"
+      })
+
+      // Returns a list of artifact names and configuration Env
+      LET FindQuickLinks = SELECT *,
+          link_to(client_id=ClientId, flow_id='new',
+                  artifact=artifact_name, raw=TRUE) AS Link,
+          Env.weight || 10 AS Weight
+      FROM foreach(row={
+          SELECT name as artifact_name, sources
+          FROM artifact_definitions()
+          WHERE type =~ "^client$"
+        },
+                   query={
+          SELECT artifact_name, Env
+          FROM GetSources(X=sources)
+          WHERE Env.text AND OS =~ ( Env.os_filter || "." )
+        })
+      ORDER BY Weight
+
+      {{ end }}
+      {{ $_ := Query "pre" | Expand }}
+
+      {{ range Query "SELECT * FROM FindQuickLinks" | Expand -}}
+        <velo-button text="{{ Get . "Env.text" }}"
+                     icon="{{ Get . "Env.icon" }}"
+                     href="{{ Get . "Link" }}">
+        >
+        </velo-button>
+      {{- end }}
+
+
+      # {{ Scope "Hostname" }} ( {{ Scope "ClientId" }} ) @ {{ Scope "Timestamp" }}
 
       {{ Query "SELECT * FROM source(source='BasicInformation')" | Table }}
 
@@ -125,7 +187,8 @@ reports:
        SELECT * FROM sample(
          n=4,
          query={
-           SELECT Timestamp, rate(x=CPU, y=Timestamp) * 100 As CPUPercent,
+           SELECT Timestamp,
+                  rate(x=CPU, y=Timestamp) * 100 As CPUPercent,
                   RSS / 1000000 AS MemoryUse
            FROM source(artifact="Generic.Client.Stats",
                        client_id=ClientId,
@@ -136,7 +199,7 @@ reports:
 
       {{ define "computerinfo" }}
       LET X <= SELECT *
-        FROM source(artifact='Generic.Client.Info/LinuxInfo')
+        FROM source(source="LinuxInfo")
         LIMIT 1
 
       SELECT humanize(bytes=TotalPhysicalMemory) AS  TotalPhysicalMemory,
@@ -148,7 +211,7 @@ reports:
       {{ end }}
 
       <div>
-      {{ Query "resources" | LineChart "xaxis_mode" "time" "RSS.yaxis" 2 }}
+      {{ Query "resources" | TimeChart "RSS.yaxis" 2 }}
       </div>
 
       {{ $windows_info := Query "SELECT * FROM source(source='WindowsInfo')" }}
@@ -157,8 +220,8 @@ reports:
         {{ $windows_info | Table }}
       {{ end }}
 
-      {{ $linux_info := Query "LET X <= SELECT * FROM source(artifact='Generic.Client.Info/LinuxInfo') LIMIT 1 SELECT * FROM X" }}
-      {{ if Query "SELECT * FROM source(artifact='Generic.Client.Info/LinuxInfo')" | Expand }}
+      {{ $linux_info := Query "LET X <= SELECT * FROM source(source='LinuxInfo') LIMIT 1 SELECT * FROM X" }}
+      {{ if Query "SELECT * FROM source(source='LinuxInfo')" | Expand }}
       # Linux agent information
 
       ### Network Info

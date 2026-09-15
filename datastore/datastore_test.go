@@ -4,8 +4,8 @@ import (
 	"errors"
 	"os"
 	"sort"
+	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -45,7 +45,7 @@ type BaseTestSuite struct {
 
 func (self BaseTestSuite) TestSetGetJSON() {
 	message := &crypto_proto.VeloMessage{Source: "Server"}
-	for _, path := range []path_specs.DSPathSpec{
+	for _, path := range []api.DSPathSpec{
 		path_specs.NewUnsafeDatastorePath("a", "b/c", "d"),
 		path_specs.NewUnsafeDatastorePath("a", "b/c", "d/a"),
 		path_specs.NewUnsafeDatastorePath("a", "b/c", "d?\""),
@@ -117,6 +117,17 @@ func (self BaseTestSuite) TestSetSubjectWithCompletion() {
 	})
 
 	assert.Equal(self.T(), result[0], "Done")
+}
+
+func (self BaseTestSuite) TestSetSubjectLargeData() {
+	message := &crypto_proto.VeloMessage{
+		Source: strings.Repeat("Server", 1024*1024),
+	}
+	urn := path_specs.NewSafeDatastorePath("a", "b", "c").
+		SetType(api.PATH_TYPE_DATASTORE_PROTO)
+	err := self.datastore.SetSubject(self.config_obj, urn, message)
+	assert.Error(self.T(), err)
+	assert.True(self.T(), errors.Is(err, utils.MemoryError))
 }
 
 func (self BaseTestSuite) TestSetGetSubject() {
@@ -328,10 +339,43 @@ func (self BaseTestSuite) TestListChildrenSubdirs() {
 		"/Root/item"}, asStrings(children))
 }
 
-func benchmarkSearchClient(b *testing.B,
-	data_store datastore.DataStore,
-	config_obj *config_proto.Config) {
+// Make sure all the other data stores handle very long filenames
+func (self BaseTestSuite) TestVeryLongFilename() {
+	message := &crypto_proto.VeloMessage{Source: "Server"}
+	very_long_filename := strings.Repeat("Very Long Filename", 100)
+	assert.Equal(self.T(), len(very_long_filename), 1800)
 
+	path := path_specs.NewUnsafeDatastorePath("longfiles", very_long_filename)
+	filename := datastore.AsDatastoreFilename(
+		self.datastore, self.config_obj, path)
+
+	// Filename should be smaller than the read filename because it is
+	// compressed into a hash.
+	assert.True(self.T(), len(filename) < 250)
+	err := self.datastore.SetSubject(
+		self.config_obj, path, message)
+	assert.NoError(self.T(), err)
+
+	read_message := &crypto_proto.VeloMessage{}
+	err = self.datastore.GetSubject(self.config_obj,
+		path, read_message)
+	assert.NoError(self.T(), err)
+
+	assert.Equal(self.T(), message.Source, read_message.Source)
+
+	// Now test that ListChildren works properly.
+	children, err := self.datastore.ListChildren(
+		self.config_obj, path_specs.NewUnsafeDatastorePath("longfiles"))
+	assert.NoError(self.T(), err)
+
+	results := []string{}
+	for _, i := range children {
+		results = append(results, i.Base())
+
+		// Make sure the resulting filename is very long
+		assert.Equal(self.T(), i.Base(), very_long_filename)
+	}
+	assert.True(self.T(), len(results) > 0)
 }
 
 func asStrings(in []api.DSPathSpec) []string {

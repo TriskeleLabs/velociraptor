@@ -12,12 +12,44 @@ type testcase struct {
 	expected_path   string
 }
 
+var generic_testcases = []testcase{
+	// Generic paths try to take a good guess of the path type:
+	// 1. Use / or \ as path separator
+	// 2. Quotes represent unbroken paths.
+	{"/bin/file\\1.txt", []string{"bin", "file", "1.txt"}, "/bin/file/1.txt"},
+
+	// Quotes in the filename are escaped by doubling up and enclosing
+	// the component with a single quote.
+	{"/bin/file\"1\".txt", []string{"bin", "file\"1\".txt"},
+		`/bin/"file""1"".txt"`},
+
+	{`/bin/"file""1"".txt"`, []string{"bin", "file\"1\".txt"},
+		`/bin/"file""1"".txt"`},
+
+	// Enclosing a path in quotes treats it as a single literal
+	// component.
+	{"/bin/\"file\\1.txt\"", []string{"bin", "file\\1.txt"}, "/bin/\"file\\1.txt\""},
+}
+
+func TestGenericManipulators(t *testing.T) {
+	for _, testcase := range generic_testcases {
+		path, err := NewGenericOSPath(testcase.serialized_path)
+		assert.NoError(t, err)
+		assert.Equal(t, testcase.components, path.Components)
+		assert.Equal(t, testcase.expected_path, path.String())
+	}
+}
+
 var linux_testcases = []testcase{
 	{"/bin/ls", []string{"bin", "ls"}, "/bin/ls"},
 	{"bin////ls", []string{"bin", "ls"}, "/bin/ls"},
 	{"/bin/ls////", []string{"bin", "ls"}, "/bin/ls"},
 
-	// Ignore and dont support directory traversal at all
+	// Files with non-path backslash characters should be parsed as
+	// one filename. They should also be serialized as a single file.
+	{"/bin/file\\1.txt", []string{"bin", "file\\1.txt"}, "/bin/file\\1.txt"},
+
+	// Ignore and don't support directory traversal at all
 	{"/bin/../../../.././../../ls", []string{"bin", "ls"}, "/bin/ls"},
 
 	// Can accept paths in pathspec format
@@ -47,7 +79,7 @@ var windows_testcases = []testcase{
 	// the current directory (e.g. dir C: vs dir C:\ )
 	{"C:", []string{"C:"}, "C:"},
 
-	// Ignore and dont support directory traversal at all
+	// Ignore and don't support directory traversal at all
 	{"C:\\Windows\\System32\\..\\..\\..\\..\\ls",
 		[]string{"C:", "Windows", "System32", "ls"},
 		"C:\\Windows\\System32\\ls"},
@@ -145,5 +177,31 @@ func TestFileStoreManipulators(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, testcase.components, path.Components)
 		assert.Equal(t, testcase.expected_path, path.String())
+	}
+}
+
+// The ZipFileManipulator is used by the offline collector to abstract
+// access to the collector zip files..
+var zipfile_testcases = []testcase{
+	{
+		serialized_path: "{\"DelegateAccessor\":\"file\",\"DelegatePath\":\"/F.D4FD20VLKDJ2G.zip\",\"Path\":\"/uploads/auto/C%3A\"}",
+		components:      []string{"uploads", "auto", "C:"},
+	},
+	{
+		serialized_path: "{\"DelegateAccessor\":\"file\",\"DelegatePath\":\"/F.D4FD20VLKDJ2G.zip\",\"Path\":\"/uploads/ntfs/%5C%5C.%5CC%3A\"}",
+		components:      []string{"uploads", "ntfs", `\\.\C:`},
+	},
+}
+
+func TestZipFileManipulators(t *testing.T) {
+	for _, testcase := range zipfile_testcases {
+		path, err := NewZipFilePath(testcase.serialized_path)
+		assert.NoError(t, err)
+		assert.Equal(t, testcase.components, path.Components)
+		expected_path := testcase.expected_path
+		if expected_path == "" {
+			expected_path = testcase.serialized_path
+		}
+		assert.Equal(t, expected_path, path.String())
 	}
 }

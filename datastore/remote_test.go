@@ -2,7 +2,6 @@ package datastore_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
@@ -14,11 +13,13 @@ import (
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
 )
 
@@ -28,13 +29,14 @@ type RemoteTestSuite struct {
 
 func (self *RemoteTestSuite) SetupTest() {
 	var err error
-	os.Setenv("VELOCIRAPTOR_CONFIG", test_utils.SERVER_CONFIG)
+	os.Setenv(constants.VELOCIRAPTOR_LITERAL_CONFIG, test_utils.SERVER_CONFIG)
 	self.ConfigObj, err = new(config.Loader).
-		WithEnvLiteralLoader("VELOCIRAPTOR_CONFIG").WithRequiredFrontend().
+		WithEnvLiteralLoader(constants.VELOCIRAPTOR_LITERAL_CONFIG).
+		WithRequiredFrontend().
 		WithVerbose(true).LoadAndValidate()
 	require.NoError(self.T(), err)
 
-	dir, err := ioutil.TempDir("", "file_store_test")
+	dir, err := tempfile.TempDir("file_store_test")
 	assert.NoError(self.T(), err)
 
 	self.ConfigObj.Datastore.Implementation = "FileBaseDataStore"
@@ -89,7 +91,7 @@ func (self *RemoteTestSuite) TestRemoteDataStore() {
 	assert.NoError(self.T(), err)
 }
 
-// Tgest retry when connecting to
+// Test retry when connecting to
 func (self *RemoteTestSuite) TestRemoteDataStoreMissing() {
 	if testing.Short() {
 		self.T().Skip("skipping test in short mode.")

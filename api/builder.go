@@ -8,17 +8,18 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
 	"www.velocidex.com/golang/velociraptor/api/authenticators"
+	api_utils "www.velocidex.com/golang/velociraptor/api/utils"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/server"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 
 	_ "www.velocidex.com/golang/velociraptor/result_sets/timed"
 )
@@ -116,9 +117,9 @@ func (self *Builder) withAutoCertFrontendSelfSignedGUI(
 	logger.Info("Autocert is enabled but GUI port is not 443, starting Frontend with autocert and GUI with self signed.")
 
 	if config_obj.Services.GuiServer && config_obj.GUI != nil {
-		mux := http.NewServeMux()
+		mux := api_utils.NewServeMux()
 
-		router, err := PrepareGUIMux(ctx, config_obj, server_obj, mux)
+		router, err := PrepareGUIMux(ctx, config_obj, mux)
 		if err != nil {
 			return err
 		}
@@ -139,10 +140,10 @@ func (self *Builder) withAutoCertFrontendSelfSignedGUI(
 	}
 
 	// Launch a server for the frontend.
-	mux := http.NewServeMux()
+	mux := api_utils.NewServeMux()
 
 	err := server.PrepareFrontendMux(
-		config_obj, server_obj, mux)
+		config_obj, server_obj, mux.ServeMux)
 	if err != nil {
 		return err
 	}
@@ -162,16 +163,17 @@ func (self *Builder) WithAutocertGUI(
 		return errors.New("Frontend not configured")
 	}
 
-	mux := http.NewServeMux()
+	mux := api_utils.NewServeMux()
 
 	if self.config_obj.Services.FrontendServer {
-		err := server.PrepareFrontendMux(self.config_obj, self.server_obj, mux)
+		err := server.PrepareFrontendMux(
+			self.config_obj, self.server_obj, mux.ServeMux)
 		if err != nil {
 			return err
 		}
 	}
 
-	router, err := PrepareGUIMux(ctx, self.config_obj, self.server_obj, mux)
+	router, err := PrepareGUIMux(ctx, self.config_obj, mux)
 	if err != nil {
 		return err
 	}
@@ -188,20 +190,21 @@ func startSharedSelfSignedFrontend(
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config,
 	server_obj *server.Server) error {
-	mux := http.NewServeMux()
+	mux := api_utils.NewServeMux()
 
 	if config_obj.Frontend == nil || config_obj.GUI == nil {
 		return errors.New("Frontend not configured")
 	}
 
 	if config_obj.Services.FrontendServer {
-		err := server.PrepareFrontendMux(config_obj, server_obj, mux)
+		err := server.PrepareFrontendMux(
+			config_obj, server_obj, mux.ServeMux)
 		if err != nil {
 			return err
 		}
 	}
 
-	router, err := PrepareGUIMux(ctx, config_obj, server_obj, mux)
+	router, err := PrepareGUIMux(ctx, config_obj, mux)
 	if err != nil {
 		return err
 	}
@@ -248,9 +251,9 @@ func startSelfSignedFrontend(
 
 	// Launch a new server for the GUI.
 	if config_obj.Services.GuiServer {
-		mux := http.NewServeMux()
+		mux := api_utils.NewServeMux()
 
-		router, err := PrepareGUIMux(ctx, config_obj, server_obj, mux)
+		router, err := PrepareGUIMux(ctx, config_obj, mux)
 		if err != nil {
 			return err
 		}
@@ -271,10 +274,12 @@ func startSelfSignedFrontend(
 	}
 
 	// Launch a server for the frontend.
-	mux := http.NewServeMux()
+	mux := api_utils.NewServeMux()
 
-	server.PrepareFrontendMux(
-		config_obj, server_obj, mux)
+	err := server.PrepareFrontendMux(config_obj, server_obj, mux.ServeMux)
+	if err != nil {
+		return err
+	}
 
 	if config_obj.Frontend.UsePlainHttp {
 		return StartFrontendPlainHttp(
@@ -360,13 +365,16 @@ func StartFrontendHttps(
 
 		atomic.StoreInt32(&server_obj.Healthy, 1)
 
-		listener, err, closer := server_obj.NewLoadSheddingListener(server.Addr)
+		listener, closer, err := server_obj.NewLoadSheddingListener(
+			server.Addr)
 		if err != nil {
 			server_obj.Error("Frontend server: Can not listen on %v: %v",
 				server.Addr, err)
 			return
 		}
-		defer closer()
+		defer func() {
+			_ = closer()
+		}()
 
 		err = server.ServeTLS(listener, "", "")
 		if err != nil && err != http.ErrServerClosed {
@@ -383,8 +391,9 @@ func StartFrontendHttps(
 		server_obj.Info("<red>Shutting down</> frontend")
 		atomic.StoreInt32(&server_obj.Healthy, 0)
 
-		time_ctx, cancel := context.WithTimeout(
-			context.Background(), 10*time.Second)
+		time_ctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 10*time.Second,
+			errors.New("Deadline exceeded shuttin down frontend"))
 		defer cancel()
 
 		server.SetKeepAlivesEnabled(false)
@@ -469,14 +478,13 @@ func StartFrontendWithAutocert(
 		return errors.New("Frontend server not configured")
 	}
 
-	logger := logging.Manager.GetLogger(config_obj, &logging.GUIComponent)
+	logger := logging.GetLogger(config_obj, &logging.GUIComponent)
 
 	// Autocert directory must be unique since it is usually kept in
 	// shared storage.
 	cache_dir := config_obj.AutocertCertCache
 	if config_obj.Frontend.IsMinion {
-		cache_dir = filepath.Join(
-			cache_dir, services.GetNodeName(config_obj.Frontend))
+		cache_dir = utils.Join(cache_dir, services.GetNodeName(config_obj.Frontend))
 		err := os.MkdirAll(cache_dir, 0700)
 		if err != nil {
 			return err
@@ -541,7 +549,7 @@ func StartFrontendWithAutocert(
 	go func() {
 		err := http.ListenAndServe(":http", certManager.HTTPHandler(nil))
 		if err != nil {
-			logger := logging.Manager.GetLogger(config_obj, &logging.GUIComponent)
+			logger := logging.GetLogger(config_obj, &logging.GUIComponent)
 			logger.Error("Failed to bind to http server: %v", err)
 		}
 	}()
@@ -557,13 +565,15 @@ func StartFrontendWithAutocert(
 		// port for the GUI and clients. If we load shed the
 		// clients we will also load shed the GUI... Does this
 		// makes sense?
-		listener, err, closer := server_obj.NewLoadSheddingListener(server.Addr)
+		listener, closer, err := server_obj.NewLoadSheddingListener(server.Addr)
 		if err != nil {
 			server_obj.Error("Frontend server: Can not listen on %v: %v",
 				server.Addr, err)
 			return
 		}
-		defer closer()
+		defer func() {
+			_ = closer()
+		}()
 
 		err = server.ServeTLS(listener, "", "")
 		if err != nil && err != http.ErrServerClosed {
@@ -580,8 +590,9 @@ func StartFrontendWithAutocert(
 		server_obj.Info("<red>Stopping Frontend Server")
 		atomic.StoreInt32(&server_obj.Healthy, 0)
 
-		timeout_ctx, cancel := context.WithTimeout(
-			context.Background(), 10*time.Second)
+		timeout_ctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 10*time.Second,
+			errors.New("Deadline exceeded shuttin down frontend"))
 		defer cancel()
 
 		server.SetKeepAlivesEnabled(false)
@@ -604,7 +615,7 @@ func StartHTTPGUI(
 		return errors.New("GUI server not configured")
 	}
 
-	logger := logging.Manager.GetLogger(config_obj, &logging.GUIComponent)
+	logger := logging.GetLogger(config_obj, &logging.GUIComponent)
 
 	listenAddr := fmt.Sprintf("%s:%d",
 		config_obj.GUI.BindAddress,
@@ -641,8 +652,9 @@ func StartHTTPGUI(
 		<-ctx.Done()
 
 		logger.Info("<red>Stopping GUI Server")
-		timeout_ctx, cancel := context.WithTimeout(
-			context.Background(), 10*time.Second)
+		timeout_ctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 10*time.Second,
+			errors.New("Deadline exceeded shuttin down GUI"))
 		defer cancel()
 
 		server.SetKeepAlivesEnabled(false)
@@ -659,7 +671,7 @@ func StartSelfSignedGUI(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	config_obj *config_proto.Config, mux http.Handler) error {
-	logger := logging.Manager.GetLogger(config_obj, &logging.GUIComponent)
+	logger := logging.GetLogger(config_obj, &logging.GUIComponent)
 	if config_obj.GUI == nil {
 		return errors.New("GUI server not configured")
 	}
@@ -720,8 +732,9 @@ func StartSelfSignedGUI(
 		<-ctx.Done()
 
 		logger.Info("<red>Stopping GUI Server")
-		timeout_ctx, cancel := context.WithTimeout(
-			context.Background(), 10*time.Second)
+		timeout_ctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 10*time.Second,
+			errors.New("Deadline exceeded shuttin down GUI"))
 		defer cancel()
 
 		server.SetKeepAlivesEnabled(false)
@@ -761,8 +774,6 @@ func addClientCerts(config_obj *config_proto.Config, in *tls.Config) error {
 	in.ClientAuth = tls.RequireAndVerifyClientCert
 	in.ClientCAs = client_ca
 
-	in.BuildNameToCertificate()
-
 	return nil
 }
 
@@ -794,7 +805,6 @@ func getTLSConfig(config_obj *config_proto.Config, in *tls.Config) error {
 	in.CurvePreferences = []tls.CurveID{
 		tls.CurveP521, tls.CurveP384, tls.CurveP256}
 	in.ClientSessionCache = tls.NewLRUClientSessionCache(int(expected_clients))
-	in.PreferServerCipherSuites = true
 
 	in.CipherSuites = []uint16{
 		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,

@@ -4,17 +4,19 @@ package file_store
 // the generic filestore. This allows us to run globs on the file
 // store regardless of the specific filestore implementation.
 import (
-	"encoding/json"
 	"errors"
-	"io/ioutil"
 
 	"www.velocidex.com/golang/velociraptor/accessors"
 	"www.velocidex.com/golang/velociraptor/accessors/file_store_file_info"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/file_store/path_specs"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/uploads"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/files"
 
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -37,12 +39,39 @@ func NewFileStoreFileSystemAccessor(
 	}
 }
 
+type SparseFileStoreFileSystemAccessor struct {
+	FileStoreFileSystemAccessor
+}
+
+func (self SparseFileStoreFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name: "fs_sparse",
+		Description: `Provide access to the server's filestore and datastore.
+
+This accessor expands sparse files. Reading from a sparse region will result in zeros being returned.
+`,
+		Permissions: []acls.ACL_PERMISSION{acls.SERVER_ADMIN},
+	}
+}
+
 func NewSparseFileStoreFileSystemAccessor(
-	config_obj *config_proto.Config) *FileStoreFileSystemAccessor {
-	return &FileStoreFileSystemAccessor{
-		file_store: file_store.GetFileStore(config_obj),
-		config_obj: config_obj,
-		sparse:     true,
+	config_obj *config_proto.Config) *SparseFileStoreFileSystemAccessor {
+	return &SparseFileStoreFileSystemAccessor{
+		FileStoreFileSystemAccessor: FileStoreFileSystemAccessor{
+			file_store: file_store.GetFileStore(config_obj),
+			config_obj: config_obj,
+			sparse:     true,
+		}}
+}
+
+func (self FileStoreFileSystemAccessor) Describe() *accessors.AccessorDescriptor {
+	return &accessors.AccessorDescriptor{
+		Name: "fs",
+		Description: `Provide access to the server's filestore and datastore.
+
+Many VQL plugins produce references to files stored on the server. This accessor can be used to open those files and read them. Typically references to filestore or datastore files have the "fs:" or "ds:" prefix.
+`,
+		Permissions: []acls.ACL_PERMISSION{acls.SERVER_ADMIN},
 	}
 }
 
@@ -74,13 +103,19 @@ func (self FileStoreFileSystemAccessor) Lstat(filename string) (
 	return self.LstatWithOSPath(full_path)
 }
 
-func (self FileStoreFileSystemAccessor) LstatWithOSPath(filename *accessors.OSPath) (
+func (self FileStoreFileSystemAccessor) LstatWithOSPath(
+	filename *accessors.OSPath) (
 	accessors.FileInfo, error) {
 
 	fullpath := path_specs.FromGenericComponentList(filename.Components)
+	err := IsFileAccessible(fullpath)
+	if err != nil {
+		return nil, err
+	}
+
 	lstat, err := self.file_store.StatFile(fullpath)
 	if err != nil {
-		// If it didnt work, we try case insensitive open
+		// If it didn't work, we try case insensitive open
 		corrected_path, err := getCorrectCase(self.file_store, fullpath)
 		if err != nil {
 			return nil, err
@@ -129,9 +164,14 @@ func (self FileStoreFileSystemAccessor) ReadDirWithOSPath(
 	[]accessors.FileInfo, error) {
 
 	fullpath := path_specs.FromGenericComponentList(filename.Components)
+	err := IsFileAccessible(fullpath)
+	if err != nil {
+		return nil, err
+	}
+
 	files, err := self.file_store.ListDirectory(fullpath)
 	if err != nil {
-		// If it didnt work, we try case insensitive
+		// If it didn't work, we try case insensitive
 		corrected_path, err := getCorrectCase(self.file_store, fullpath)
 		if err != nil {
 			return nil, err
@@ -145,8 +185,15 @@ func (self FileStoreFileSystemAccessor) ReadDirWithOSPath(
 
 	var result []accessors.FileInfo
 	for _, f := range files {
-		result = append(result, file_store_file_info.NewFileStoreFileInfo(
-			self.config_obj, f.PathSpec(), f))
+		child_path := f.PathSpec()
+		err := IsFileAccessible(child_path)
+		if err != nil {
+			continue
+		}
+
+		child := file_store_file_info.NewFileStoreFileInfo(
+			self.config_obj, f.PathSpec(), f)
+		result = append(result, child)
 	}
 
 	return result, nil
@@ -172,7 +219,7 @@ func (self FileStoreFileSystemAccessor) OpenWithOSPath(filename *accessors.OSPat
 	var fullpath api.FSPathSpec
 
 	// It is a data store path
-	if filename.Components[0] == "ds:" {
+	if filename.PathSpec().DelegatePath == "ds:" {
 		ds_path := getDSPathSpec(filename)
 		fullpath = ds_path.AsFilestorePath()
 		switch ds_path.Type() {
@@ -182,8 +229,14 @@ func (self FileStoreFileSystemAccessor) OpenWithOSPath(filename *accessors.OSPat
 		case api.PATH_TYPE_DATASTORE_PROTO:
 			fullpath = fullpath.SetType(api.PATH_TYPE_FILESTORE_DB)
 		}
+
 	} else {
 		fullpath = path_specs.FromGenericComponentList(filename.Components)
+	}
+
+	err := IsFileAccessible(fullpath)
+	if err != nil {
+		return nil, err
 	}
 
 	file, err := self.openFile(fullpath)
@@ -194,7 +247,7 @@ func (self FileStoreFileSystemAccessor) OpenWithOSPath(filename *accessors.OSPat
 		}
 
 		if err != nil {
-			// If it didnt work, we try case insensitive open
+			// If it didn't work, we try case insensitive open
 			corrected_path, err := getCorrectCase(self.file_store, fullpath)
 			if err != nil {
 				return nil, err
@@ -217,6 +270,9 @@ func (self FileStoreFileSystemAccessor) openFile(filename api.FSPathSpec) (
 		return nil, err
 	}
 
+	key := filename.AsClientPath()
+	files.Add(key)
+
 	if !self.sparse {
 		return file, err
 	}
@@ -236,8 +292,10 @@ func (self FileStoreFileSystemAccessor) openFile(filename api.FSPathSpec) (
 	}
 
 	return &ReaderWrapper{
-		ReadSeekCloser: utils.NewReadSeekReaderAdapter(reader_at),
-		Index:          index,
+		ReadSeekCloser: utils.NewReadSeekReaderAdapter(reader_at, func() {
+			files.Remove(key)
+		}),
+		Index: index,
 	}, nil
 }
 
@@ -285,7 +343,7 @@ func getIndex(config_obj *config_proto.Config,
 	}
 	defer fd.Close()
 
-	data, err := ioutil.ReadAll(fd)
+	data, err := utils.ReadAllWithLimit(fd, constants.MAX_MEMORY)
 	if err != nil {
 		return nil, err
 	}

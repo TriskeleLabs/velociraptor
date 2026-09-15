@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -48,7 +48,7 @@ func GetFileStore(config_obj *config_proto.Config) api.FileStore {
 	org_id := utils.NormalizedOrgId(config_obj.OrgId)
 
 	impl, pres := g_impl[org_id]
-	if pres {
+	if pres && impl != nil {
 		return impl
 	}
 
@@ -94,6 +94,14 @@ func OverrideFilestoreImplementation(
 	g_impl[org_id] = impl
 }
 
+// Used by tests to reset global state.
+func ClearGlobalFilestore() {
+	fs_mu.Lock()
+	defer fs_mu.Unlock()
+
+	g_impl = make(map[string]api.FileStore)
+}
+
 func SetGlobalFilestore(
 	implementation string,
 	config_obj *config_proto.Config) (err error) {
@@ -101,6 +109,20 @@ func SetGlobalFilestore(
 	defer fs_mu.Unlock()
 
 	org_id := utils.NormalizedOrgId(config_obj.OrgId)
+
+	if implementation == "clear" {
+		delete(g_impl, org_id)
+		return nil
+	}
+
+	// Nothing to update, the filestore is already set correctly.
+	current_impl, pres := g_impl[org_id]
+	if pres {
+		_, ok := current_impl.(*memcache.MemcacheFileStore)
+		if ok && implementation == "MemcacheFileDataStore" {
+			return nil
+		}
+	}
 
 	impl, err := getImpl(implementation, config_obj)
 	if err != nil {

@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -42,7 +42,7 @@ func (self *DirnameFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("dirname", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "dirname", args)()
 
 	arg := &DirnameArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -74,7 +74,7 @@ func (self *BasenameFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("basename", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "basename", args)()
 
 	arg := &DirnameArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -112,7 +112,7 @@ func (self *RelnameFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("relpath", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "relpath", args)()
 
 	arg := &RelnameFunctionArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -149,7 +149,7 @@ func (self *PathJoinFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("path_join", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "path_join", args)()
 
 	arg := &PathJoinArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -167,7 +167,7 @@ func (self *PathJoinFunction) Call(ctx context.Context,
 	for _, c := range arg.Components {
 		os_path, err = parsePath(ctx, scope, c, arg.Sep, arg.PathType)
 		if err != nil {
-			scope.Log("dirname: %v", err)
+			scope.Log("path_join: %v", err)
 			return false
 		}
 
@@ -177,7 +177,7 @@ func (self *PathJoinFunction) Call(ctx context.Context,
 	if os_path == nil {
 		os_path, err = parsePath(ctx, scope, "", arg.Sep, arg.PathType)
 		if err != nil {
-			scope.Log("dirname: %v", err)
+			scope.Log("path_join: %v", err)
 			return false
 		}
 	}
@@ -204,7 +204,7 @@ type PathSplitFunction struct{}
 func (self *PathSplitFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("path_split", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "path_split", args)()
 
 	arg := &PathSplitArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)

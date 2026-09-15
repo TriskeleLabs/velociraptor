@@ -55,13 +55,13 @@
   ## Caveats
 
   It is not possible for clients to present an TLS client certificate
-  because they dont have one. Therefore the Frontend (the service
+  because they don't have one. Therefore the Frontend (the service
   connecting to clients) can not require client certificates. Since
   TLS requires client certificates *before* the HTTP headers it is
   currently impossible to require client certificates **only** for the
   GUI and not the frontend if they share the same port!!!
 
-  This means that client certifacts do not work with using autocert
+  This means that client certificates do not work with using autocert
   (in that case both frontend and GUI share the same port due to
   limitations in the Let's Encrypt protocol).
 
@@ -78,16 +78,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/Velocidex/ordereddict"
 	"github.com/gorilla/csrf"
+	"www.velocidex.com/golang/velociraptor/acls"
 	acl_proto "www.velocidex.com/golang/velociraptor/acls/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	api_utils "www.velocidex.com/golang/velociraptor/api/utils"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -98,27 +99,25 @@ var (
 
 // Certificate based authenticator.
 type CertAuthenticator struct {
-	config_obj       *config_proto.Config
-	base, public_url string
-
+	config_obj    *config_proto.Config
 	x509_roots    *x509.CertPool
 	default_roles []string
 }
 
 // Cert auth does not need any special handlers.
-func (self *CertAuthenticator) AddHandlers(mux *http.ServeMux) error {
+func (self *CertAuthenticator) AddHandlers(mux *api_utils.ServeMux) error {
 	return nil
 }
 
 // It is not really possible to log off when using client certs
-func (self *CertAuthenticator) AddLogoff(mux *http.ServeMux) error {
-	mux.Handle(api_utils.Join(self.base, "/app/logoff.html"),
+func (self *CertAuthenticator) AddLogoff(mux *api_utils.ServeMux) error {
+	mux.Handle(api_utils.GetBasePath(self.config_obj, "/app/logoff.html"),
 		IpFilter(self.config_obj,
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-				http.Error(w, "authorization failed", http.StatusUnauthorized)
-				return
-			})))
+			api_utils.HandlerFunc(nil,
+				func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+					http.Error(w, "authorization failed", http.StatusUnauthorized)
+				})))
 
 	return nil
 }
@@ -138,7 +137,7 @@ func (self *CertAuthenticator) AuthRedirectTemplate() string {
 func (self *CertAuthenticator) getUserNameFromTLSCerts(r *http.Request) (string, error) {
 	// We only trust certs issued by the Velociraptor CA.
 	x509_opts := x509.VerifyOptions{
-		CurrentTime: time.Now(),
+		CurrentTime: utils.GetTime().Now(),
 		Roots:       self.x509_roots,
 	}
 
@@ -153,91 +152,106 @@ func (self *CertAuthenticator) getUserNameFromTLSCerts(r *http.Request) (string,
 }
 
 func (self *CertAuthenticator) AuthenticateUserHandler(
-	parent http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-CSRF-Token", csrf.Token(r))
+	parent http.Handler,
+	permission acls.ACL_PERMISSION,
+) http.Handler {
 
-		username, err := self.getUserNameFromTLSCerts(r)
-		if err != nil {
-			http.Error(w,
-				fmt.Sprintf("authorization failed: Client Certificate is not valid: %v", err),
-				http.StatusUnauthorized)
-			return
-		}
+	logger := GetLoggingHandler(self.config_obj)(parent)
 
-		users_manager := services.GetUserManager()
-		user_record, err := users_manager.GetUser(r.Context(), username, username)
-		if err != nil {
-			if errors.Is(err, utils.NotFoundError) ||
-				len(self.default_roles) == 0 {
-				http.Error(w,
-					fmt.Sprintf("authorization failed for %v: %v", username, err),
-					http.StatusUnauthorized)
-				return
-			}
+	return api_utils.HandlerFunc(parent,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-CSRF-Token", csrf.Token(r))
 
-			// Create a new user role on the fly.
-			policy := &acl_proto.ApiClientACL{
-				Roles: self.default_roles,
-			}
-			services.LogAudit(r.Context(),
-				self.config_obj, username, "Automatic User Creation",
-				ordereddict.NewDict().
-					Set("roles", self.default_roles).
-					Set("remote", r.RemoteAddr))
-
-			// Use the super user principal to actually add the
-			// username so we have enough permissions.
-			err = users_manager.AddUserToOrg(r.Context(), services.AddNewUser,
-				utils.GetSuperuserName(self.config_obj), username,
-				[]string{"root"}, policy)
+			username, err := self.getUserNameFromTLSCerts(r)
 			if err != nil {
 				http.Error(w,
-					fmt.Sprintf("authorization failed: automatic user creation: %v", err),
+					fmt.Sprintf("authorization failed: Client Certificate is not valid: %v", err),
 					http.StatusUnauthorized)
 				return
 			}
 
-			user_record, err = users_manager.GetUser(r.Context(), username, username)
+			users_manager := services.GetUserManager()
+			user_record, err := users_manager.GetUser(r.Context(), username, username)
 			if err != nil {
+				if utils.IsNotFound(err) ||
+					len(self.default_roles) == 0 {
+					http.Error(w,
+						fmt.Sprintf("authorization failed for %v: %v", username, err),
+						http.StatusUnauthorized)
+					return
+				}
+
+				// Create a new user role on the fly.
+				policy := &acl_proto.ApiClientACL{
+					Roles: self.default_roles,
+				}
+				err := services.LogAudit(r.Context(),
+					self.config_obj, username, "Automatic User Creation",
+					ordereddict.NewDict().
+						Set("roles", self.default_roles).
+						Set("remote", r.RemoteAddr))
+				if err != nil {
+					logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+					logger.Error("GetUser LogAudit: Automatic User Creation %v %v",
+						username, r.RemoteAddr)
+				}
+
+				// Use the super user principal to actually add the
+				// username so we have enough permissions.
+				err = users_manager.AddUserToOrg(r.Context(), services.AddNewUser,
+					utils.GetSuperuserName(self.config_obj), username,
+					[]string{"root"}, policy)
+				if err != nil {
+					http.Error(w,
+						fmt.Sprintf("authorization failed: automatic user creation: %v", err),
+						http.StatusUnauthorized)
+					return
+				}
+
+				user_record, err = users_manager.GetUser(r.Context(), username, username)
+				if err != nil {
+					http.Error(w,
+						fmt.Sprintf("Failed creating user for %v: %v", username, err),
+						http.StatusUnauthorized)
+					return
+				}
+			}
+
+			// Does the user have access to the specified org?
+			err = CheckOrgAccess(self.config_obj, r, user_record, permission)
+			if err != nil {
+				err := services.LogAudit(r.Context(),
+					self.config_obj, user_record.Name, "Unauthorized username",
+					ordereddict.NewDict().
+						Set("remote", r.RemoteAddr).
+						Set("status", http.StatusUnauthorized))
+				if err != nil {
+					logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+					logger.Error("CheckOrgAccess LogAudit: Unauthorized username %v %v",
+						user_record.Name, r.RemoteAddr)
+				}
+
 				http.Error(w,
-					fmt.Sprintf("Failed creating user for %v: %v", username, err),
+					fmt.Sprintf("authorization failed: %v", err),
 					http.StatusUnauthorized)
 				return
 			}
-		}
 
-		// Does the user have access to the specified org?
-		err = CheckOrgAccess(self.config_obj, r, user_record)
-		if err != nil {
-			services.LogAudit(r.Context(),
-				self.config_obj, user_record.Name, "Unauthorized username",
-				ordereddict.NewDict().
-					Set("remote", r.RemoteAddr).
-					Set("status", http.StatusUnauthorized))
+			// Checking is successful - user authorized. Here we
+			// build a token to pass to the underlying GRPC
+			// service with metadata about the user.
+			user_info := &api_proto.VelociraptorUser{
+				Name: user_record.Name,
+			}
 
-			http.Error(w,
-				fmt.Sprintf("authorization failed: %v", err),
-				http.StatusUnauthorized)
-			return
-		}
+			// Must use json encoding because grpc can not handle
+			// binary data in metadata.
+			serialized, _ := json.Marshal(user_info)
+			ctx := context.WithValue(
+				r.Context(), constants.GRPC_USER_CONTEXT, string(serialized))
 
-		// Checking is successful - user authorized. Here we
-		// build a token to pass to the underlying GRPC
-		// service with metadata about the user.
-		user_info := &api_proto.VelociraptorUser{
-			Name: user_record.Name,
-		}
-
-		// Must use json encoding because grpc can not handle
-		// binary data in metadata.
-		serialized, _ := json.Marshal(user_info)
-		ctx := context.WithValue(
-			r.Context(), constants.GRPC_USER_CONTEXT, string(serialized))
-
-		// Need to call logging after auth so it can access
-		// the USER value in the context.
-		GetLoggingHandler(self.config_obj)(parent).ServeHTTP(
-			w, r.WithContext(ctx))
-	})
+			// Need to call logging after auth so it can access
+			// the USER value in the context.
+			logger.ServeHTTP(w, r.WithContext(ctx))
+		}).AddChild("GetLoggingHandler")
 }

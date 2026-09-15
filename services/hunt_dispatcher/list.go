@@ -8,8 +8,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/paths"
-	"www.velocidex.com/golang/velociraptor/reporting"
 	"www.velocidex.com/golang/velociraptor/services"
 )
 
@@ -41,7 +39,9 @@ func FindCollectedArtifacts(
 
 // This function is deprecated.
 func (self *HuntDispatcher) ListHunts(
-	ctx context.Context, config_obj *config_proto.Config,
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	hunt_options services.GetHuntOptions,
 	in *api_proto.ListHuntsRequest) (
 	*api_proto.ListHuntsResponse, error) {
 
@@ -54,7 +54,7 @@ func (self *HuntDispatcher) ListHunts(
 	// creation time. This should be very fast because all hunts
 	// are kept in memory inside the hunt dispatcher.
 	items := make([]*api_proto.Hunt, 0, end)
-	err := self.ApplyFuncOnHunts(ctx, services.AllHunts,
+	err := self.ApplyFuncOnHunts(ctx, services.AllHunts, hunt_options,
 		func(hunt *api_proto.Hunt) error {
 			if in.UserFilter != "" &&
 				in.UserFilter != hunt.Creator {
@@ -67,8 +67,12 @@ func (self *HuntDispatcher) ListHunts(
 
 				// Clone the hunts so we can remove
 				// them from the locked section.
-				items = append(items,
-					proto.Clone(hunt).(*api_proto.Hunt))
+				clone := proto.Clone(hunt).(*api_proto.Hunt)
+				if clone.StartRequest != nil {
+					clone.StartRequest.CompiledCollectorArgs = nil
+				}
+
+				items = append(items, clone)
 			}
 			return nil
 		})
@@ -92,12 +96,18 @@ func (self *HuntDispatcher) ListHunts(
 
 // availableHuntDownloadFiles returns the prepared zip downloads available to
 // be fetched by the user at this moment.
-func availableHuntDownloadFiles(config_obj *config_proto.Config,
+func availableHuntDownloadFiles(
+	ctx context.Context, config_obj *config_proto.Config,
 	hunt_id string) (*api_proto.AvailableDownloads, error) {
 
-	hunt_path_manager := paths.NewHuntPathManager(hunt_id)
-	download_file := hunt_path_manager.GetHuntDownloadsFile(false, "", false)
-	download_path := download_file.Dir()
+	export_manager, err := services.GetExportManager(config_obj)
+	if err != nil {
+		return nil, err
+	}
 
-	return reporting.GetAvailableDownloadFiles(config_obj, download_path)
+	return export_manager.GetAvailableDownloadFiles(ctx, config_obj,
+		services.ContainerOptions{
+			Type:   services.HuntExport,
+			HuntId: hunt_id,
+		})
 }

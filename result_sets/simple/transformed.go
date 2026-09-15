@@ -171,10 +171,7 @@ func (self ResultSetFactory) getSortedReader(
 		if err != nil {
 			return nil, err
 		}
-		result_impl, ok := result.(*ResultSetReaderImpl)
-		if ok {
-			result_impl.stacker = transformed_path.AddChild("stack")
-		}
+		result.SetStacker(transformed_path.AddChild("stack"))
 		return result, err
 	}
 
@@ -208,7 +205,7 @@ func (self ResultSetFactory) getSortedReader(
 	sorted_chan, closer, err := NewStacker(sub_ctx, scope,
 		stacker_path,
 		file_store_factory, self,
-		sorter.MergeSorter{10000}.Sort(
+		sorter.MergeSorter{ChunkSize: 10000}.Sort(
 			ctx, scope, sorter_input_chan,
 			options.SortColumn, options.SortAsc),
 		options.SortColumn)
@@ -287,9 +284,9 @@ type Stacker struct {
 
 func (self *Stacker) Close(ctx context.Context) {
 	if self.count > 0 {
-		self.writer.WriteJSONL(
-			[]byte(json.Format(`{"value":%q,"idx":%q,"c":%q}
-`, self.value, self.index, self.count)), 1)
+		_ = self.writer.WriteJSONL(
+			[]byte(json.Format(`{"value":%q,"idx":%q,"c":%q}`+"\n",
+				self.value, self.index, self.count)), 1)
 	}
 	self.writer.Close()
 }
@@ -311,9 +308,9 @@ func (self *Stacker) Start(ctx context.Context) {
 		// Flush the current value
 		if !self.scope.Eq(value, self.value) {
 			if self.count > 0 {
-				self.writer.WriteJSONL(
-					[]byte(json.Format(`{"value":%q,"idx":%q,"c":%q}
-`, self.value, self.index, self.count)), 1)
+				_ = self.writer.WriteJSONL(
+					[]byte(json.Format(`{"value":%q,"idx":%q,"c":%q}`+"\n",
+						self.value, self.index, self.count)), 1)
 			}
 			self.count = 0
 			self.value = value
@@ -335,7 +332,7 @@ func NewStacker(
 	scope vfilter.Scope,
 	stack_path api.FSPathSpec,
 	file_store_factory api.FileStore,
-	rs_factory ResultSetFactory,
+	rs_factory result_sets.Factory,
 	sorted_chan <-chan vfilter.Row,
 	sort_column string) (<-chan vfilter.Row, func(), error) {
 

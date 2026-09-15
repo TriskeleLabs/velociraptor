@@ -62,7 +62,15 @@ func MustMarshalString(v interface{}) string {
 	return string(result)
 }
 
-func StringIndent(v interface{}) string {
+func MarshalString(v interface{}) (string, error) {
+	result, err := Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
+}
+
+func MustStringIndent(v interface{}) string {
 	result, err := MarshalIndent(v)
 	if err != nil {
 		panic(err)
@@ -155,4 +163,8 @@ func CopySlice(in []byte) []byte {
 	result := make([]byte, len(in))
 	copy(result, in)
 	return result
+}
+
+func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
+	return json.Indent(dst, src, prefix, indent)
 }

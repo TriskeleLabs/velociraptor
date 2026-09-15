@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -46,7 +46,7 @@ func (self UrlFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("url", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "url", args)()
 
 	arg := &UrlArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -122,6 +122,7 @@ func (self UrlFunction) Info(scope vfilter.Scope, type_map *vfilter.TypeMap) *vf
 		Name:    "url",
 		Doc:     "Construct a URL or parse one.",
 		ArgType: type_map.AddType(scope, &UrlArgs{}),
+		Version: 2,
 	}
 }
 

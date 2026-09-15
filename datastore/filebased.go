@@ -1,6 +1,6 @@
 /*
    Velociraptor - Dig Deeper
-   Copyright (C) 2019-2024 Rapid7 Inc.
+   Copyright (C) 2019-2025 Rapid7 Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -21,7 +21,7 @@
 // used for storing local metadata and uses no locking:
 
 // Object IO is considered atomic - there are no locks. This can
-// result in races for contentended objects but the Velociraptor
+// result in races for contended objects but the Velociraptor
 // design avoids file contention at all times.
 
 // Files can be written as protobuf encoding (this is the old
@@ -34,8 +34,6 @@ package datastore
 
 import (
 	"fmt"
-	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,8 +54,9 @@ var (
 	file_based_imp = &FileBaseDataStore{}
 
 	datastoreNotConfiguredError = errors.New("Datastore not configured")
-	invalidFileError            = errors.New("Invalid file error")
-	insufficientDiskSpace       = errors.New("Insufficient disk space!")
+	invalidFileError            = utils.Wrap(
+		utils.NotFoundError, "Invalid file error")
+	insufficientDiskSpace = errors.New("Insufficient disk space!")
 )
 
 const (
@@ -82,11 +81,11 @@ func (self *FileBaseDataStore) GetSubject(
 
 	defer InstrumentWithDelay("read", "FileBaseDataStore", urn)()
 
-	Trace(config_obj, "GetSubject", urn)
-	serialized_content, err := readContentFromFile(config_obj, urn)
+	Trace(self, config_obj, "GetSubject", urn)
+	serialized_content, err := readContentFromFile(self, config_obj, urn)
 	if err != nil {
 		return fmt.Errorf("While opening %v: %w", urn.AsClientPath(),
-			os.ErrNotExist)
+			utils.NotFoundError)
 	}
 
 	if len(serialized_content) == 0 {
@@ -94,7 +93,8 @@ func (self *FileBaseDataStore) GetSubject(
 		// characters. If the file is empty something went wrong -
 		// usually this is because the disk was full.
 		if urn.Type() == api.PATH_TYPE_DATASTORE_JSON {
-			return invalidFileError
+			return fmt.Errorf("While accessing %v: %w",
+				urn.AsClientPath(), invalidFileError)
 		}
 		return nil
 	}
@@ -108,13 +108,13 @@ func (self *FileBaseDataStore) GetSubject(
 
 	if err != nil {
 		return fmt.Errorf("While opening %v: %w",
-			urn.AsClientPath(), os.ErrNotExist)
+			urn.AsClientPath(), utils.NotFoundError)
 	}
 	return nil
 }
 
 func (self *FileBaseDataStore) Debug(config_obj *config_proto.Config) {
-	filepath.Walk(config_obj.Datastore.Location,
+	_ = filepath.Walk(config_obj.Datastore.Location,
 		func(path string, info os.FileInfo, err error) error {
 			fmt.Printf("%v -> %v %v\n", path, info.Size(), info.Mode())
 			return nil
@@ -136,7 +136,7 @@ func (self *FileBaseDataStore) SetSubjectWithCompletion(
 
 	defer InstrumentWithDelay("write", "FileBaseDataStore", urn)()
 
-	err := self.Error()
+	err := self.Healthy()
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func (self *FileBaseDataStore) SetSubjectWithCompletion(
 		}
 	}()
 
-	Trace(config_obj, "SetSubject", urn)
+	Trace(self, config_obj, "SetSubject", urn)
 
 	// Encode as JSON
 	if urn.Type() == api.PATH_TYPE_DATASTORE_JSON {
@@ -158,14 +158,14 @@ func (self *FileBaseDataStore) SetSubjectWithCompletion(
 		if err != nil {
 			return err
 		}
-		return writeContentToFile(config_obj, urn, serialized_content)
+		return writeContentToFile(self, config_obj, urn, serialized_content)
 	}
 	serialized_content, err := proto.Marshal(message)
 	if err != nil {
 		return errors.Wrap(err, 0)
 	}
 
-	return writeContentToFile(config_obj, urn, serialized_content)
+	return writeContentToFile(self, config_obj, urn, serialized_content)
 }
 
 func (self *FileBaseDataStore) DeleteSubjectWithCompletion(
@@ -187,9 +187,9 @@ func (self *FileBaseDataStore) DeleteSubject(
 
 	defer InstrumentWithDelay("delete", "FileBaseDataStore", urn)()
 
-	Trace(config_obj, "DeleteSubject", urn)
+	Trace(self, config_obj, "DeleteSubject", urn)
 
-	err := os.Remove(urn.AsDatastoreFilename(config_obj))
+	err := os.Remove(AsDatastoreFilename(self, config_obj, urn))
 
 	// It is ok to remove a file that does not exist.
 	if err != nil && os.IsExist(err) {
@@ -201,13 +201,13 @@ func (self *FileBaseDataStore) DeleteSubject(
 	return nil
 }
 
-func listChildren(config_obj *config_proto.Config,
+func (self *FileBaseDataStore) listChildren(config_obj *config_proto.Config,
 	urn api.DSPathSpec) ([]os.FileInfo, error) {
 
 	defer InstrumentWithDelay("list", "FileBaseDataStore", urn)()
 
 	children, err := utils.ReadDirUnsorted(
-		urn.AsDatastoreDirectory(config_obj))
+		AsDatastoreDirectory(self, config_obj, urn))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []os.FileInfo{}, nil
@@ -237,9 +237,9 @@ func (self *FileBaseDataStore) ListChildren(
 	urn api.DSPathSpec) (
 	[]api.DSPathSpec, error) {
 
-	TraceDirectory(config_obj, "ListChildren", urn)
+	TraceDirectory(self, config_obj, "ListChildren", urn)
 
-	all_children, err := listChildren(config_obj, urn)
+	all_children, err := self.listChildren(config_obj, urn)
 	if err != nil {
 		return nil, err
 	}
@@ -257,13 +257,18 @@ func (self *FileBaseDataStore) ListChildren(
 		return children[i].ModTime().UnixNano() < children[j].ModTime().UnixNano()
 	})
 
+	db, err := GetDB(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
 	// Slice the result according to the required offset and count.
 	result := make([]api.DSPathSpec, 0, len(children))
 	for _, child := range children {
 		var child_pathspec api.DSPathSpec
 
 		if child.IsDir() {
-			name := utils.UnsanitizeComponent(child.Name())
+			name := UncompressComponent(db, config_obj, child.Name())
 			result = append(result, urn.AddUnsafeChild(name).SetDir())
 			continue
 		}
@@ -275,7 +280,8 @@ func (self *FileBaseDataStore) ListChildren(
 			continue
 		}
 
-		name := utils.UnsanitizeComponent(child.Name()[:len(extension)])
+		name := UncompressComponent(db,
+			config_obj, child.Name()[:len(extension)])
 
 		// Skip over files that do not belong in the data store.
 		if spec_type == api.PATH_TYPE_DATASTORE_UNKNOWN {
@@ -294,16 +300,30 @@ func (self *FileBaseDataStore) ListChildren(
 // Called to close all db handles etc. Not thread safe.
 func (self *FileBaseDataStore) Close() {}
 
-func writeContentToFile(config_obj *config_proto.Config,
+func writeContentToFile(
+	db DataStore, config_obj *config_proto.Config,
 	urn api.DSPathSpec, data []byte) error {
 
 	if config_obj.Datastore == nil {
 		return datastoreNotConfiguredError
 	}
 
-	filename := urn.AsDatastoreFilename(config_obj)
+	max_size := uint64(constants.MAX_DATASTORE_OBJECTS)
+	if config_obj.Datastore.MaxObjectSize > 0 {
+		max_size = config_obj.Datastore.MaxObjectSize
+	}
 
-	// Truncate the file immediately so we dont need to make a seocnd
+	if uint64(len(data)) > max_size {
+		return utils.Wrap(utils.MemoryError, "Datastore object exceeded")
+	}
+
+	filename := AsDatastoreFilename(db, config_obj, urn)
+	err := checkPath(filename)
+	if err != nil {
+		return err
+	}
+
+	// Truncate the file immediately so we don't need to make a second
 	// syscall. Empirically on Linux, a truncate call always works,
 	// even if there is no available disk space to accommodate the
 	// required file size. This means we can not avoid file corruption
@@ -339,18 +359,24 @@ func writeContentToFile(config_obj *config_proto.Config,
 }
 
 func readContentFromFile(
-	config_obj *config_proto.Config, urn api.DSPathSpec) ([]byte, error) {
+	db DataStore, config_obj *config_proto.Config,
+	urn api.DSPathSpec) ([]byte, error) {
 
 	if config_obj.Datastore == nil {
 		return nil, datastoreNotConfiguredError
 	}
 
-	file, err := os.Open(urn.AsDatastoreFilename(config_obj))
+	filename := AsDatastoreFilename(db, config_obj, urn)
+	err := checkPath(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(filename)
 	if err == nil {
 		defer file.Close()
 
-		result, err := ioutil.ReadAll(
-			io.LimitReader(file, constants.MAX_MEMORY))
+		result, err := utils.ReadAllWithLimit(file, constants.MAX_MEMORY)
 		if err != nil {
 			return nil, errors.Wrap(err, 0)
 		}
@@ -363,15 +389,13 @@ func readContentFromFile(
 	if os.IsNotExist(err) &&
 		urn.Type() == api.PATH_TYPE_DATASTORE_JSON {
 
-		file, err := os.Open(urn.
-			SetType(api.PATH_TYPE_DATASTORE_PROTO).
-			AsDatastoreFilename(config_obj))
+		file, err := os.Open(AsDatastoreFilename(
+			db, config_obj, urn.SetType(api.PATH_TYPE_DATASTORE_PROTO)))
 
 		if err == nil {
 			defer file.Close()
 
-			result, err := ioutil.ReadAll(
-				io.LimitReader(file, constants.MAX_MEMORY))
+			result, err := utils.ReadAllWithLimit(file, constants.MAX_MEMORY)
 			if err != nil {
 				return nil, errors.Wrap(err, 0)
 			}
@@ -382,22 +406,21 @@ func readContentFromFile(
 	return nil, errors.Wrap(err, 0)
 }
 
-func Trace(config_obj *config_proto.Config,
+func Trace(
+	db DataStore,
+	config_obj *config_proto.Config,
 	name string, filename api.DSPathSpec) {
 
-	return
-
-	fmt.Printf("Trace FileBaseDataStore: %v: %v\n", name,
-		filename.AsDatastoreFilename(config_obj))
+	//fmt.Printf("Trace FileBaseDataStore: %v: %v\n", name,
+	//	AsDatastoreFilename(db, config_obj, filename))
 }
 
-func TraceDirectory(config_obj *config_proto.Config,
+func TraceDirectory(
+	db DataStore, config_obj *config_proto.Config,
 	name string, filename api.DSPathSpec) {
 
-	return
-
-	fmt.Printf("Trace FileBaseDataStore: %v: %v\n", name,
-		filename.AsDatastoreDirectory(config_obj))
+	//fmt.Printf("Trace FileBaseDataStore: %v: %v\n", name,
+	//	AsDatastoreDirectory(db, config_obj, filename))
 }
 
 // Support RawDataStore interface
@@ -405,10 +428,10 @@ func (self *FileBaseDataStore) GetBuffer(
 	config_obj *config_proto.Config,
 	urn api.DSPathSpec) ([]byte, error) {
 
-	return readContentFromFile(config_obj, urn)
+	return readContentFromFile(self, config_obj, urn)
 }
 
-func (self *FileBaseDataStore) Error() error {
+func (self *FileBaseDataStore) Healthy() error {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
@@ -426,15 +449,25 @@ func (self *FileBaseDataStore) SetBuffer(
 	config_obj *config_proto.Config,
 	urn api.DSPathSpec, data []byte, completion func()) error {
 
-	err := self.Error()
+	err := self.Healthy()
 	if err != nil {
 		return err
 	}
 
-	err = writeContentToFile(config_obj, urn, data)
+	err = writeContentToFile(self, config_obj, urn, data)
 	if completion != nil &&
 		!utils.CompareFuncs(completion, utils.SyncCompleter) {
 		completion()
 	}
 	return err
+}
+
+// Check for directory traversal sequences. These should never happen
+// but we have a second layer of defense here.
+func checkPath(path string) error {
+	if strings.Contains(path, "/../") {
+		return utils.Wrap(utils.InvalidArgError, "Directory traversal not supported")
+	}
+
+	return nil
 }

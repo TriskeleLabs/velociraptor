@@ -29,17 +29,16 @@ func (self ClientInfoBackupProvider) Name() []string {
 
 // The backup will just dump out the contents of the client info manager.
 func (self ClientInfoBackupProvider) BackupResults(
-	ctx context.Context, wg *sync.WaitGroup) (
-	<-chan vfilter.Row, error) {
+	ctx context.Context, wg *sync.WaitGroup,
+	container services.BackupContainerWriter) (<-chan vfilter.Row, error) {
 
 	return self.store.BackupResults(ctx, wg)
 }
 
 func (self *Store) BackupResults(
-	ctx context.Context, wg *sync.WaitGroup) (
-	<-chan vfilter.Row, error) {
+	ctx context.Context, wg *sync.WaitGroup) (<-chan vfilter.Row, error) {
 
-	// We dont lock the data so we can take as long as needed.
+	// We don't lock the data so we can take as long as needed.
 	clients := self.Keys()
 	output := make(chan vfilter.Row)
 
@@ -83,6 +82,7 @@ func (self *Store) BackupResults(
 }
 
 func (self ClientInfoBackupProvider) Restore(ctx context.Context,
+	container services.BackupContainerReader,
 	in <-chan vfilter.Row) (stat services.BackupStat, err error) {
 	return self.store.Restore(ctx, self.config_obj, in)
 }
@@ -100,7 +100,10 @@ func (self *Store) Restore(ctx context.Context,
 		if err != nil {
 			stat.Error = err
 		}
-		indexer.RebuildIndex(ctx, config_obj)
+		err = indexer.RebuildIndex(ctx, config_obj)
+		if err != nil {
+			stat.Error = err
+		}
 		stat.Message = fmt.Sprintf("Restored %v clients", count)
 	}()
 
@@ -108,7 +111,7 @@ func (self *Store) Restore(ctx context.Context,
 	defer self.mu.Unlock()
 
 	// Clear the store
-	self.data = make(map[string][]byte)
+	self.data = make(map[string]*clientRecord)
 
 	for {
 		select {
@@ -138,9 +141,10 @@ func (self *Store) Restore(ctx context.Context,
 			}
 
 			count++
-			self.data[client_info.ClientId] = serialized
+			self.data[client_info.ClientId] = &clientRecord{
+				serialized: serialized,
+				owner:      self,
+			}
 		}
 	}
-
-	return stat, nil
 }

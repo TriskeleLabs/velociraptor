@@ -3,8 +3,8 @@ package crypto
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
-	"io/ioutil"
 	"strings"
 
 	"github.com/Velocidex/ordereddict"
@@ -12,10 +12,10 @@ import (
 	"golang.org/x/crypto/openpgp/armor"
 	"golang.org/x/crypto/openpgp/packet"
 
-	"golang.org/x/net/context"
 	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_utils "www.velocidex.com/golang/velociraptor/crypto/utils"
-	"www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -43,7 +43,7 @@ func (self *PKEncryptFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
 
-	defer vql_subsystem.RegisterMonitor("pk_encrypt", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "pk_encrypt", args)()
 
 	arg := &PKEncryptArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -140,10 +140,11 @@ func encryptPGP(recip []*openpgp.Entity,
 	w io.Writer) error {
 
 	wc, err := openpgp.Encrypt(w, recip, signer, nil, nil)
-	defer wc.Close()
 	if err != nil {
 		return err
 	}
+	defer wc.Close()
+
 	if _, err := io.Copy(wc, r); err != nil {
 		return err
 	}
@@ -154,7 +155,7 @@ func encryptPGP(recip []*openpgp.Entity,
 func (self *PKDecryptFunction) Call(ctx context.Context,
 	scope vfilter.Scope,
 	args *ordereddict.Dict) vfilter.Any {
-	defer vql_subsystem.RegisterMonitor("pk_decrypt", args)()
+	defer vql_subsystem.RegisterMonitor(ctx, "pk_decrypt", args)()
 
 	arg := &PKDecryptArgs{}
 	err := arg_parser.ExtractArgsWithContext(ctx, scope, args, arg)
@@ -205,7 +206,8 @@ func (self *PKDecryptFunction) Call(ctx context.Context,
 				scope.Log("ERROR:pk_decrypt: %s", err.Error())
 				return vfilter.Null{}
 			}
-			bytes, err := ioutil.ReadAll(m.UnverifiedBody)
+			bytes, err := utils.ReadAllWithLimit(m.UnverifiedBody,
+				constants.MAX_MEMORY)
 			if err != nil {
 				scope.Log("ERROR:pk_decrypt: %s", err.Error())
 				return vfilter.Null{}
@@ -251,7 +253,7 @@ func (self PKEncryptFunction) Info(
 		Name:     "pk_encrypt",
 		Doc:      "Encrypt files using pubkey encryption",
 		ArgType:  type_map.AddType(scope, &PKEncryptArgs{}),
-		Metadata: vql.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
+		Metadata: vql_subsystem.VQLMetadata().Permissions(acls.SERVER_ADMIN).Build(),
 	}
 }
 

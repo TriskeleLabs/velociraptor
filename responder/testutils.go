@@ -34,18 +34,21 @@ func TestResponderWithFlowId(
 
 	sub_ctx, sub_cancel := context.WithCancel(ctx)
 
-	flow_manager := NewFlowManager(ctx, config_obj)
+	flow_manager := NewFlowManager(ctx, config_obj, "")
 	result := &TestResponderType{
 		FlowResponder: &FlowResponder{
-			ctx:    sub_ctx,
-			cancel: sub_cancel,
-			wg:     &sync.WaitGroup{},
-			output: output_chan,
+			ctx:           sub_ctx,
+			cancel:        sub_cancel,
+			wg:            &sync.WaitGroup{},
+			output:        output_chan,
+			logErrorRegex: defaultLogErrorRegex,
+			status:        &crypto_proto.VeloStatus{},
 		},
 		Drain: drain,
 	}
 
 	result.status.Status = crypto_proto.VeloStatus_PROGRESS
+	result.status.FirstActive = uint64(utils.GetTime().Now().UnixNano() / 1000)
 	result.wg.Add(1)
 	flow_context := flow_manager.FlowContext(
 		result.output, &crypto_proto.VeloMessage{SessionId: flow_id})
@@ -72,9 +75,7 @@ func (self *messageDrain) Messages() []*crypto_proto.VeloMessage {
 	defer self.mu.Unlock()
 
 	result := make([]*crypto_proto.VeloMessage, 0, len(self.messages))
-	for _, i := range self.messages {
-		result = append(result, i)
-	}
+	result = append(result, self.messages...)
 
 	return result
 }
@@ -122,6 +123,35 @@ func (self *messageDrain) WaitForStatsMessage(t *testing.T) []*crypto_proto.Velo
 			if r.FlowStats != nil &&
 				len(r.FlowStats.QueryStatus) > 0 &&
 				r.FlowStats.QueryStatus[0].UploadedFiles == 1 {
+				return true
+			}
+		}
+		return false
+	})
+	return responses
+}
+
+func (self *messageDrain) WaitForCompletion(t *testing.T) []*crypto_proto.VeloMessage {
+	var responses []*crypto_proto.VeloMessage
+	vtesting.WaitUntil(time.Second*5, t, func() bool {
+		responses = self.Messages()
+		for _, r := range responses {
+			if r.FlowStats != nil &&
+				r.FlowStats.FlowComplete {
+				return true
+			}
+		}
+		return false
+	})
+	return responses
+}
+
+func (self *messageDrain) WaitForEof(t *testing.T) []*crypto_proto.VeloMessage {
+	var responses []*crypto_proto.VeloMessage
+	vtesting.WaitUntil(time.Second*5, t, func() bool {
+		responses = self.Messages()
+		for _, r := range responses {
+			if r.FileBuffer != nil && r.FileBuffer.Eof {
 				return true
 			}
 		}

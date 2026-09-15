@@ -13,6 +13,7 @@ import Col from 'react-bootstrap/Col';
 import Container from  'react-bootstrap/Container';
 import Table  from 'react-bootstrap/Table';
 import Card  from 'react-bootstrap/Card';
+import InputGroup from 'react-bootstrap/InputGroup';
 import Button from 'react-bootstrap/Button';
 import Form from 'react-bootstrap/Form';
 import Modal from 'react-bootstrap/Modal';
@@ -26,6 +27,10 @@ import {CancelToken} from 'axios';
 import ToolTip from '../widgets/tooltip.jsx';
 
 const POLL_TIME = 5000;
+
+// In ms
+const Duration15Min = 60 * 15 * 1000;
+const Duration24Hours = 60 * 60 * 24 * 1000;
 
 function getOrgRecordsForUser(users, name) {
     if (_.isEmpty(users)) {
@@ -132,6 +137,24 @@ class PermissionViewer extends Component {
         }
     }
 
+    // ORG_ADMIN role can only be set on the root org.
+    isRoleDisabled = role=>{
+        if(role === "org_admin") {
+            let org_id = this.props.org && this.props.org.id;
+            return org_id != "root";
+        }
+        return false;
+    }
+
+    // ORG_ADMIN permission can only be set on the root org.
+    isPermissionDisabled = perm=>{
+        if(perm === "ORG_ADMIN") {
+            let org_id = this.props.org && this.props.org.id;
+            return org_id != "root";
+        }
+        return false;
+    }
+
     render() {
         if (!this.props.username) {
             return <></>;
@@ -194,6 +217,7 @@ class PermissionViewer extends Component {
 
                           <div className="form-toggle-control">
                             <Form.Switch
+                              disabled={this.isRoleDisabled(role)}
                               id={"Role_" + role}
                               label={T("Role_" + role)}
                               checked={_.indexOf(this.props.acls.roles, role) >= 0}
@@ -257,8 +281,9 @@ class PermissionViewer extends Component {
                           <Form.Switch
                             id={"Perm2_" + perm}
                             label={T("Perm_" + perm)}
-                            disabled={_.indexOf(
-                                this.props.acls.effective_permissions, perm) >= 0}
+                            disabled={
+                                this.isPermissionDisabled(perm) ||
+                                _.indexOf(this.props.acls.effective_permissions, perm) >= 0}
                             checked={_.indexOf(
                                 this.props.acls.effective_permissions, perm) >= 0}
                             onChange={e=>this.changePermissions(
@@ -271,6 +296,61 @@ class PermissionViewer extends Component {
 
             </Container>
         );
+    }
+}
+
+class UserStats extends Component {
+    static propTypes = {
+        user: PropTypes.object,
+    }
+
+    last_active_ms() {
+        return ((this.props.user &&
+                this.props.user.stats &&
+                 this.props.user.stats.last_active_time) || 0) * 1000;
+    }
+
+    renderStatus() {
+        let last_active_ms = this.last_active_ms();
+        let date = new Date();
+        let now_ms = date.getTime();
+
+        if ((now_ms - last_active_ms) < Duration15Min) {
+            return  <div className="online-btn" alt="online" />;
+        }
+        if ((now_ms - last_active_ms) < Duration24Hours) {
+            return  <FontAwesomeIcon icon="fa-solid fa-triangle-exclamation"
+                                 className="fa-fade fa-offline-btn" alt="online1d" />;
+        }
+        return <FontAwesomeIcon icon="fa-solid fa-triangle-exclamation"
+                                className="fa-offline-btn " alt="online1d" />;
+    }
+
+    render() {
+        let tt = "";
+        let last_active_ms = this.last_active_ms();
+        if(last_active_ms > 0) {
+            let now = new Date().getTime();
+            let difference = (now-last_active_ms);
+            let last_ip_address = (this.props.user &&
+                                   this.props.user.stats &&
+                                   this.props.user.stats.last_ip_address) || "";
+            if (last_ip_address) {
+                last_ip_address = <span>{T(" from ")} {last_ip_address}</span>;
+            }
+            tt = <span>
+                   {T("HumanizeDuration", difference)}
+                   {last_ip_address}
+                 </span>;
+
+        }
+        return <ToolTip tooltip={tt}>
+                 <Button
+                   className="user-status"
+                   variant="outline-default">
+                   { this.renderStatus() }
+                 </Button>
+               </ToolTip>;
     }
 }
 
@@ -291,6 +371,9 @@ class UsersOverview extends Component {
         showAddUserDialog: false,
         showAddOrgDialog: false,
         showEditUserDialog: false,
+
+        user_filter: "",
+        org_filter: "",
     }
 
     componentDidMount = () => {
@@ -307,12 +390,16 @@ class UsersOverview extends Component {
         this.setACLsource.cancel();
         this.setACLsource = CancelToken.source();
 
+        // Set the ACL in the gui immediately and wait for the server
+        // to update it. This avoids flicker.
+        this.setState({acl: acl});
+
         api.post("v1/SetUserRoles", acl,
                  this.setACLsource.token).then(response=>{
                      if (response.cancel)
                          return;
-                     this.getACL(acl.name,
-                                 {id: acl.org, name: acl.org_name});
+
+                     this.getACL(acl.name, {id: acl.org, name: acl.org_name});
                      this.props.updateUsers();
                  });
     }
@@ -321,7 +408,6 @@ class UsersOverview extends Component {
         this.getACLsource.cancel();
         this.getACLsource = CancelToken.source();
 
-        this.setState({acl: {}});
         let org_id = org && org.id;
 
         if (!user_name || !org_id) {
@@ -336,6 +422,19 @@ class UsersOverview extends Component {
                 return;
             this.setState({acl: response.data});
         });
+    }
+
+    filterList = (users, filter)=>{
+        if(!filter) {
+            return users;
+        }
+
+        try {
+            filter = new RegExp(filter, "i");
+            return _.filter(users, x=>filter.test(x.name));
+        } catch(e) {
+            return _.filter(users, x=>x.name.includes(filter));
+        }
     }
 
     render() {
@@ -384,8 +483,16 @@ class UsersOverview extends Component {
                     <Table size="sm">
                       <thead>
                         <tr>
+                          <th></th>
                           <th>
-                            {T("Users")}
+                            <InputGroup className="users-header">
+                              <Form.Control
+                                placeholder={T("Users")}
+                                onChange={e=>this.setState({
+                                    user_filter: e.currentTarget.value,
+                                })}
+                                value={this.state.user_filter}
+                              />
                             { !this.context.traits.password_less &&
                               <ToolTip tooltip={T("Update User Password")}>
                                 <Button
@@ -417,23 +524,29 @@ class UsersOverview extends Component {
                                 </span>
                               </Button>
                             </ToolTip>
+                            </InputGroup>
                           </th>
                         </tr>
                       </thead>
                       <tbody>
-                        { _.map(this.props.users, (item, idx)=>{
-                            return <tr key={idx} className={
-                                    this.state.user_name === item.name ?
-                                    "row-selected" : undefined
-                                }>
-                                     <td onClick={e=>{
-                                         this.setState({user_name: item.name});
-                                         this.getACL(item.name, this.state.org);
-                                     }}>
-                                       {item.name}
-                                     </td>
-                                   </tr>;
-                        })}
+                        { _.map(this.filterList(
+                            this.props.users, this.state.user_filter),
+                                (item, idx)=>{
+                                    return <tr key={idx} className={
+                                        this.state.user_name === item.name ?
+                                            "row-selected" : undefined
+                                    }>
+                                             <td className="user-status">
+                                               <UserStats user={item}/>
+                                             </td>
+                                             <td onClick={e=>{
+                                                 this.setState({user_name: item.name});
+                                                 this.getACL(item.name, this.state.org);
+                                             }}>
+                                               {item.name}
+                                             </td>
+                                           </tr>;
+                                })}
                       </tbody>
                     </Table>
                   </Container>
@@ -444,7 +557,14 @@ class UsersOverview extends Component {
                       <thead>
                         <tr>
                           <th>
-                            {T("Orgs")}
+                            <InputGroup className="users-header">
+                              <Form.Control
+                                placeholder={T("Orgs")}
+                                onChange={e=>this.setState({
+                                    org_filter: e.currentTarget.value,
+                                })}
+                                value={this.state.org_filter}
+                              />
                             <ToolTip tooltip={T("Assign user to Orgs")}>
                               <Button
                                 disabled={!this.state.user_name}
@@ -460,6 +580,7 @@ class UsersOverview extends Component {
                                 </span>
                               </Button>
                             </ToolTip>
+                            </InputGroup>
                           </th></tr>
                       </thead>
                       <tbody>
@@ -471,11 +592,13 @@ class UsersOverview extends Component {
                               {T("Please Select a User")}
                             </td>
                           </tr> }
-                        { _.map(selected_orgs, (item, idx)=>{
-                            return <tr key={idx} className={
-                                this.state.org &&
-                                    this.state.org.name === item.name ?
-                                    "row-selected" : undefined}>
+                        { _.map(this.filterList(
+                            selected_orgs, this.state.org_filter),
+                                (item, idx)=>{
+                                    return <tr key={idx} className={
+                                        this.state.org &&
+                                            this.state.org.name === item.name ?
+                                            "row-selected" : undefined}>
                                      <td onClick={e=>{
                                          this.setState({org: item});
                                          this.getACL(this.state.user_name, item);
@@ -483,7 +606,7 @@ class UsersOverview extends Component {
                                        {item.name}
                                      </td>
                                    </tr>;
-                        })}
+                                })}
                       </tbody>
                     </Table>
                   </Container>
@@ -529,7 +652,19 @@ class OrgsOverview extends UsersOverview {
                    <Container className="selectable org-list">
                     <Table size="sm">
                      <thead>
-                       <tr><th>{T("Orgs")}</th></tr>
+                       <tr>
+                         <th>
+                            <InputGroup className="users-header">
+                              <Form.Control
+                                placeholder={T("Orgs")}
+                                onChange={e=>this.setState({
+                                    org_filter: e.currentTarget.value,
+                                })}
+                                value={this.state.org_filter}
+                              />
+                            </InputGroup>
+                         </th>
+                      </tr>
                        </thead>
                      <tbody>
                         { _.map(org_names, (name, idx)=>{
@@ -538,7 +673,7 @@ class OrgsOverview extends UsersOverview {
                                     this.state.org.name === name ?
                                     "row-selected" : undefined
                             }>
-                                      <td onClick={e=>{
+                                     <td onClick={e=>{
                                           this.setState({
                                               org: {
                                                   id: org_id_by_name[name],
@@ -560,13 +695,31 @@ class OrgsOverview extends UsersOverview {
             <Container className="selectable user-list">
              <Table size="sm">
                      <thead>
-                       <tr><th>{T("Users")}</th></tr>
+                       <tr>
+                         <th></th>
+                         <th>
+                            <InputGroup className="users-header">
+                              <Form.Control
+                                placeholder={T("Users")}
+                                onChange={e=>this.setState({
+                                    user_filter: e.currentTarget.value,
+                                })}
+                                value={this.state.user_filter}
+                              />
+                            </InputGroup>
+                         </th>
+                       </tr>
                      </thead>
                      <tbody>
-                 { _.map(selected_users, (item, idx)=>{
-                     return <tr key={idx} className={
-                         this.state.user_name === item.name ?
-                             "row-selected" : undefined}>
+                       { _.map(this.filterList(
+                           selected_users, this.state.user_filter),
+                               (item, idx)=>{
+                                   return <tr key={idx} className={
+                                       this.state.user_name === item.name ?
+                                           "row-selected" : undefined}>
+                              <td className="user-status">
+                                <UserStats user={item}/>
+                              </td>
                               <td onClick={e=>{
                                   this.setState({user_name: item.name});
                                   this.getACL(item.name, this.state.org);
@@ -574,7 +727,7 @@ class OrgsOverview extends UsersOverview {
                                 {item.name}
                               </td>
                             </tr>;
-                 })}
+                               })}
                  </tbody>
                      </Table>
              </Container>

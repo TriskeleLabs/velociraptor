@@ -6,8 +6,8 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/acls"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/services"
-	"www.velocidex.com/golang/velociraptor/vql"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vfilter/arg_parser"
@@ -51,6 +51,16 @@ func (self *CreateNotebookFunction) Call(ctx context.Context,
 		Public:        arg.Public,
 	}
 
+	if arg.Env != nil {
+		for _, k := range arg.Env.Keys() {
+			v := vql_subsystem.GetStringFromRow(scope, arg.Env, k)
+			new_notebook.Env = append(new_notebook.Env, &api_proto.Env{
+				Key:   k,
+				Value: v,
+			})
+		}
+	}
+
 	err = services.RequireFrontend()
 	if err != nil {
 		scope.Log("notebook_create: %v", err)
@@ -76,11 +86,15 @@ func (self *CreateNotebookFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	services.LogAudit(ctx,
+	err = services.LogAudit(ctx,
 		config_obj, principal, "CreateNotebook",
 		ordereddict.NewDict().
 			Set("notebook_id", new_notebook.NotebookId).
 			Set("details", vfilter.RowToDict(ctx, scope, arg)))
+	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+		logger.Error("<red>CreateNotebook</> %v %v", principal, new_notebook.NotebookId)
+	}
 
 	err = fillNotebookCells(ctx, config_obj, new_notebook)
 	if err != nil {
@@ -96,7 +110,7 @@ func (self CreateNotebookFunction) Info(scope vfilter.Scope, type_map *vfilter.T
 		Name:    "notebook_create",
 		Doc:     "Create a new notebook.",
 		ArgType: type_map.AddType(scope, &CreateNotebookFunctionArg{}),
-		Metadata: vql.VQLMetadata().Permissions(
+		Metadata: vql_subsystem.VQLMetadata().Permissions(
 			acls.COLLECT_SERVER).Build(),
 	}
 }

@@ -2,24 +2,23 @@ package timed_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	"github.com/sebdah/goldie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/file_store/test_utils"
 	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/result_sets/timed"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/utils/tempfile"
 	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/velociraptor/vtesting/goldie"
 )
 
 // We write files in the following ranges:
@@ -89,9 +88,8 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWriting() {
 		"Windows.Events.ProcessCreation")
 	assert.NoError(self.T(), err)
 
-	file_store_factory := file_store.GetFileStore(self.ConfigObj)
 	writer, err := timed.NewTimedResultSetWriter(
-		file_store_factory, path_manager, nil, func() {
+		self.ConfigObj, path_manager, nil, func() {
 			mu.Lock()
 			completion_result = append(completion_result, "Done")
 			mu.Unlock()
@@ -118,7 +116,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWriting() {
 	writer.Close()
 
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
-		return 1 == len(completion_result)
+		return len(completion_result) == 1
 	})
 
 	assert.Equal(self.T(), "Done", completion_result[0])
@@ -126,7 +124,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWriting() {
 	result := ordereddict.NewDict()
 
 	rs_reader, err := result_sets.NewTimedResultSetReader(
-		self.Sm.Ctx, file_store_factory, path_manager)
+		self.Sm.Ctx, self.ConfigObj, path_manager)
 	assert.NoError(self.T(), err)
 
 	result.Set("Available Files", rs_reader.GetAvailableFiles(self.Sm.Ctx))
@@ -165,9 +163,8 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWritingJsonl() {
 		"Windows.Events.ProcessCreation")
 	assert.NoError(self.T(), err)
 
-	file_store_factory := file_store.GetFileStore(self.ConfigObj)
 	writer, err := timed.NewTimedResultSetWriter(
-		file_store_factory, path_manager, nil, func() {
+		self.ConfigObj, path_manager, nil, func() {
 			mu.Lock()
 			completion_result = append(completion_result, "Done")
 			mu.Unlock()
@@ -196,7 +193,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWritingJsonl() {
 	writer.Close()
 
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
-		return 1 == len(completion_result)
+		return len(completion_result) == 1
 	})
 
 	assert.Equal(self.T(), "Done", completion_result[0])
@@ -204,7 +201,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWritingJsonl() {
 	result := ordereddict.NewDict()
 
 	rs_reader, err := result_sets.NewTimedResultSetReader(
-		self.Sm.Ctx, file_store_factory, path_manager)
+		self.Sm.Ctx, self.ConfigObj, path_manager)
 	assert.NoError(self.T(), err)
 
 	result.Set("Available Files", rs_reader.GetAvailableFiles(self.Sm.Ctx))
@@ -243,9 +240,8 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWritingNoFlushing() {
 		"Windows.Events.ProcessCreation")
 	assert.NoError(self.T(), err)
 
-	file_store_factory := file_store.GetFileStore(self.ConfigObj)
 	writer, err := timed.NewTimedResultSetWriter(
-		file_store_factory, path_manager, nil, func() {
+		self.ConfigObj, path_manager, nil, func() {
 			mu.Lock()
 			completion_result = append(completion_result, "Done")
 			mu.Unlock()
@@ -268,7 +264,7 @@ func (self *TimedResultSetTestSuite) TestTimedResultSetWritingNoFlushing() {
 	writer.Close()
 
 	vtesting.WaitUntil(time.Second, self.T(), func() bool {
-		return 1 == len(completion_result)
+		return len(completion_result) == 1
 	})
 
 	assert.Equal(self.T(), "Done", completion_result[0])
@@ -285,7 +281,7 @@ type TimedResultSetTestSuiteFileBased struct {
 
 func (self *TimedResultSetTestSuiteFileBased) SetupTest() {
 	var err error
-	self.dir, err = ioutil.TempDir("", "file_store_test")
+	self.dir, err = tempfile.TempDir("file_store_test")
 	assert.NoError(self.T(), err)
 
 	self.ConfigObj = self.LoadConfig()

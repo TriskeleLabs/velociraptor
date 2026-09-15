@@ -2,7 +2,7 @@
   The client info manager caches client information in memory for
   quick access without having to generate IO for each client record.
 
-  We maintain client stats as as:
+  We maintain client stats as:
 
   - Ping time - When the client was last seen - this is useful for the GUI
 
@@ -38,13 +38,15 @@ package client_info
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Velocidex/ordereddict"
-	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifacts"
 	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/services/journal"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -58,7 +60,6 @@ var (
 type ClientInfoManager struct {
 	config_obj       *config_proto.Config
 	uuid             int64
-	mu               sync.Mutex
 	mutation_manager *MutationManager
 
 	storage *Store
@@ -70,6 +71,11 @@ func (self *ClientInfoManager) ListClients(ctx context.Context) <-chan string {
 		defer close(output_chan)
 
 		for _, key := range self.storage.Keys() {
+			// Ignore the server - it is not a real client.
+			if key == constants.VELOCIRAPTOR_SERVER_CLIENT_ID {
+				continue
+			}
+
 			select {
 			case <-ctx.Done():
 				return
@@ -108,7 +114,7 @@ func (self *ClientInfoManager) UpdateMostRecentPing(ctx context.Context) {
 	for _, client_id := range self.mutation_manager.pings.Keys() {
 		if notifier.IsClientDirectlyConnected(client_id) {
 			update_stat.Ping = now
-			self.UpdateStats(ctx, client_id, update_stat)
+			_ = self.UpdateStats(ctx, client_id, update_stat)
 		}
 	}
 }
@@ -118,48 +124,49 @@ func (self *ClientInfoManager) UpdateStats(
 	client_id string,
 	stats *services.Stats) error {
 
-	record, err := self.storage.GetRecord(client_id)
-	if err != nil {
-		// If a record does not exist, just make one
-		record = &actions_proto.ClientInfo{
-			ClientId: client_id,
-		}
+	if self.mutation_manager == nil {
+		return nil
 	}
 
-	if stats.Ping > 0 && stats.Ping > record.Ping {
-		if self.mutation_manager != nil {
-			self.mutation_manager.AddPing(client_id, stats.Ping)
-		}
-		record.Ping = stats.Ping
-	}
+	return self.storage.Modify(ctx, self.config_obj, client_id,
+		func(record *services.ClientInfo) (*services.ClientInfo, error) {
+			var changed bool
 
-	if stats.IpAddress != "" &&
-		stats.IpAddress != record.IpAddress {
-		if self.mutation_manager != nil {
-			self.mutation_manager.AddIPAddress(client_id, stats.IpAddress)
-		}
-		record.IpAddress = stats.IpAddress
-	}
+			if stats.Ping > 0 && stats.Ping > record.Ping {
+				self.mutation_manager.AddPing(client_id, stats.Ping)
+				record.Ping = stats.Ping
+				changed = true
+			}
 
-	if stats.LastHuntTimestamp > 0 &&
-		stats.LastHuntTimestamp > record.LastHuntTimestamp {
-		if self.mutation_manager != nil {
-			self.mutation_manager.AddLastHuntTimestamp(
-				client_id, stats.LastHuntTimestamp)
-		}
-		record.LastHuntTimestamp = stats.LastHuntTimestamp
-	}
+			if stats.IpAddress != "" &&
+				stats.IpAddress != record.IpAddress {
+				self.mutation_manager.AddIPAddress(client_id, stats.IpAddress)
+				record.IpAddress = stats.IpAddress
+				changed = true
+			}
 
-	if stats.LastEventTableVersion > 0 &&
-		stats.LastEventTableVersion > record.LastEventTableVersion {
-		if self.mutation_manager != nil {
-			self.mutation_manager.AddLastEventTableVersion(client_id,
-				stats.LastEventTableVersion)
-		}
-		record.LastEventTableVersion = stats.LastEventTableVersion
-	}
+			if stats.LastHuntTimestamp > 0 &&
+				stats.LastHuntTimestamp > record.LastHuntTimestamp {
+				self.mutation_manager.AddLastHuntTimestamp(
+					client_id, stats.LastHuntTimestamp)
+				record.LastHuntTimestamp = stats.LastHuntTimestamp
+				changed = true
+			}
 
-	return self.storage.SetRecord(record)
+			if stats.LastEventTableVersion > 0 &&
+				stats.LastEventTableVersion > record.LastEventTableVersion {
+				self.mutation_manager.AddLastEventTableVersion(client_id,
+					stats.LastEventTableVersion)
+				record.LastEventTableVersion = stats.LastEventTableVersion
+				changed = true
+			}
+
+			if !changed {
+				return nil, nil
+			}
+
+			return record, nil
+		})
 }
 
 func (self *ClientInfoManager) Start(
@@ -196,15 +203,29 @@ func (self *ClientInfoManager) Start(
 			defer wg.Done()
 
 			// When we teardown write the data to storage if needed.
-			defer self.storage.SaveSnapshot(ctx, config_obj)
+			defer func() {
+				err := self.storage.SaveSnapshot(ctx, config_obj, SYNC_UPDATE)
+				if err != nil {
+					logger.Error("<red>ClientInfo Manager</>: SaveSnapshot: %v", err)
+				}
+			}()
 
 			for {
+				last_run := utils.GetTime().Now()
+
 				select {
 				case <-ctx.Done():
 					return
 
 				case <-time.After(utils.Jitter(write_time)):
-					err := self.storage.SaveSnapshot(ctx, config_obj)
+					if utils.GetTime().Now().Sub(last_run) < 10*time.Second {
+						if !utils.SleepWithCtx(ctx, time.Minute) {
+							return
+						}
+						continue
+					}
+
+					err := self.storage.SaveSnapshot(ctx, config_obj, !SYNC_UPDATE)
 					if err != nil {
 						logger.Error(
 							"<red>ClientInfo Manager</>: writing snapshot: %v for org %v",
@@ -218,7 +239,7 @@ func (self *ClientInfoManager) Start(
 		// Minions watch for Server.Internal.ClientInfoSnapshot to
 		// trigger their snapshot loading.
 		err := journal.WatchQueueWithCB(ctx, config_obj, wg,
-			"Server.Internal.ClientInfoSnapshot",
+			artifacts.CLIENT_INFO_SNAPSHOT_READY,
 			"ClientInfoManager",
 			self.ProcessSnapshotWrites)
 		if err != nil {
@@ -231,16 +252,16 @@ func (self *ClientInfoManager) Start(
 	// update. Minions listen for this event and immediately update
 	// the has_tasks field in the client record.
 	err := journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"Server.Internal.ClientTasks",
+		artifacts.CLIENT_INFO_TASK,
 		"ClientInfoManager",
 		self.ProcessNotification)
 	if err != nil {
 		return err
 	}
 
-	// Watch for flow completions and unset the inflight status.
+	// Watch for flow completions and unset the in-flight status.
 	err = journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"System.Flow.Completion",
+		artifacts.FLOW_COMPLETION,
 		"ClientInfoManager",
 		self.ProcessFlowCompletion)
 	if err != nil {
@@ -250,7 +271,7 @@ func (self *ClientInfoManager) Start(
 	// This is a queue that synchronizes all nodes on which flows are
 	// in flight.
 	err = journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"Server.Internal.ClientScheduled",
+		artifacts.CLIENT_INFO_SCHEDULED,
 		"ClientInfoManager",
 		self.ProcessInFlightNotifications)
 	if err != nil {
@@ -259,7 +280,7 @@ func (self *ClientInfoManager) Start(
 
 	// The master will be informed when new clients appear.
 	err = journal.WatchQueueWithCB(ctx, config_obj, wg,
-		"Server.Internal.ClientPing",
+		artifacts.CLIENT_INFO_SYNC,
 		"ClientInfoManager",
 		self.ProcessPing)
 	if err != nil {
@@ -282,28 +303,21 @@ func (self *ClientInfoManager) ProcessFlowCompletion(
 		return nil
 	}
 
-	err := self.storage.Modify(ctx, client_id,
+	// The flow is completed, remove it from the flow completion.
+	return self.storage.Modify(ctx, config_obj, client_id,
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
-			if client_info == nil || client_info.InFlightFlows == nil {
-				return nil, utils.NotFoundError
+			if client_info == nil {
+				return nil, fmt.Errorf("Client %v: %w", client_id, utils.NotFoundError)
 			}
 
-			delete(client_info.InFlightFlows, flow_id)
+			if client_info.InFlightFlows != nil {
+				delete(client_info.InFlightFlows, flow_id)
+			}
 			return client_info, nil
 		})
-	if err != nil {
-		return err
-	}
-
-	notifier, err := services.GetNotifier(self.config_obj)
-	if err != nil {
-		return err
-	}
-
-	return notifier.NotifyListener(
-		ctx, self.config_obj, client_id, "ClientInfoManager")
 }
 
+// Messages from other nodes to update the client info record.
 func (self *ClientInfoManager) ProcessInFlightNotifications(
 	ctx context.Context, config_obj *config_proto.Config,
 	row *ordereddict.Dict) error {
@@ -314,17 +328,17 @@ func (self *ClientInfoManager) ProcessInFlightNotifications(
 	}
 
 	remove, pres := row.GetBool("ClearFlows")
-	// Just clear all the flows - we dont need to track
+	// Just clear all the flows - we don't need to track
 	// them. This only happens when communicating with older
 	// clients that do not support it.
 	if remove || pres {
-		return self.storage.Modify(ctx, client_id,
+		return self.storage.Modify(ctx, config_obj, client_id,
 			func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 				if client_info == nil {
 					return nil, utils.NotFoundError
 				}
 
-				// Just clear all the flows - we dont need to track
+				// Just clear all the flows - we don't need to track
 				// them. This only happens when communicating with older
 				// clients that do not support it.
 				client_info.InFlightFlows = nil
@@ -333,7 +347,7 @@ func (self *ClientInfoManager) ProcessInFlightNotifications(
 	}
 
 	in_flight, _ := row.GetStrings("InFlight")
-	return self.storage.Modify(ctx, client_id,
+	return self.storage.Modify(ctx, config_obj, client_id,
 		func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
 			if client_info == nil {
 				return nil, utils.NotFoundError
@@ -426,7 +440,7 @@ func (self *ClientInfoManager) MutationSync(
 					ordereddict.NewDict().
 						Set("Mutation", self.mutation_manager.GetMutation()).
 						Set("From", self.uuid),
-					"Server.Internal.ClientPing")
+					artifacts.CLIENT_INFO_SYNC)
 			}
 		}
 	}
@@ -458,10 +472,13 @@ func (self *ClientInfoManager) ProcessPing(
 			if !pres {
 				continue
 			}
-			record, err := self.storage.GetRecord(client_id)
-			if err == nil {
-				record.Ping = uint64(value)
-				self.storage.SetRecord(record)
+			err := self.storage.Modify(ctx, self.config_obj, client_id,
+				func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
+					client_info.Ping = uint64(value)
+					return client_info, nil
+				})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -473,10 +490,13 @@ func (self *ClientInfoManager) ProcessPing(
 			if !pres {
 				continue
 			}
-			record, err := self.storage.GetRecord(client_id)
-			if err == nil {
-				record.IpAddress = value
-				self.storage.SetRecord(record)
+			err := self.storage.Modify(ctx, self.config_obj, client_id,
+				func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
+					client_info.IpAddress = value
+					return client_info, nil
+				})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -489,10 +509,13 @@ func (self *ClientInfoManager) ProcessPing(
 				continue
 			}
 
-			record, err := self.storage.GetRecord(client_id)
-			if err == nil {
-				record.LastHuntTimestamp = uint64(value)
-				self.storage.SetRecord(record)
+			err := self.storage.Modify(ctx, self.config_obj, client_id,
+				func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
+					client_info.LastHuntTimestamp = uint64(value)
+					return client_info, nil
+				})
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -505,10 +528,14 @@ func (self *ClientInfoManager) ProcessPing(
 				continue
 			}
 
-			record, err := self.storage.GetRecord(client_id)
-			if err == nil {
-				record.LastEventTableVersion = uint64(value)
-				self.storage.SetRecord(record)
+			err := self.storage.Modify(ctx, self.config_obj, client_id,
+				func(client_info *services.ClientInfo) (*services.ClientInfo, error) {
+					client_info.LastEventTableVersion = uint64(value)
+					return client_info, nil
+				})
+
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -520,14 +547,15 @@ func (self *ClientInfoManager) Modify(
 	ctx context.Context, client_id string,
 	modifier func(client_info *services.ClientInfo) (
 		*services.ClientInfo, error)) error {
-	return self.storage.Modify(ctx, client_id, modifier)
+	return self.storage.Modify(ctx, self.config_obj, client_id, modifier)
 }
 
 func (self *ClientInfoManager) Get(
 	ctx context.Context, client_id string) (*services.ClientInfo, error) {
 	record, err := self.storage.GetRecord(client_id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Client ID %v not known in this org: %w",
+			client_id, err)
 	}
 
 	// If the client is presently connected, then update the current
@@ -537,15 +565,18 @@ func (self *ClientInfoManager) Get(
 	if err == nil {
 		if notifier.IsClientDirectlyConnected(client_id) {
 			record.Ping = uint64(utils.GetTime().Now().UnixNano() / 1000)
-			self.storage.SetRecord(record)
+			err := self.storage.SetRecord(self.config_obj, record)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	return &services.ClientInfo{*record}, nil
+	return &services.ClientInfo{ClientInfo: record}, nil
 }
 
 func (self *ClientInfoManager) Remove(ctx context.Context, client_id string) {
-	self.storage.Remove(client_id)
+	self.storage.Remove(self.config_obj, client_id)
 }
 
 func (self *ClientInfoManager) Set(
@@ -555,13 +586,22 @@ func (self *ClientInfoManager) Set(
 		return invalidClientError
 	}
 
-	return self.storage.SetRecord(&client_info.ClientInfo)
+	err := self.ValidateClientId(client_info.ClientId)
+	if err != nil {
+		return err
+	}
+
+	return self.storage.SetRecord(self.config_obj, client_info.ClientInfo)
 }
 
 func NewClientInfoManager(
 	ctx context.Context,
 	wg *sync.WaitGroup,
-	config_obj *config_proto.Config) (*ClientInfoManager, error) {
+	config_obj *config_proto.Config) (services.ClientInfoManager, error) {
+
+	if config_obj.Datastore == nil {
+		return &DummyClientInfoManager{}, nil
+	}
 
 	// Calculate a unique id for each service.
 	service := &ClientInfoManager{
@@ -569,7 +609,7 @@ func NewClientInfoManager(
 		uuid:             utils.GetGUID(),
 		mutation_manager: NewMutationManager(),
 	}
-	service.storage = NewStorage(service.uuid)
+	service.storage = NewStorage(service.uuid, config_obj)
 
 	err := service.storage.LoadFromSnapshot(ctx, config_obj)
 	if err != nil {
@@ -590,12 +630,25 @@ func NewClientInfoManager(
 	go func() {
 		defer wg.Done()
 
+		<-ctx.Done()
+
 		// When we shut down make sure to save the snapshot.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		subctx, cancel := utils.WithTimeoutCause(
+			context.Background(), 100*time.Second,
+			errors.New("ClientInfoService: deadline reached saving snapshot"))
 		defer cancel()
 
-		service.storage.SaveSnapshot(ctx, config_obj)
+		err := service.storage.SaveSnapshot(subctx, config_obj, SYNC_UPDATE)
+		if err != nil {
+			logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+			logger.Error("ClientInfoService: SaveSnapshot: %v", err)
+		}
 	}()
+
+	err = service.Start(ctx, config_obj, wg)
+	if err != nil {
+		return nil, err
+	}
 
 	return service, nil
 }

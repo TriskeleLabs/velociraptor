@@ -1,6 +1,6 @@
 /*
 Velociraptor - Dig Deeper
-Copyright (C) 2019-2024 Rapid7 Inc.
+Copyright (C) 2019-2025 Rapid7 Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -18,12 +18,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package logging
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -55,8 +55,9 @@ var (
 	Audit = "VelociraptorAudit"
 
 	// Lock for log manager.
-	mu                   sync.Mutex
-	Manager              *LogManager
+	mu      sync.Mutex
+	manager *LogManager
+
 	disable_log_to_files bool
 	node_name            = ""
 
@@ -69,6 +70,13 @@ var (
 	closing_tag_regex = regexp.MustCompile("</>")
 )
 
+func Manager() *LogManager {
+	mu.Lock()
+	defer mu.Unlock()
+
+	return manager
+}
+
 func SetNodeName(name string) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -77,7 +85,7 @@ func SetNodeName(name string) {
 }
 
 // Turn off logging to files from now on. This is needed for commands
-// that manipulate the config file and we dont want to attempt to
+// that manipulate the config file and we don't want to attempt to
 // write to random log files.
 func DisableLogging() {
 	mu.Lock()
@@ -86,8 +94,7 @@ func DisableLogging() {
 }
 
 func InitLogging(config_obj *config_proto.Config) error {
-	mu.Lock()
-	Manager = &LogManager{
+	new_manager := &LogManager{
 		contexts: make(map[*string]*LogContext),
 	}
 
@@ -95,27 +102,30 @@ func InitLogging(config_obj *config_proto.Config) error {
 		&GenericComponent, &FrontendComponent, &ClientComponent,
 		&GUIComponent, &ToolComponent, &APICmponent, &Audit}
 
+	logging_config := getLoggingConfig(config_obj)
+
 	// User asked for all components to go in the same log.
-	if config_obj.Logging != nil &&
-		!config_obj.Logging.SeparateLogsPerComponent {
+	if logging_config != nil &&
+		!logging_config.SeparateLogsPerComponent {
 		components = []*string{&GenericComponent}
 	}
 
 	for _, component := range components {
-		logger, err := Manager.makeNewComponent(config_obj, component)
+		logger, err := new_manager.makeNewComponent(config_obj, component)
 		if err != nil {
-			mu.Unlock()
 			return err
 		}
-		Manager.contexts[component] = logger
+		new_manager.contexts[component] = logger
 	}
 
-	err := maybeAddRemoteSyslog(config_obj, Manager)
-	mu.Unlock()
-
+	err := maybeAddRemoteSyslog(context.Background(), config_obj, new_manager)
 	if err != nil {
 		return err
 	}
+
+	mu.Lock()
+	manager = new_manager
+	mu.Unlock()
 
 	FlushPrelogs(config_obj)
 
@@ -159,7 +169,7 @@ func FlushPrelogs(config_obj *config_proto.Config) {
 	memory_log_mu.Unlock()
 
 	for _, msg := range lprelogs {
-		logger.Info(msg)
+		logger.Info("%s", msg)
 	}
 	prelogs = make([]string, 0)
 }
@@ -193,13 +203,23 @@ func (self *LogContext) AddListener(c chan string) func() {
 	}
 }
 
-func (self *LogContext) forwardMessage(msg string) {
+func (self *LogContext) forwardMessage(level, msg string) {
+	// Avoid deadlocks by taking a copy
 	self.mu.Lock()
-	defer self.mu.Unlock()
-
+	var listeners []chan string
 	for _, c := range self.listeners {
+		listeners = append(listeners, c)
+	}
+	self.mu.Unlock()
+
+	for _, c := range listeners {
+		msg = strings.TrimSpace(msg)
+
+		line := json.Format(`{"time":%q,"level":%q,"msg":%q}`,
+			utils.GetTime().Now().UTC().Format(time.RFC3339), level, msg)
+
 		select {
-		case c <- msg:
+		case c <- line:
 		default:
 		}
 	}
@@ -210,7 +230,7 @@ func (self *LogContext) Debug(format string, v ...interface{}) {
 	if self.Logger != nil {
 		self.Logger.Debug(msg)
 	}
-	self.forwardMessage(msg)
+	self.forwardMessage(DEBUG, msg)
 }
 
 func (self *LogContext) Info(format string, v ...interface{}) {
@@ -218,7 +238,7 @@ func (self *LogContext) Info(format string, v ...interface{}) {
 	if self.Logger != nil {
 		self.Logger.Info(msg)
 	}
-	self.forwardMessage(msg)
+	self.forwardMessage(INFO, msg)
 }
 
 func (self *LogContext) Warn(format string, v ...interface{}) {
@@ -226,7 +246,7 @@ func (self *LogContext) Warn(format string, v ...interface{}) {
 	if self.Logger != nil {
 		self.Logger.Warn(msg)
 	}
-	self.forwardMessage(msg)
+	self.forwardMessage(WARN, msg)
 }
 
 func (self *LogContext) Error(format string, v ...interface{}) {
@@ -234,13 +254,13 @@ func (self *LogContext) Error(format string, v ...interface{}) {
 	if self.Logger != nil {
 		self.Logger.Error(msg)
 	}
-	self.forwardMessage(msg)
+	self.forwardMessage(ERROR, msg)
 }
 
 func (self *LogContext) IsEnabled(level string) bool {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	ok, _ := self.enabled[level]
+	ok := self.enabled[level]
 	return ok
 }
 
@@ -264,6 +284,16 @@ type LogManager struct {
 	contexts map[*string]*LogContext
 }
 
+func (self *LogManager) AddHook(hook logrus.Hook, component *string) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	v, pres := self.contexts[component]
+	if pres {
+		v.Logger.Hooks.Add(hook)
+	}
+}
+
 // Get the logger from cache - creating it if it needs to.
 func (self *LogManager) GetLogger(
 	config_obj *config_proto.Config,
@@ -275,8 +305,9 @@ func (self *LogManager) GetLogger(
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	if config_obj.Logging != nil &&
-		!config_obj.Logging.SeparateLogsPerComponent {
+	logging_config := getLoggingConfig(config_obj)
+	if logging_config != nil &&
+		!logging_config.SeparateLogsPerComponent {
 		component = &GenericComponent
 	}
 
@@ -304,8 +335,11 @@ func (self *LogManager) Reset() {
 }
 
 func Reset() {
-	if Manager != nil {
-		Manager.Reset()
+	mu.Lock()
+	defer mu.Unlock()
+
+	if manager != nil {
+		manager.Reset()
 	}
 }
 
@@ -314,10 +348,12 @@ func getRotator(
 	rotator_config *config_proto.LoggingRetentionConfig,
 	base_path string) (io.Writer, error, bool) {
 
+	logging_config := getLoggingConfig(config_obj)
+
 	if rotator_config == nil {
 		rotator_config = &config_proto.LoggingRetentionConfig{
-			RotationTime: config_obj.Logging.RotationTime,
-			MaxAge:       config_obj.Logging.MaxAge,
+			RotationTime: logging_config.RotationTime,
+			MaxAge:       logging_config.MaxAge,
 		}
 	}
 
@@ -351,7 +387,7 @@ func getRotator(
 	// write to the file.
 	now := utils.GetTime().Now().UTC()
 	_, err = result.Write([]byte(json.Format(
-		"{\"level\": \"info\", \"msg\": \"Starting...\", \"time\": %q}\n", now)))
+		`{"level": "info", "msg": "Starting...", "time": %q}`+"\n", now)))
 	return result, err, true
 }
 
@@ -364,26 +400,31 @@ func (self *LogManager) makeNewComponent(
 	Log := logrus.New()
 	Log.Out = newInMemoryLogWriter()
 	Log.Level = logrus.DebugLevel
+	Log.Formatter = &logrus.JSONFormatter{
+		DisableHTMLEscape: true,
+	}
+
+	logging_config := getLoggingConfig(config_obj)
 
 	if !disable_log_to_files &&
 		config_obj != nil &&
-		config_obj.Logging != nil &&
-		config_obj.Logging.OutputDirectory != "" {
+		logging_config != nil &&
+		logging_config.OutputDirectory != "" {
 
-		output_directory := utils.ExpandEnv(config_obj.Logging.OutputDirectory)
-		base_directory := filepath.Join(output_directory, node_name)
+		output_directory := utils.ExpandEnv(logging_config.OutputDirectory)
+		base_directory := utils.Join(output_directory, node_name)
 		err := os.MkdirAll(base_directory, 0700)
 		if err != nil {
 			return nil, errors.New("Unable to create logging directory.")
 		}
 
-		base_filename := filepath.Join(base_directory, *component)
+		base_filename := utils.Join(base_directory, *component)
 		pathMap := lfshook.WriterMap{}
 
 		Prelog("Initializing logging for %v\n", base_filename)
 
 		rotator, err, enable := getRotator(
-			config_obj, config_obj.Logging.Debug,
+			config_obj, logging_config.Debug,
 			base_filename+"_debug.log")
 		if err != nil {
 			return nil, err
@@ -392,7 +433,7 @@ func (self *LogManager) makeNewComponent(
 		enabled[DEBUG] = enable
 
 		rotator, err, enable = getRotator(
-			config_obj, config_obj.Logging.Info,
+			config_obj, logging_config.Info,
 			base_filename+"_info.log")
 		if err != nil {
 			return nil, err
@@ -401,7 +442,7 @@ func (self *LogManager) makeNewComponent(
 		enabled[INFO] = enable
 
 		rotator, err, enable = getRotator(
-			config_obj, config_obj.Logging.Error,
+			config_obj, logging_config.Error,
 			base_filename+"_error.log")
 		if err != nil {
 			return nil, err
@@ -456,7 +497,7 @@ func AddLogFile(filename string) error {
 		logrus.WarnLevel:  fd,
 	}
 
-	for _, log := range Manager.contexts {
+	for _, log := range Manager().contexts {
 		log.Hooks.Add(lfshook.NewHook(
 			writer_map, &JSONFormatter{&logrus.JSONFormatter{
 				DisableHTMLEscape: true,
@@ -502,17 +543,16 @@ func NewPlainLogger(
 }
 
 func GetLogger(config_obj *config_proto.Config, component *string) *LogContext {
-	mu.Lock()
-	lManager := Manager
-	mu.Unlock()
-
+	lManager := Manager()
 	if lManager == nil {
 		err := InitLogging(config_obj)
 		if err != nil {
 			panic(err)
 		}
+		lManager = Manager()
+
 	}
-	return Manager.GetLogger(config_obj, component)
+	return lManager.GetLogger(config_obj, component)
 }
 
 type stackTracer interface {
@@ -550,4 +590,12 @@ func (self inMemoryLogWriter) Write(p []byte) (n int, err error) {
 
 func newInMemoryLogWriter() *inMemoryLogWriter {
 	return &inMemoryLogWriter{}
+}
+
+func getLoggingConfig(config_obj *config_proto.Config) *config_proto.LoggingConfig {
+	logging_config := config_obj.Logging
+	if logging_config == nil && config_obj.Client != nil {
+		logging_config = config_obj.Client.Logging
+	}
+	return logging_config
 }

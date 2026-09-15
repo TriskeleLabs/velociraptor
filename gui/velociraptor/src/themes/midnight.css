@@ -36,7 +36,7 @@
   --accent-color: red;
   --color-accent: 135, 184, 221;
   --color-accent-complement: blue;
-  --color-accent-100: #ff0000;
+  --color-accent-100: #ffffffff;
   --color-accent-75: #BF0000;
   --color-accent-50: #800000;
   --color-accent-25: #400000;
@@ -68,9 +68,7 @@
   --color-resizer-hover: var(--color-accent-100);
   --color-scrollbar-track: var(--color-canvas-background);
   --color-scrollbar-thumb: var(--color-accent-50);
-  --color-scrollbar-thumb-hover: var(--color-accent-100);
-  --color-scrollbar-main: var(--color-accent-25);
-  --color-scrollbar-background: rgba(var(--color-accent), 0.1);
+  --color-scrollbar-thumb-hover: var(--accent-color);
 
   --color-btn-border: #850000;
   --color-btn-default-border: #850000;
@@ -112,11 +110,15 @@
 
   --color-vfs-files-timestomped: #ed5d40;
   --color-calendar-background: var(--color-canvas-background);
+  --hex-highlight-background: var(--color-table-row-selected-text);
+  --hex-highlight-foreground: var(--color-canvas-background);
   --color-level-error: #ff0000;
 
   --color-danger-emphasis: #dd4b3920;
 
   --invalid-form-control-error: #ff7f00;
+
+
 }
 
 .midnight img.velo-logo {
@@ -160,7 +162,8 @@ body.midnight {
 
 .midnight code {
   font-family: var(--font-family-monospace);
-  color: var(--color-accent-100);
+  color: var(--color-sidebar-inactive-foreground-hover);
+  background-color: black;
   font-size: var(--font-size-base);
   letter-spacing: 0.4px;
 }
@@ -550,13 +553,14 @@ body.midnight {
   border: none;
 }
 
-.midnight .table-hover tbody tr:hover {
+.midnight .paged-table.table tbody tr:hover td {
   background: var(--color-table-row-hover);
-  color: unset;
+  color: var(--color-foreground);
 }
 
-.midnight .table tbody tr.row-selected,
-.midnight .table tbody tr.row_selected td {
+.midnight .paged-table.table tbody tr.row-selected,
+.midnight .paged-table.table tbody tr.row-selected:hover,
+.midnight .paged-table.table tbody tr.row-selected td {
   background: var(--color-table-row-selected);
   color: var(--color-table-row-selected-text);
   font-weight: 700;
@@ -912,12 +916,13 @@ body.midnight {
 }
 
 .midnight .report-viewer pre {
-  border-radius: 0;
-  border: 0.5px solid var(--color-btn-border);
-  padding-top: 2px;
-  padding-bottom: 2px;
-  padding-left: 4px;
-  padding-right: 4px;
+    border-radius: 0;
+    background: rgba(255,255,255,.05);
+    border: 0.5px solid var(--color-btn-border);
+    padding-top: 2px;
+    padding-bottom: 2px;
+    padding-left: 4px;
+    padding-right: 4px;
 }
 
 .midnight .report-viewer code {
@@ -953,6 +958,16 @@ body.midnight {
   color: #FFD500;
 }
 
+/* Offline docs search */
+
+.midnight .hit-body.accordion-body :not(pre) > code {
+  background: #800000;
+  border-radius: 0;
+  border: none;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
 /* Modal dialogs */
 .midnight .modal-content {
   background: var(--color-canvas-background);
@@ -971,15 +986,16 @@ body.midnight {
   background: #200000;
 }
 
-.midnight .modal-header .close {
-  color: var(--color-foreground);
-  opacity: 1;
+.midnight .modal-header .btn-close {
+  color: var(--color-foreground-dimmed);
+  opacity: 0.8;
+  filter: brightness(0) saturate(100%) invert(16%) sepia(62%) saturate(7115%) hue-rotate(358deg) brightness(96%) contrast(122%);
   text-shadow: none;
   outline: none;
 }
 
-.midnight .modal-header .close:hover,
-.midnight .modal-header .close:focus {
+.midnight .modal-header .btn-close:hover,
+.midnight .modal-header .btn-close:focus {
   color: var(--color-foreground);
   opacity: 1;
   text-shadow: none;
@@ -1113,72 +1129,6 @@ body.midnight {
   font-size: var(--font-size-base);
 }
 
-/* Datepicker */
-
-.midnight .react-datetime-picker__wrapper {
-  border: 1px solid var(--color-btn-border);
-  color: var(--color-foreground);
-}
-
-.midnight .react-datepicker,
-.midnight .react-datetime-picker__calendar .react-calendar,
-.midnight .react-datetime-picker {
-  font-family: var(--font-family-sans-serif);
-  background: var(--color-canvas-background);
-  color: var(--color-foreground);
-  border: 1px solid var(--color-btn-border);
-  z-index: 10;
-}
-
-.midnight .react-datetime-picker__inputGroup__input,
-.midnight .react-datetime-picker__button {
-  filter: invert(10%) sepia(75%) saturate(6094%) hue-rotate(359deg) brightness(133%) contrast(118%);
-  stroke: var(--color-foreground) !important;
-}
-
-.midnight .react-datetime-picker__button:enabled:hover .react-datetime-picker__button__icon,
-.midnight .react-datetime-picker__button:enabled:focus .react-datetime-picker__button__icon,
-.midnight .react-datetime-picker__button:hover {
-  stroke: #FFD500 !important;
-  filter: none;
-}
-
-.midnight .react-calendar__navigation button,
-.midnight .react-calendar__tile {
-  color: var(--color-foreground);
-}
-
-.midnight .react-calendar__navigation button:enabled:hover {
-  background-color: var(--color-accent-25);
-  border: none;
-}
-
-.midnight .react-calendar__navigation button:disabled,
-.midnight .react-calendar__navigation button:enabled:focus {
-  background-color: unset;
-}
-
-.midnight .react-calendar__tile:enabled:hover {
-  background-color: var(--color-accent-25);
-  border: none;
-}
-
-.midnight .react-calendar .react-calendar__tile--now {
-  background-color: var(--color-accent-50);
-  color: black;
-}
-
-.midnight .react-calendar .react-calendar__tile--active,
-.midnight .react-calendar .react-calendar__tile--active:hover {
-  background-color: var(--color-accent-100);
-  font-weight: 700;
-  color: #FFD500;
-}
-
-.midnight .react-calendar__month-view__days__day--neighboringMonth {
-  color: darkorange;
-}
-
 /* Footer */
 .midnight .app-footer.fixed-bottom {
   background: var(--color-footer-background);
@@ -1264,14 +1214,8 @@ body.midnight {
   border: 1px solid var(--color-btn-border);
 }
 
-.midnight .btn-tooltip[data-tooltip]::before {
-  border-radius: 0;
-  color: var(--color-foreground);
-}
-
 .midnight .tooltip.show {
   background: var(--color-canvas-background);
-  border: 1px solid var(--color-btn-border);
   color: var(--color-foreground);
   font-family: var(--font-family-sans-serif);
   font-size: var(--font-size-base);
@@ -1279,9 +1223,21 @@ body.midnight {
 
 .midnight .tooltip-inner {
   color: #FFD500;
+  background-color: var(--color-tooltip-background);
   font-family: var(--font-family-sans-serif);
   font-size: var(--font-size-base);
   font-weight: 700;
+}
+
+.midnight .tooltip.bs-tooltip-top {
+  font-family: var(--font-family-sans-serif);
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  color: var(--color-foreground);
+}
+
+.midnight .bs-tooltip-top .tooltip-arrow::before {
+  border-top-color: var(--color-tooltip-background);
 }
 
 .midnight .file-hex-view td,

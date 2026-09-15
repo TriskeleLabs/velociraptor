@@ -6,8 +6,11 @@ import (
 	"github.com/Velocidex/ordereddict"
 	"github.com/sirupsen/logrus"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths/artifact_modes"
 	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type AuditManager struct{}
@@ -24,14 +27,26 @@ func (self *AuditManager) LogAudit(
 		Set("details", details)
 
 	logger := logging.GetLogger(config_obj, &logging.Audit)
-	logger.WithFields(logrus.Fields(*record.ToDict())).Info(operation)
+	logger.WithFields(logrus.Fields(record.ToMap())).Info(operation)
+
+	// Only forward the event if running on the server.
+	if utils.RunningOnClient(config_obj) {
+		return nil
+	}
 
 	journal, err := services.GetJournal(config_obj)
 	if err != nil {
 		return err
 	}
 
-	journal.PushRowsToArtifactAsync(
-		ctx, config_obj, record, "Server.Audit.Logs")
-	return nil
+	// If an event is important enough to be audit logged we need to
+	// make sure to write it synchronously.
+	return journal.PushRowsToArtifact(
+		ctx, config_obj, []*ordereddict.Dict{record},
+		services.JournalOptions{
+			ArtifactName: "Server.Audit.Logs",
+			ArtifactType: artifact_modes.MODE_SERVER_EVENT,
+			ClientId:     constants.VELOCIRAPTOR_SERVER_CLIENT_ID,
+			Username:     principal,
+		})
 }
